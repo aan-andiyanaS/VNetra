@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    tools:context=".ui.CameraStreamActivity">
+
+    <!-- Camera Frame -->
+    <ImageView
+        android:id="@+id/ivCameraFrame"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitCenter"
+        android:contentDescription="Camera Stream" />
+
+    <!-- Overlay: Status + Controls (bottom) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:background="#80000000">
+
+        <ProgressBar
+            android:id="@+id/progressStream"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/tvStreamStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Connecting..."
+            android:textColor="#FFFFFF"
+            android:textAlignment="center"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/tvError"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#FF5252"
+            android:textAlignment="center"
+            android:textSize="14sp"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+
+        <!-- Baris tombol: Reconnect + Akhiri -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:orientation="horizontal"
+            android:layout_marginTop="8dp">
+
+            <Button
+                android:id="@+id/btnReconnect"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Reconnect"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/btnAkhiri"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Akhiri"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#D32F2F" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+    <!-- Badge koneksi + Tombol Akhiri tersembunyi (geser untuk tampilkan)
+         Container ini bisa digeser ke kiri untuk memunculkan btnAkhiriBadge -->
+    <FrameLayout
+        android:id="@+id/badgeSwipeContainer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="12dp">
+
+        <!-- Tombol Akhiri (tersembunyi di balik badge, muncul saat digeser) -->
+        <Button
+            android:id="@+id/btnAkhiriBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical|end"
+            android:text="Akhiri"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp"
+            android:backgroundTint="#D32F2F"
+            android:paddingLeft="12dp"
+            android:paddingRight="12dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:visibility="gone" />
+
+        <!-- Badge koneksi utama -->
+        <TextView
+            android:id="@+id/tvConnectedBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingLeft="10dp"
+            android:paddingRight="10dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:text="&#9679; Menerima data dari ESP32-S3  ‹ geser"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp"
+            android:background="@drawable/badge_connected_bg"
+            android:visibility="gone" />
+
+    </FrameLayout>
+
+</FrameLayout>
