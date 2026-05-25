@@ -67,6 +67,8 @@ class CameraStreamService : Service() {
         private const val NOTIF_ID_ALERT    = 1002
         private const val NOTIF_ID_STOPPED  = 1003
         private const val FRAME_TYPE_JPEG   = 0x01.toByte()
+        private const val FRAME_TYPE_IMU    = 0x02.toByte()
+        private const val FRAME_TYPE_TOF    = 0x04.toByte()
         private const val FRAME_HEADER_SZ   = 9
         private const val RECONNECT_BASE_MS = 1_000L
         private const val RECONNECT_MAX_MS  = 8_000L
@@ -112,6 +114,20 @@ class CameraStreamService : Service() {
         onBufferOverflow    = BufferOverflow.DROP_OLDEST
     )
     val frameFlow: SharedFlow<ByteArray> = _frameFlow
+
+    private val _imuFlow = MutableSharedFlow<FloatArray>(
+        replay              = 0,
+        extraBufferCapacity = 2,
+        onBufferOverflow    = BufferOverflow.DROP_OLDEST
+    )
+    val imuFlow: SharedFlow<FloatArray> = _imuFlow
+
+    private val _tofFlow = MutableSharedFlow<IntArray>(
+        replay              = 0,
+        extraBufferCapacity = 2,
+        onBufferOverflow    = BufferOverflow.DROP_OLDEST
+    )
+    val tofFlow: SharedFlow<IntArray> = _tofFlow
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -224,10 +240,32 @@ class CameraStreamService : Service() {
                             if (stopped) return
                             runCatching {
                                 val raw = bytes.toByteArray()
-                                if (raw.size < FRAME_HEADER_SZ + 1 || raw[0] != FRAME_TYPE_JPEG) return
+                                if (raw.size < FRAME_HEADER_SZ) return
+                                val type = raw[0]
+                                val payload = raw.copyOfRange(FRAME_HEADER_SZ, raw.size)
+                                
                                 serviceScope.launch {
                                     runCatching {
-                                        _frameFlow.emit(raw.copyOfRange(FRAME_HEADER_SZ, raw.size))
+                                        when (type) {
+                                            FRAME_TYPE_JPEG -> _frameFlow.emit(payload)
+                                            FRAME_TYPE_IMU -> {
+                                                if (payload.size >= 24) {
+                                                    val floats = FloatArray(6)
+                                                    java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(floats)
+                                                    _imuFlow.emit(floats)
+                                                }
+                                            }
+                                            FRAME_TYPE_TOF -> {
+                                                if (payload.size >= 128) {
+                                                    val ints = IntArray(64)
+                                                    val shortBuffer = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+                                                    for (i in 0 until 64) {
+                                                        ints[i] = shortBuffer.get(i).toInt()
+                                                    }
+                                                    _tofFlow.emit(ints)
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }

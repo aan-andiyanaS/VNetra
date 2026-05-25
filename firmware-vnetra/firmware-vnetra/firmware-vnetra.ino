@@ -51,6 +51,13 @@
 #include <Adafruit_NeoPixel.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <BasicLinearAlgebra.h>
+#include <SparkFun_VL53L5CX_Library.h>
+using namespace BLA;
+
 
 // ======== KAMERA PIN — ESP32-S3 WROOM N16R8 ========
 #define PWDN_GPIO_NUM   -1
@@ -75,6 +82,27 @@
 #define NUM_LEDS        1
 #define LED_BRIGHTNESS  50
 #define BLINK_INTERVAL  500
+
+// ======== SENSOR PIN & CONFIG ========
+#define SDA_PIN 1
+#define SCL_PIN 2
+#define LPN_PIN 14 // VL53L5CX enable pin
+
+SemaphoreHandle_t i2c_mutex;
+Adafruit_MPU6050 mpu;
+SparkFun_VL53L5CX myImager;
+VL53L5CX_ResultsData measurementData;
+
+// --- EKF Variables ---
+const float g_const = 9.81f;
+const float dt_min = 0.01f;
+unsigned long last_ts_esp = 0;
+BLA::Matrix<7, 1> x_ekf; 
+BLA::Matrix<7, 7> P; 
+BLA::Matrix<7, 7> Q; 
+BLA::Matrix<3, 3> R; 
+TaskHandle_t EKF_TaskHandle;
+TaskHandle_t TOF_TaskHandle;
 
 // ======== RESET BUTTON — GPIO 0 (BOOT) ========
 #define RESET_BUTTON_PIN 0
@@ -580,6 +608,140 @@ void initBLE() {
     Serial.println("[BLE] Advertising as ESP32S3-WiFi-Config");
 }
 
+// ======== SENSOR TASKS ========
+void initEKFState(float ax, float ay, float az) {
+  float theta0 = atan2(ay, sqrt(ax*ax + az*az));
+  float phi0   = atan2(-ax, az);
+  float cp = cos(theta0 / 2.0f); float sp = sin(theta0 / 2.0f);
+  float cr = cos(phi0 / 2.0f);   float sr = sin(phi0 / 2.0f);
+  x_ekf(0) = cr * cp; x_ekf(1) = sr * cp; x_ekf(2) = cr * sp; x_ekf(3) = -sr * sp;
+  x_ekf(4) = 0; x_ekf(5) = 0; x_ekf(6) = 0;
+  P.Fill(0); for(int i=0; i<7; i++) P(i,i) = 1.0f;
+  Q.Fill(0); for(int i=0; i<4; i++) Q(i,i) = 1e-4f; for(int i=4; i<7; i++) Q(i,i) = 1e-3f;
+  R.Fill(0); for(int i=0; i<3; i++) R(i,i) = 0.0025f; 
+}
+
+void IMU_Task(void *pvParameters) {
+  for (;;) {
+    unsigned long current_ts_esp = millis();
+    float dt = (current_ts_esp - last_ts_esp) / 1000.0f;
+    dt = max(dt, dt_min);
+    if (dt < dt_min) { vTaskDelay(1); continue; }
+
+    sensors_event_t a, g, temp;
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
+      mpu.getEvent(&a, &g, &temp);
+      xSemaphoreGive(i2c_mutex);
+    }
+
+    float ax = a.acceleration.x; float ay = a.acceleration.y; float az = a.acceleration.z;
+    float wx = g.gyro.x;         float wy = g.gyro.y;         float wz = g.gyro.z;
+
+    float wx_corr = wx - x_ekf(4); float wy_corr = wy - x_ekf(5); float wz_corr = wz - x_ekf(6);
+    float qw = x_ekf(0), qx = x_ekf(1), qy = x_ekf(2), qz = x_ekf(3);
+
+    x_ekf(0) += 0.5f * dt * (-qx*wx_corr - qy*wy_corr - qz*wz_corr);
+    x_ekf(1) += 0.5f * dt * ( qw*wx_corr - qz*wy_corr + qy*wz_corr);
+    x_ekf(2) += 0.5f * dt * ( qz*wx_corr + qw*wy_corr - qx*wz_corr);
+    x_ekf(3) += 0.5f * dt * (-qy*wx_corr + qx*wy_corr + qw*wz_corr);
+
+    float q_norm = sqrt(x_ekf(0)*x_ekf(0) + x_ekf(1)*x_ekf(1) + x_ekf(2)*x_ekf(2) + x_ekf(3)*x_ekf(3));
+    x_ekf(0)/=q_norm; x_ekf(1)/=q_norm; x_ekf(2)/=q_norm; x_ekf(3)/=q_norm;
+
+    BLA::Matrix<7, 7> F_mat; F_mat.Fill(0);
+    F_mat(0,0) = 1; F_mat(0,1) = -0.5f*dt*wx_corr; F_mat(0,2) = -0.5f*dt*wy_corr; F_mat(0,3) = -0.5f*dt*wz_corr;
+    F_mat(1,0) = 0.5f*dt*wx_corr; F_mat(1,1) = 1; F_mat(1,2) = 0.5f*dt*wz_corr; F_mat(1,3) = -0.5f*dt*wy_corr;
+    F_mat(2,0) = 0.5f*dt*wy_corr; F_mat(2,1) = -0.5f*dt*wz_corr; F_mat(2,2) = 1; F_mat(2,3) = 0.5f*dt*wx_corr;
+    F_mat(3,0) = 0.5f*dt*wz_corr; F_mat(3,1) = 0.5f*dt*wy_corr; F_mat(3,2) = -0.5f*dt*wx_corr; F_mat(3,3) = 1;
+    F_mat(0,4) =  0.5f*dt*qx; F_mat(0,5) =  0.5f*dt*qy; F_mat(0,6) =  0.5f*dt*qz;
+    F_mat(1,4) = -0.5f*dt*qw; F_mat(1,5) =  0.5f*dt*qz; F_mat(1,6) = -0.5f*dt*qy;
+    F_mat(2,4) = -0.5f*dt*qz; F_mat(2,5) = -0.5f*dt*qw; F_mat(2,6) =  0.5f*dt*qx;
+    F_mat(3,4) =  0.5f*dt*qy; F_mat(3,5) = -0.5f*dt*qx; F_mat(3,6) = -0.5f*dt*qw;
+    F_mat(4,4) = 1; F_mat(5,5) = 1; F_mat(6,6) = 1;
+
+    P = F_mat * P * ~F_mat + Q;
+
+    qw = x_ekf(0); qx = x_ekf(1); qy = x_ekf(2); qz = x_ekf(3);
+    BLA::Matrix<3, 1> hx;
+    hx(0) = g_const * 2.0f * (qx*qz - qw*qy);
+    hx(1) = g_const * 2.0f * (qw*qx + qy*qz);
+    hx(2) = g_const * (qw*qw - qx*qx - qy*qy + qz*qz);
+
+    BLA::Matrix<3, 1> z; z(0)=ax; z(1)=ay; z(2)=az;
+    BLA::Matrix<3, 1> y = z - hx;
+
+    BLA::Matrix<3, 7> H; H.Fill(0);
+    H(0,0) = -2*qy; H(0,1) =  2*qz; H(0,2) = -2*qw; H(0,3) =  2*qx;
+    H(1,0) =  2*qx; H(1,1) =  2*qw; H(1,2) =  2*qz; H(1,3) =  2*qy;
+    H(2,0) =  2*qw; H(2,1) = -2*qx; H(2,2) = -2*qy; H(2,3) =  2*qz;
+    H *= g_const;
+
+    BLA::Matrix<3, 3> S = H * P * ~H + R;
+    BLA::Matrix<7, 3> K = P * ~H * Inverse(S);
+
+    x_ekf += K * y;
+    BLA::Matrix<7, 7> I; I.Fill(0); for(int i=0; i<7; i++) I(i,i) = 1.0f;
+    P = (I - K * H) * P;
+
+    q_norm = sqrt(x_ekf(0)*x_ekf(0) + x_ekf(1)*x_ekf(1) + x_ekf(2)*x_ekf(2) + x_ekf(3)*x_ekf(3));
+    x_ekf(0)/=q_norm; x_ekf(1)/=q_norm; x_ekf(2)/=q_norm; x_ekf(3)/=q_norm;
+
+    qw = x_ekf(0); qx = x_ekf(1); qy = x_ekf(2); qz = x_ekf(3);
+    float theta = asin(2.0f * (qw*qy - qz*qx)) * RAD_TO_DEG;
+    float phi   = atan2(2.0f * (qw*qx + qy*qz), 1.0f - 2.0f * (qx*qx + qy*qy)) * RAD_TO_DEG;
+    float wx_corr_deg = (wx - x_ekf(4)) * RAD_TO_DEG;
+    float wy_corr_deg = (wy - x_ekf(5)) * RAD_TO_DEG;
+    float wz_corr_deg = (wz - x_ekf(6)) * RAD_TO_DEG;
+
+    float gx = g_const * 2.0f * (qx*qz - qw*qy);
+    float gy = g_const * 2.0f * (qw*qx + qy*qz);
+    float gz = g_const * (qw*qw - qx*qx - qy*qy + qz*qz);
+    float a_lin_mag = sqrt(pow(ax - gx, 2) + pow(ay - gy, 2) + pow(az - gz, 2));
+
+    last_ts_esp = current_ts_esp;
+
+    if (wsClientConnected && !powerSaveMode) {
+      uint8_t imu_buf[33]; 
+      uint64_t ts_us = esp_timer_get_time();
+      imu_buf[0] = FRAME_TYPE_IMU;
+      memcpy(imu_buf + 1, &ts_us, 8);
+      float payload[6] = {theta, phi, wx_corr_deg, wy_corr_deg, wz_corr_deg, a_lin_mag};
+      memcpy(imu_buf + 9, payload, 24);
+      ws.binaryAll(imu_buf, 33);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+void TOF_Task(void *pvParameters) {
+  for (;;) {
+    bool dataReady = false;
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
+      dataReady = myImager.isDataReady();
+      xSemaphoreGive(i2c_mutex);
+    }
+
+    if (dataReady) {
+      bool gotData = false;
+      if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
+        gotData = myImager.getRangingData(&measurementData);
+        xSemaphoreGive(i2c_mutex);
+      }
+
+      if (gotData && wsClientConnected && !powerSaveMode) {
+        uint8_t tof_buf[137]; 
+        uint64_t ts_us = esp_timer_get_time();
+        tof_buf[0] = FRAME_TYPE_TOF;
+        memcpy(tof_buf + 1, &ts_us, 8);
+        memcpy(tof_buf + 9, measurementData.distance_mm, 128);
+        ws.binaryAll(tof_buf, 137);
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(60)); 
+  }
+}
+
 // ======== SETUP ========
 void setup() {
     rgbLed.begin();
@@ -590,6 +752,39 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     Serial.println("\n===== ESP32-S3 CAM BLE Provisioning + WebSocket =====");
+
+    Serial.println("[1.5/2] Initializing I2C & Sensors...");
+    i2c_mutex = xSemaphoreCreateMutex();
+    pinMode(LPN_PIN, OUTPUT);
+    digitalWrite(LPN_PIN, HIGH);
+    delay(100);
+    
+    Wire.begin(SDA_PIN, SCL_PIN);
+    Wire.setClock(400000);
+
+    if (!mpu.begin(0x68, &Wire)) {
+        Serial.println("[WARN] MPU6050 tidak terdeteksi!");
+    } else {
+        mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
+        mpu.setGyroRange(MPU6050_RANGE_250_DEG);
+        mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+        sensors_event_t a, g, temp;
+        mpu.getEvent(&a, &g, &temp);
+        initEKFState(a.acceleration.x, a.acceleration.y, a.acceleration.z);
+        last_ts_esp = millis();
+        xTaskCreatePinnedToCore(IMU_Task, "IMU_Task", 8192, NULL, 2, &EKF_TaskHandle, 1);
+        Serial.println("[OK] MPU6050 & EKF Started.");
+    }
+
+    if (myImager.begin() == false) {
+        Serial.println("[WARN] VL53L5CX tidak terdeteksi!");
+    } else {
+        myImager.setResolution(8 * 8);
+        myImager.setRangingFrequency(15);
+        myImager.startRanging();
+        xTaskCreatePinnedToCore(TOF_Task, "TOF_Task", 4096, NULL, 1, &TOF_TaskHandle, 1);
+        Serial.println("[OK] VL53L5CX Started.");
+    }
 
     Serial.println("[1/2] Initializing camera...");
     if (!initCamera()) {

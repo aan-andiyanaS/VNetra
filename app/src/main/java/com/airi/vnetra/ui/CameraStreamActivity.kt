@@ -65,6 +65,8 @@ class CameraStreamActivity : AppCompatActivity() {
     private var stateCollectJob: Job? = null
     private var ipAddress:       String = ""
 
+    private lateinit var tofViews: Array<android.widget.TextView>
+
     // FPS counter
     private var frameCount     = 0
     private var fpsWindowStart = 0L
@@ -91,6 +93,7 @@ class CameraStreamActivity : AppCompatActivity() {
             streamService = binder.getService()
             isBound       = true
             startCollectingFrames()
+            startCollectingSensors()
             startObservingConnectionState()
         }
 
@@ -131,6 +134,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
         setupBadgeSwipeGesture()
         setupClickListeners()
+        initTofGrid()
         showStreamStateSafe(StreamState.CONNECTING)
 
         requestNotificationPermission()
@@ -347,6 +351,42 @@ class CameraStreamActivity : AppCompatActivity() {
         }
     }
 
+    private fun startCollectingSensors() {
+        lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                streamService?.imuFlow?.collect { imuData ->
+                    if (isDestroyed || isFinishing || isAkhiring) return@collect
+                    withContext(Dispatchers.Main) {
+                        if (!isDestroyed && !isFinishing && !isAkhiring && imuData.size >= 6) {
+                            binding.tvImuPitch.text = "Pitch: %.1f".format(imuData[0])
+                            binding.tvImuRoll.text = "Roll: %.1f".format(imuData[1])
+                            binding.tvImuAccel.text = "Accel: %.2f".format(imuData[5])
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("CameraStreamActivity", "IMU collect error", e)
+            }
+        }
+
+        lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                streamService?.tofFlow?.collect { tofData ->
+                    if (isDestroyed || isFinishing || isAkhiring) return@collect
+                    withContext(Dispatchers.Main) {
+                        if (!isDestroyed && !isFinishing && !isAkhiring && tofData.size >= 64 && ::tofViews.isInitialized) {
+                            for (i in 0 until 64) {
+                                tofViews[i].text = "${tofData[i]}"
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("CameraStreamActivity", "TOF collect error", e)
+            }
+        }
+    }
+
     private fun updateFpsCounter(frameBytes: Int) {
         if (isDestroyed || isFinishing) return
         frameCount++
@@ -478,5 +518,27 @@ class CameraStreamActivity : AppCompatActivity() {
         object CONNECTING                      : StreamState()
         object STREAMING                       : StreamState()
         data class ERROR(val message: String) : StreamState()
+    }
+
+    private fun initTofGrid() {
+        tofViews = Array(64) { android.widget.TextView(this) }
+        binding.gridTof.post {
+            val cellWidth = binding.gridTof.width / 8
+            val cellHeight = binding.gridTof.height / 8
+            for (i in 0 until 64) {
+                val tv = android.widget.TextView(this).apply {
+                    layoutParams = android.widget.GridLayout.LayoutParams().apply {
+                        width = cellWidth
+                        height = cellHeight
+                    }
+                    gravity = android.view.Gravity.CENTER
+                    setTextColor(android.graphics.Color.WHITE)
+                    textSize = 10f
+                    setBackgroundColor(android.graphics.Color.parseColor("#40000000"))
+                }
+                tofViews[i] = tv
+                binding.gridTof.addView(tv)
+            }
+        }
     }
 }

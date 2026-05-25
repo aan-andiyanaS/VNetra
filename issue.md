@@ -1,16 +1,40 @@
-# Update Dokumentasi: Siklus Hidup dan Power Save Mode
+# Plan Integrasi Sensor MPU6050 & VL53L5CX
 
 ## Deskripsi Tugas
-Melakukan sinkronisasi dokumentasi (`README.md`) utama dan dokumentasi *firmware* ESP32 agar sejalan dengan perubahan logika kode yang baru saja kita implementasikan.
+Mengintegrasikan sensor MPU6050 (IMU + EKF) dan VL53L5CX (ToF 8x8) ke dalam firmware utama `firmware-vnetra.ino`. Mengubah aplikasi Android untuk menerima dan menampilkan data dari kedua sensor secara *real-time* di halaman `CameraStreamActivity`.
 
-## Rincian Pembaruan
-1. **README.md Utama (Android):**
-   - **Flowchart Utama:** Ditambahkan alur untuk *Background Ping TCP* (port 80) dan alur notifikasi persisten saat *"Sesi Dihentikan"*.
-   - **Tabel Fitur:** Menambahkan informasi tentang *Exit Behavior* (Broadcast `ACTION_EXIT_APP`) pada `CameraStreamService`.
-   - **MainActivity:** Memperjelas bahwa *BLE Scanner* sekarang akan selalu muncul, dan jika ada IP tersimpan, aplikasi akan mengandalkan pengecekan via *socket* alih-alih melakukan *jump* instan.
-2. **README.md Firmware (ESP32):**
-   - **Flowchart Utama:** Menyisipkan kondisi *Power Save Mode* yang akan menangguhkan pembacaan frame JPEG bila tidak ada klien WebSocket yang terkoneksi selama lebih dari 30 detik.
-   - **Tabel Indikator LED:** Menambahkan status "🔴 Merah berkedip pelan" sebagai penanda visual ESP32 masuk ke mode hemat daya.
+## 1. Modifikasi Firmware (`firmware-vnetra.ino`)
+- **Inisialisasi I2C & Sensor:**
+  - Menambahkan konfigurasi pin I2C (`SDA = 1`, `SCL = 2`).
+  - Menggabungkan setup dan inisialisasi dari `MPU60500EFK.ino` dan `VL53L5CX.ino`.
+  - Menambahkan mutex I2C (`SemaphoreHandle_t i2c_mutex`) agar akses `Wire` aman saat diakses oleh dua task yang berbeda (IMU dan ToF).
+- **FreeRTOS Tasks (Core 1):**
+  - Membuat `IMU_Task` (100Hz) untuk menjalankan algoritma EKF 7-State.
+  - Membuat `TOF_Task` (15Hz) untuk membaca data matriks 8x8 secara efisien tanpa memblokir EKF.
+- **Transmisi WebSocket (Binary):**
+  - **IMU Frame (`0x02`):** Mengirim 24 byte (6 nilai `float`: Pitch, Roll, Wx, Wy, Wz, Akselerasi Linear).
+  - **ToF Frame (`0x04`):** Mengirim 128 byte (64 nilai `int16_t`: Jarak tiap zona).
 
-## Status
-Telah dieksekusi secara otomatis dan dokumen ini disubmit sebagai *issue* ke repositori untuk *tracking* arsip pengembangan proyek.
+## 2. Modifikasi Aplikasi Android (Service & Manager)
+- **`CameraManager.kt`:** 
+  - Memperbarui parser WebSocket untuk mengenali `FRAME_TYPE_IMU` (0x02) dan `FRAME_TYPE_TOF` (0x04).
+  - Mengonversi data *binary* menjadi `FloatArray` (IMU) dan `IntArray` (ToF).
+  - Membuat `imuFlow` dan `tofFlow` menggunakan `callbackFlow`.
+- **`CameraStreamService.kt`:**
+  - Mengekspos `imuFlow` dan `tofFlow` agar dapat diobservasi oleh Activity.
+
+## 3. Modifikasi UI/UX (`activity_camera_stream.xml` & `CameraStreamActivity.kt`)
+- **Grid ToF 8x8:**
+  - Menambahkan `GridLayout` 8x8 transparan (overlay) di atas *Camera Frame*.
+  - Mengisi setiap kotak dengan teks angka jarak (mm).
+  - *(Opsional)* Memberikan warna selang-seling atau gradasi warna berdasar jarak agar mudah dibaca.
+- **Panel IMU:**
+  - Menambahkan `TextView` overlay di pojok layar untuk menampilkan data Pitch, Roll, dan Akselerasi Linear (MPU6050).
+- **`CameraStreamActivity.kt`:**
+  - Menjalankan coroutine untuk melakukan *collect* dari `imuFlow` dan `tofFlow`.
+  - Mengupdate grid UI dan teks IMU pada *Main Thread* (`Dispatchers.Main`).
+
+## 4. Optimasi Performa
+- Pemisahan *core*: Kamera & Jaringan di Core 0 (default ESP-IDF), Sensor di Core 1.
+- Penggunaan tipe data *binary* (bukan *string* JSON) melalui WebSocket memastikan latensi sangat rendah (mencegah lag video).
+- Render grid ToF di Android menggunakan struktur *View* yang digunakan ulang (hindari *re-inflate*) demi 60 FPS pada UI.
