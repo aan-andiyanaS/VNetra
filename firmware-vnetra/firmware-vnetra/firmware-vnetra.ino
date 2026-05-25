@@ -40,7 +40,10 @@
  */
 
 // ======== INCLUDES ========
+// Mengatasi konflik nama sensor_t antara esp_camera dan Adafruit_Sensor
+#define sensor_t esp_camera_sensor_t
 #include "esp_camera.h"
+#undef sensor_t
 #include "esp_timer.h"
 #include <WiFi.h>
 #include <Preferences.h>
@@ -266,7 +269,7 @@ bool initCamera() {
         return false;
     }
 
-    sensor_t* s = esp_camera_sensor_get();
+    esp_camera_sensor_t* s = esp_camera_sensor_get();
     if (s) {
         s->set_whitebal(s, 1);
         s->set_awb_gain(s, 1);
@@ -317,7 +320,7 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
         case WS_EVT_DATA: {
             AwsFrameInfo* info = (AwsFrameInfo*)arg;
             if (info->opcode == WS_BINARY && len >= 2 && data[0] == 0xA1) {
-                sensor_t* s = esp_camera_sensor_get();
+                esp_camera_sensor_t* s = esp_camera_sensor_get();
                 if (s) s->set_quality(s, data[1]);
                 Serial.printf("[WS] JPEG quality → %d\n", data[1]);
             }
