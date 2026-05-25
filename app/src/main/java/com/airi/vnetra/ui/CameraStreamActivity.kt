@@ -522,23 +522,21 @@ class CameraStreamActivity : AppCompatActivity() {
 
     private fun initTofGrid() {
         tofViews = Array(64) { android.widget.TextView(this) }
-        binding.gridTof.post {
-            val cellWidth = binding.gridTof.width / 8
-            val cellHeight = binding.gridTof.height / 8
-            for (i in 0 until 64) {
-                val tv = android.widget.TextView(this).apply {
-                    layoutParams = android.widget.GridLayout.LayoutParams().apply {
-                        width = cellWidth
-                        height = cellHeight
-                    }
-                    gravity = android.view.Gravity.CENTER
-                    setTextColor(android.graphics.Color.WHITE)
-                    textSize = 10f
-                    setBackgroundColor(android.graphics.Color.parseColor("#40000000"))
+        for (i in 0 until 64) {
+            val tv = android.widget.TextView(this).apply {
+                layoutParams = android.widget.GridLayout.LayoutParams().apply {
+                    width = 0
+                    height = 0
+                    columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+                    rowSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
                 }
-                tofViews[i] = tv
-                binding.gridTof.addView(tv)
+                gravity = android.view.Gravity.CENTER
+                setTextColor(android.graphics.Color.WHITE)
+                textSize = 10f
+                setBackgroundColor(android.graphics.Color.parseColor("#40000000"))
             }
+            tofViews[i] = tv
+            binding.gridTof.addView(tv)
         }
     }
 }
