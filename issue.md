@@ -1,40 +1,30 @@
-# Plan Integrasi Sensor MPU6050 & VL53L5CX
+# Plan Penyesuaian Layout Grid ToF (VL53L5CX) pada Camera Stream
 
-## Deskripsi Tugas
-Mengintegrasikan sensor MPU6050 (IMU + EKF) dan VL53L5CX (ToF 8x8) ke dalam firmware utama `firmware-vnetra.ino`. Mengubah aplikasi Android untuk menerima dan menampilkan data dari kedua sensor secara *real-time* di halaman `CameraStreamActivity`.
+## Latar Belakang Masalah
+Saat ini, grid jarak dari sensor ToF (VL53L5CX) dirender menutupi area *Camera Stream* secara penuh. Padahal, *aspect ratio* dari tangkapan kamera adalah **4:3** (resolusi `640x480`), sedangkan hasil pembacaan zona dari ToF VL53L5CX membentuk matriks **8x8** yang merupakan persegi (*aspect ratio* **1:1**). 
 
-## 1. Modifikasi Firmware (`firmware-vnetra.ino`)
-- **Inisialisasi I2C & Sensor:**
-  - Menambahkan konfigurasi pin I2C (`SDA = 1`, `SCL = 2`).
-  - Menggabungkan setup dan inisialisasi dari `MPU60500EFK.ino` dan `VL53L5CX.ino`.
-  - Menambahkan mutex I2C (`SemaphoreHandle_t i2c_mutex`) agar akses `Wire` aman saat diakses oleh dua task yang berbeda (IMU dan ToF).
-- **FreeRTOS Tasks (Core 1):**
-  - Membuat `IMU_Task` (100Hz) untuk menjalankan algoritma EKF 7-State.
-  - Membuat `TOF_Task` (15Hz) untuk membaca data matriks 8x8 secara efisien tanpa memblokir EKF.
-- **Transmisi WebSocket (Binary):**
-  - **IMU Frame (`0x02`):** Mengirim 24 byte (6 nilai `float`: Pitch, Roll, Wx, Wy, Wz, Akselerasi Linear).
-  - **ToF Frame (`0x04`):** Mengirim 128 byte (64 nilai `int16_t`: Jarak tiap zona).
+Jika *aspect ratio* grid ToF dipaksakan menutupi seluruh dimensi kamera, maka setiap kotak grid akan mengalami distorsi (tertarik menjadi lonjong). Secara proporsional, grid ToF 8x8 seharusnya ditampilkan secara persegi murni (misal dirender seolah-olah memiliki resolusi layar `480x480`). 
+Karena resolusi layar adalah `640x480`, ini akan menyisakan ruang ekstra secara horizontal sebesar 160 unit, yang seharusnya dibagi dua secara adil sebagai area tanpa data ToF di bagian margin kiri (80 unit) dan margin kanan (80 unit).
 
-## 2. Modifikasi Aplikasi Android (Service & Manager)
-- **`CameraManager.kt`:** 
-  - Memperbarui parser WebSocket untuk mengenali `FRAME_TYPE_IMU` (0x02) dan `FRAME_TYPE_TOF` (0x04).
-  - Mengonversi data *binary* menjadi `FloatArray` (IMU) dan `IntArray` (ToF).
-  - Membuat `imuFlow` dan `tofFlow` menggunakan `callbackFlow`.
-- **`CameraStreamService.kt`:**
-  - Mengekspos `imuFlow` dan `tofFlow` agar dapat diobservasi oleh Activity.
+## Tujuan
+Memperbaiki antarmuka (UI) di `CameraStreamActivity` agar overlay data grid ToF 8x8 dirender dalam bentuk **persegi sempurna (1:1)**, dan ditempatkan tepat di **tengah-tengah** area stream kamera (*aspect ratio 4:3*).
 
-## 3. Modifikasi UI/UX (`activity_camera_stream.xml` & `CameraStreamActivity.kt`)
-- **Grid ToF 8x8:**
-  - Menambahkan `GridLayout` 8x8 transparan (overlay) di atas *Camera Frame*.
-  - Mengisi setiap kotak dengan teks angka jarak (mm).
-  - *(Opsional)* Memberikan warna selang-seling atau gradasi warna berdasar jarak agar mudah dibaca.
-- **Panel IMU:**
-  - Menambahkan `TextView` overlay di pojok layar untuk menampilkan data Pitch, Roll, dan Akselerasi Linear (MPU6050).
-- **`CameraStreamActivity.kt`:**
-  - Menjalankan coroutine untuk melakukan *collect* dari `imuFlow` dan `tofFlow`.
-  - Mengupdate grid UI dan teks IMU pada *Main Thread* (`Dispatchers.Main`).
+## Instruksi Pengerjaan (High Level)
 
-## 4. Optimasi Performa
-- Pemisahan *core*: Kamera & Jaringan di Core 0 (default ESP-IDF), Sensor di Core 1.
-- Penggunaan tipe data *binary* (bukan *string* JSON) melalui WebSocket memastikan latensi sangat rendah (mencegah lag video).
-- Render grid ToF di Android menggunakan struktur *View* yang digunakan ulang (hindari *re-inflate*) demi 60 FPS pada UI.
+### 1. Penyesuaian Layout UI (`activity_camera_stream.xml`)
+- **Modifikasi Overlay ToF:** Ubah properti dari pembungkus grid ToF (misalnya `GridLayout`) agar bentuknya dipaksa menjadi persegi (Aspect Ratio 1:1).
+- **Pemosisian (*Centering*):** Posisikan elemen grid ToF tersebut di **tengah-tengah** (center) area *stream* kamera secara horizontal maupun vertikal.
+- **Responsivitas:** Hindari penggunaan nilai absolut (*hardcode*) `80px` untuk lebar pinggiran. Alih-alih, gunakan properti dari *ConstraintLayout* seperti `app:layout_constraintDimensionRatio="1:1"`, kemudian berikan relasi constraint ke sisi kiri dan kanan agar otomatis memposisikan dirinya di tengah. Dengan cara ini, UI akan tetap tampil proporsional (margin simetris) pada berbagai ukuran layar smartphone.
+
+### 2. Modifikasi Komponen di dalam Grid
+- Pastikan bahwa setiap kotak/sel (`TextView` pembacaan jarak) di dalam `GridLayout` 8x8 dibagi secara rata (mendapatkan lebar dan tinggi yang proporsional sehingga tiap sel membentuk persegi kecil).
+- Manfaatkan konfigurasi lebar dan tinggi berbasis beban (layout weight) atau *match constraint* agar 8 baris dan 8 kolom mendistribusikan ruang 1:1 tersebut secara merata.
+
+### 3. Pengecekan Aspek Visual & Penandaan Batas (Opsional/Disarankan)
+- Pertimbangkan untuk menambahkan pembatas transparan tipis atau warna kontras di sekeliling area ToF (area 1:1) sebagai penanda visual yang membantu *user* memahami batasan jangkauan ToF.
+- Hal ini akan mempertegas bahwa ruang di sisi paling kiri dan paling kanan dari layar *stream* kamera adalah wilayah *blind spot* bagi sensor ToF.
+
+## Kriteria Selesai (Definition of Done)
+1. Grid 8x8 ToF berubah bentuk menjadi *square* murni (persegi, tidak lonjong).
+2. Terdapat margin area tanpa overlay data ToF (hanya menampilkan gambar video secara jernih) yang luasnya simetris di ujung paling kiri dan paling kanan layar.
+3. Seluruh angka bacaan nilai spasial jarak ToF (`mm`) masih tetap terbaca jelas di resolusi yang diperbarui.

@@ -1,28 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000"
     tools:context=".ui.CameraStreamActivity">
 
-    <!-- Camera Frame -->
-    <ImageView
-        android:id="@+id/ivCameraFrame"
+    <!-- Container Camera & ToF (Aspect Ratio 4:3) -->
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/cameraContainer"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="fitCenter"
-        android:contentDescription="Camera Stream" />
+        android:layout_height="match_parent">
 
-    <!-- ToF 8x8 Grid Overlay -->
-    <GridLayout
-        android:id="@+id/gridTof"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:columnCount="8"
-        android:rowCount="8"
-        android:visibility="visible">
-    </GridLayout>
+        <!-- Camera Frame (4:3 ratio) -->
+        <ImageView
+            android:id="@+id/ivCameraFrame"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:scaleType="fitCenter"
+            android:contentDescription="Camera Stream"
+            app:layout_constraintDimensionRatio="4:3"
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+        <!-- ToF 8x8 Grid Overlay (1:1 ratio, centered in the camera view) -->
+        <GridLayout
+            android:id="@+id/gridTof"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:columnCount="8"
+            android:rowCount="8"
+            android:visibility="visible"
+            app:layout_constraintDimensionRatio="1:1"
+            app:layout_constraintTop_toTopOf="@id/ivCameraFrame"
+            app:layout_constraintBottom_toBottomOf="@id/ivCameraFrame"
+            app:layout_constraintStart_toStartOf="@id/ivCameraFrame"
+            app:layout_constraintEnd_toEndOf="@id/ivCameraFrame" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
 
     <!-- IMU Data Panel (Top Left) -->
     <LinearLayout
