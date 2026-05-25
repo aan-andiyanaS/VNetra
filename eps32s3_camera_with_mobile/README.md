@@ -74,34 +74,34 @@ ESP32-S3 bertindak sebagai **server kamera embedded** dengan dua mode operasi:
 
 ```mermaid
 flowchart TD
-    A([Boot / Power ON]) --> B{Cek credential<br/>WiFi di NVS?}
+    A([Boot / Power ON]) --> B{Cek credential WiFi\ndi NVS?}
 
     B -->|Ada| C[Auto-connect WiFi]
-    B -->|Tidak ada| D[Init BLE<br/>Advertising sebagai<br/>'ESP32S3-WiFi-Config']
+    B -->|Tidak ada| D[Init BLE\nAdvertising sebagai\nESP32S3-WiFi-Config]
 
-    C --> E{WiFi berhasil<br/>terkoneksi?}
-    E -->|Ya| F[WiFi.setSleep OFF<br/>Init WebSocket Server]
-    E -->|Tidak, 20 detik timeout| G1[Hapus credentials NVS<br/>Disconnect WiFi]
+    C --> E{WiFi berhasil\nterkoneksi?}
+    E -->|Ya| F[WiFi.setSleep OFF\nInit WebSocket Server]
+    E -->|Tidak - timeout 20 detik| G1[Hapus credentials NVS\nDisconnect WiFi]
     G1 --> D
 
-    D --> G[LED Biru berkedip<br/>Tunggu koneksi Android]
-    G --> H{Android scan<br/>& connect via BLE}
-    H --> I[Android kirim 'SCAN']
-    I --> J[ESP32 scan WiFi<br/>Kirim COUNT + BATCH via BLE]
-    J --> K[User pilih SSID<br/>& kirim 'CONNECT:SSID|password']
-    K --> L[ESP32 simpan ke NVS<br/>Connect WiFi]
+    D --> G[LED Biru berkedip\nTunggu koneksi Android]
+    G --> H{Android scan\ndan connect via BLE}
+    H --> I[Android kirim command SCAN]
+    I --> J[ESP32 scan WiFi\nKirim COUNT dan BATCH via BLE]
+    J --> K[User pilih SSID\ndan kirim CONNECT SSID+password]
+    K --> L[ESP32 simpan ke NVS\nConnect WiFi]
     L --> M{Berhasil?}
-    M -->|Ya| N[Kirim 'IP:x.x.x.x' via BLE<br/>Kirim 'CONNECT:SUCCESS'<br/>Kirim 'BLE:DISCONNECT']
-    M -->|Tidak| O[Kirim 'CONNECT:FAILED:Connection timeout' via BLE]
-    N --> P[BLE Off<br/>Hemat daya]
+    M -->|Ya| N[Kirim IP:x.x.x.x via BLE\nKirim CONNECT:SUCCESS\nKirim BLE:DISCONNECT]
+    M -->|Tidak| O[Kirim CONNECT:FAILED\nvia BLE]
+    N --> P[BLE Off\nHemat daya]
     P --> F
     O --> G
 
-    F --> Q[LED Hijau<br/>Server siap di ws://IP/ws]
-    Q --> R[Loop: Capture & Stream<br/>~15 FPS via WebSocket]
-    
-    R --> S{Klien Disconnect<br/>> 30 Detik?}
-    S -->|Ya| T[Power Save Mode<br/>Suspend Capture & LED Merah Pelan]
+    F --> Q[LED Hijau\nServer siap - ws://IP/ws]
+    Q --> R[Loop: Capture dan Stream\n15 FPS via WebSocket]
+
+    R --> S{Klien Disconnect\nlebih dari 30 Detik?}
+    S -->|Ya| T[Power Save Mode\nSuspend Capture\nLED Merah Pelan]
     T --> U{Klien Reconnect?}
     U -->|Ya| R
 ```
@@ -113,30 +113,31 @@ sequenceDiagram
     participant ESP as ESP32-S3
     participant APP as Android App
 
-    APP->>ESP: BLE Connect ke 'ESP32S3-WiFi-Config'
-    ESP->>APP: BLE Connection OK (LED Hijau)
+    APP->>ESP: BLE Connect ke ESP32S3-WiFi-Config
+    ESP->>APP: BLE Connection OK, LED Hijau
 
-    APP->>ESP: Command: "SCAN"
-    ESP->>APP: Response: "STATUS:Scanning..."
+    APP->>ESP: Command SCAN
+    ESP->>APP: Response STATUS Scanning...
     ESP->>ESP: Scan jaringan WiFi
-    ESP->>APP: Response: "COUNT:3"
-    ESP->>APP: Response: "BATCH:0|SSID1|-65|S;1|SSID2|-72|S;2|SSID3|-80|O"
-    ESP->>APP: Response: "STATUS:Done"
+    ESP->>APP: Response COUNT 3
+    Note over ESP,APP: BATCH format: index,SSID,RSSI,enkripsi (S=Secured O=Open)
+    ESP->>APP: Response BATCH 0,SSID1,-65,S / 1,SSID2,-72,S / 2,SSID3,-80,O
+    ESP->>APP: Response STATUS Done
 
-    APP->>ESP: Command: "CONNECT:SSID|password"
-    ESP->>APP: Response: "CONNECT:CONNECTING"
+    APP->>ESP: Command CONNECT SSID password
+    ESP->>APP: Response CONNECT CONNECTING
     ESP->>ESP: Simpan ke NVS
     ESP->>ESP: WiFi.begin(ssid, pass)
 
     alt WiFi berhasil
-        ESP->>APP: Response: "IP:192.168.1.xxx"
-        ESP->>APP: Response: "CONNECT:SUCCESS"
-        ESP->>APP: Response: "BLE:DISCONNECT"
+        ESP->>APP: Response IP 192.168.1.xxx
+        ESP->>APP: Response CONNECT SUCCESS
+        ESP->>APP: Response BLE DISCONNECT
         ESP->>ESP: BLE Off, start WebSocket
         APP->>ESP: WebSocket Connect ws://192.168.1.xxx/ws
         ESP-->>APP: Binary stream JPEG frames
     else WiFi gagal
-        ESP->>APP: Response: "CONNECT:FAILED:Connection timeout"
+        ESP->>APP: Response CONNECT FAILED Connection timeout
     end
 ```
 
