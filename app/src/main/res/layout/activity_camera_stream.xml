@@ -26,7 +26,7 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
-        <!-- ToF 8x8 Grid Overlay (1:1 ratio, centered in the camera view) -->
+        <!-- ToF 8x8 Grid Overlay (1:1 ratio, FOV scaled to 69%, shifted up slightly) -->
         <GridLayout
             android:id="@+id/gridTof"
             android:layout_width="0dp"
@@ -35,6 +35,8 @@
             android:rowCount="8"
             android:visibility="visible"
             app:layout_constraintDimensionRatio="1:1"
+            app:layout_constraintWidth_percent="0.69"
+            app:layout_constraintVertical_bias="0.48"
             app:layout_constraintTop_toTopOf="@id/ivCameraFrame"
             app:layout_constraintBottom_toBottomOf="@id/ivCameraFrame"
             app:layout_constraintStart_toStartOf="@id/ivCameraFrame"
