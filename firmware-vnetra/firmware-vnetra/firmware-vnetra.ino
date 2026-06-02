@@ -167,6 +167,8 @@ bool bleActive         = false;
 bool deviceConnected   = false;
 bool oldDeviceConnected = false;
 
+volatile bool forceResetTriggered = false;
+
 // WiFi
 bool   wifiConnected = false;
 String deviceIP      = "";
@@ -481,6 +483,10 @@ bool connectToWifi(const String& ssid, const String& pass, const uint8_t* bssid 
     int attempts = 0;
     // PERBAIKAN ISU A: Polling lebih cepat 150ms agar tidak telat deteksi WL_CONNECTED
     while (WiFi.status() != WL_CONNECTED && attempts < 133) { // 133 * 150ms ~= 20s
+        if (forceResetTriggered) {
+            Serial.println("\n[WiFi] Connection aborted by force reset.");
+            return false;
+        }
         delay(150);
         if (attempts % 4 == 0) Serial.print(".");
         attempts++;
@@ -909,16 +915,21 @@ void wifiInitTask(void* pvParams) {
     bool connected = false;
     if (p->hasCredentials) {
         for (int i = 0; i < 3 && !connected; i++) {
+            if (forceResetTriggered) break;
             if (connectToWifi(p->ssid, p->pass, p->bssid, p->channel)) {
                 connected = true;
             } else if (i < 2) {
+                if (forceResetTriggered) break;
                 Serial.println("[WiFi] Retry dalam 2 detik...");
-                vTaskDelay(pdMS_TO_TICKS(2000));
+                for (int d = 0; d < 20; d++) {
+                    if (forceResetTriggered) break;
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                }
             }
         }
     }
 
-    if (connected) {
+    if (connected && !forceResetTriggered) {
         // ── BUG FIX: startCameraServer dipanggil di sini, bukan di setup() ──
         // Server harus langsung aktif saat WiFi connect agar mobile app
         // tidak timeout menunggu. Setup() masih sibuk dengan sensor init
@@ -926,13 +937,15 @@ void wifiInitTask(void* pvParams) {
         startCameraServer();
         ledOff();
         Serial.println("[WS] Server aktif — mobile app bisa connect sekarang.");
+        wifiInitResult = connected;
+    } else {
+        wifiInitResult = false;
     }
 
-    wifiInitResult = connected;
     wifiInitDone   = true;
-    Serial.println(connected
+    Serial.println(wifiInitResult
         ? "[WiFi Task] Connected & server ready!"
-        : "[WiFi Task] Gagal — akan masuk BLE.");
+        : "[WiFi Task] Gagal atau dibatalkan — akan masuk BLE.");
     vTaskDelete(NULL);
 }
 
@@ -977,12 +990,147 @@ void TOF_InitTask(void* pvParams) {
     vTaskDelete(NULL);
 }
 
+// ======== BUTTON RESET TASK ========
+void ButtonReset_Task(void *pvParameters) {
+    for (;;) {
+        if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+            if (resetTriggered) {
+                // Reset sudah dieksekusi — abaikan sampai tombol dilepas terlebih dahulu
+            } else if (!resetButtonPressed) {
+                // Tombol baru ditekan — catat waktu, mulai phase 1
+                resetButtonPressed   = true;
+                resetButtonPressTime = millis();
+                resetLedPhase        = 0;
+                Serial.println("[RESET] Button pressed — tahan 5 detik untuk reset WiFi.");
+            } else {
+                unsigned long held = millis() - resetButtonPressTime;
+
+                // --- Indikator LED progresif (countdown 3 phase) ---
+                if (held < RESET_PHASE1_MS) {
+                    // Phase 1: 0 – 1.6 s → Orange
+                    if (resetLedPhase != 1) {
+                        resetLedPhase = 1;
+                        ledOrange();
+                        Serial.println("[RESET] Phase 1/3 — Orange");
+                    }
+                } else if (held < RESET_PHASE2_MS) {
+                    // Phase 2: 1.6 – 3.3 s → Kuning
+                    if (resetLedPhase != 2) {
+                        resetLedPhase = 2;
+                        ledYellow();
+                        Serial.println("[RESET] Phase 2/3 — Kuning");
+                    }
+                } else if (held < RESET_HOLD_TIME) {
+                    // Phase 3: 3.3 – 5.0 s → Merah
+                    if (resetLedPhase != 3) {
+                        resetLedPhase = 3;
+                        ledRed();
+                        Serial.println("[RESET] Phase 3/3 — Merah (segera reset!)");
+                    }
+                } else {
+                    // ======== TRIGGERED: 5 detik tercapai ========
+                    Serial.println("[SYSTEM] Reset button held 5s — Clearing WiFi credentials...");
+                    resetTriggered = true; // tandai agar loop berikutnya tidak restart countdown
+                    forceResetTriggered = true; // Set flag interupsi wifi
+
+                    // A. Feedback visual: 6x blink putih cepat → magenta (sedang proses)
+                    for (int i = 0; i < 6; i++) {
+                        ledWhite(); delay(80);
+                        ledOff();   delay(80);
+                    }
+                    ledMagenta(); // indikator: sedang memproses reset
+
+                    // 1. Hapus kredensial dari flash (NVS/Preferences)
+                    clearWiFiCredentials();
+
+                    wifiConnected = false;
+                    deviceIP      = "";
+
+                    // 2. Tutup semua koneksi WebSocket yang masih aktif secara graceful
+                    if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                        ws.closeAll();
+                        xSemaphoreGive(ws_mutex);
+                    }
+                    wsClientConnected = false;
+                    
+                    // Flush queue agar task (IMU/TOF) tidak memproses pointer ke WiFi mati
+                    xQueueReset(wsQueue);
+                    
+                    delay(500); // Tambah delay tutup ws
+
+                    // 3. Putuskan WiFi dan matikan radio WiFi sepenuhnya
+                    WiFi.disconnect(true);  // true = juga clear AP/STA config internal
+                    WiFi.mode(WIFI_OFF);
+                    
+                    delay(1000);
+
+                    // 4. Deinit BLE jika masih aktif (cegah double-init crash)
+                    if (bleActive) {
+                        Serial.println("[BLE] Deinit existing BLE stack before re-init...");
+                        BLEDevice::deinit(true);
+                        bleActive          = false;
+                        deviceConnected    = false;
+                        oldDeviceConnected = false;
+                        pServer            = nullptr;
+                        pCommandChar       = nullptr;
+                        pResponseChar      = nullptr;
+                        delay(200);
+                    }
+
+                    // 5. Reset flag BLE command agar tidak ada perintah lama yang tertinggal
+                    shouldScanWifi    = false;
+                    shouldConnectWifi = false;
+                    pendingSSID       = "";
+                    pendingPassword   = "";
+                    currentSSID       = "";
+                    currentPassword   = "";
+                    isWifiDisconnected = false;
+
+                    // Aktifkan kembali kamera jika sebelumnya sempat mati sebelum masuk mode BLE provisioning
+                    if (!isCameraActive) {
+                        Serial.println("[RESET] Re-initializing camera for BLE provisioning mode...");
+                        if (initCamera()) {
+                            isCameraActive = true;
+                        }
+                    }
+
+                    // 6. Init ulang BLE dari kondisi bersih
+                    Serial.println("[BLE] Re-initializing BLE...");
+                    initBLE(); // set bleActive = true, LED biru di dalamnya
+
+                    Serial.println("[SYSTEM] WiFi reset done. BLE advertising aktif.");
+                    forceResetTriggered = false; // Reset interupsi flag setelah selesai
+                }
+            }
+        } else {
+            // Tombol dilepas
+            if (resetTriggered) {
+                // Reset telah selesai & tombol baru dilepas — bersihkan semua flag
+                resetTriggered     = false;
+                resetButtonPressed = false;
+                resetLedPhase      = 0;
+                Serial.println("[RESET] Tombol dilepas — sistem siap.");
+            } else if (resetButtonPressed) {
+                // Tombol dilepas sebelum 5 detik — batalkan, kembalikan LED
+                Serial.println("[RESET] Tombol dilepas sebelum 5 detik — reset dibatalkan.");
+                if (wifiConnected)    ledGreen();
+                else if (bleActive)   ledBlue();
+                else                  ledOff();
+                resetButtonPressed = false;
+                resetLedPhase      = 0;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50)); // Poll every 50ms to reduce CPU usage
+    }
+}
+
 // ======== SETUP ========
 void setup() {
     rgbLed.begin();
     rgbLed.setBrightness(LED_BRIGHTNESS);
     ledOff();
     pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+    xTaskCreatePinnedToCore(ButtonReset_Task, "ButtonReset", 4096, NULL, 1, NULL, 1);
 
     Serial.begin(115200);
     delay(1000);
@@ -1058,19 +1206,19 @@ void setup() {
     // Dalam kondisi normal (BSSID cache valid), WiFi sudah connect
     // jauh sebelum sensor init selesai, jadi loop ini tidak pernah menunggu.
     Serial.println("[WiFi] Menunggu hasil koneksi WiFi background...");
-    while (!wifiInitDone) {
+    while (!wifiInitDone && !forceResetTriggered) {
         delay(10);
     }
 
-    if (wifiInitResult) {
+    if (wifiInitResult && !forceResetTriggered) {
         // startCameraServer() sudah dipanggil di dalam wifiInitTask — tidak perlu lagi di sini.
         Serial.println("[BOOT] WiFi & server sudah aktif.");
-    } else if (wifiParams.hasCredentials) {
+    } else if (wifiParams.hasCredentials && !forceResetTriggered) {
         Serial.println("[WiFi] Gagal terkoneksi setelah 3x percobaan. Masuk mode BLE.");
         WiFi.disconnect();
         delay(100);
         initBLE();
-    } else {
+    } else if (!forceResetTriggered) {
         WiFi.mode(WIFI_STA);
         WiFi.disconnect();
         delay(100);
@@ -1086,137 +1234,6 @@ void setup() {
 
 // ======== LOOP ========
 void loop() {
-    // ---- RESET BUTTON: tahan 5 detik dengan indikator LED progresif ----
-    if (digitalRead(RESET_BUTTON_PIN) == LOW) {
-        if (resetTriggered) {
-            // Reset sudah dieksekusi — abaikan sampai tombol dilepas terlebih dahulu
-        } else if (!resetButtonPressed) {
-            // Tombol baru ditekan — catat waktu, mulai phase 1
-            resetButtonPressed   = true;
-            resetButtonPressTime = millis();
-            resetLedPhase        = 0;
-            Serial.println("[RESET] Button pressed — tahan 5 detik untuk reset WiFi.");
-        } else {
-            unsigned long held = millis() - resetButtonPressTime;
-
-            // --- Indikator LED progresif (countdown 3 phase) ---
-            if (held < RESET_PHASE1_MS) {
-                // Phase 1: 0 – 1.6 s → Orange
-                if (resetLedPhase != 1) {
-                    resetLedPhase = 1;
-                    ledOrange();
-                    Serial.println("[RESET] Phase 1/3 — Orange");
-                }
-            } else if (held < RESET_PHASE2_MS) {
-                // Phase 2: 1.6 – 3.3 s → Kuning
-                if (resetLedPhase != 2) {
-                    resetLedPhase = 2;
-                    ledYellow();
-                    Serial.println("[RESET] Phase 2/3 — Kuning");
-                }
-            } else if (held < RESET_HOLD_TIME) {
-                // Phase 3: 3.3 – 5.0 s → Merah
-                if (resetLedPhase != 3) {
-                    resetLedPhase = 3;
-                    ledRed();
-                    Serial.println("[RESET] Phase 3/3 — Merah (segera reset!)");
-                }
-            } else {
-                // ======== TRIGGERED: 5 detik tercapai ========
-                Serial.println("[SYSTEM] Reset button held 5s — Clearing WiFi credentials...");
-                resetTriggered = true; // tandai agar loop berikutnya tidak restart countdown
-
-                // A. Feedback visual: 6x blink putih cepat → magenta (sedang proses)
-                for (int i = 0; i < 6; i++) {
-                    ledWhite(); delay(80);
-                    ledOff();   delay(80);
-                }
-                ledMagenta(); // indikator: sedang memproses reset
-
-                // 1. Hapus kredensial dari flash (NVS/Preferences)
-                clearWiFiCredentials();
-
-                // PERBAIKAN ISU B: Reset flag di awal secara atomik
-                wifiConnected = false;
-                deviceIP      = "";
-
-                // 2. Tutup semua koneksi WebSocket yang masih aktif secara graceful
-                if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    ws.closeAll();
-                    xSemaphoreGive(ws_mutex);
-                }
-                wsClientConnected = false;
-                
-                // PERBAIKAN ISU B: Flush queue agar task (IMU/TOF) tidak memproses pointer ke WiFi mati
-                xQueueReset(wsQueue);
-                
-                delay(500); // Tambah delay tutup ws
-
-                // 3. Putuskan WiFi dan matikan radio WiFi sepenuhnya
-                //    WiFi & BLE berbagi radio (co-existence); WiFi harus MATI
-                //    sebelum BLE stack diinisialisasi ulang, jika tidak bisa crash.
-                WiFi.disconnect(true);  // true = juga clear AP/STA config internal
-                WiFi.mode(WIFI_OFF);
-                
-                // PERBAIKAN ISU B: Delay lebih panjang untuk transisi radio co-existence
-                delay(1000);
-
-                // 4. Deinit BLE jika masih aktif (cegah double-init crash)
-                if (bleActive) {
-                    Serial.println("[BLE] Deinit existing BLE stack before re-init...");
-                    BLEDevice::deinit(true);
-                    bleActive          = false;
-                    deviceConnected    = false;
-                    oldDeviceConnected = false;
-                    pServer            = nullptr;
-                    pCommandChar       = nullptr;
-                    pResponseChar      = nullptr;
-                    delay(200);
-                }
-
-                // 5. Reset flag BLE command agar tidak ada perintah lama yang tertinggal
-                shouldScanWifi    = false;
-                shouldConnectWifi = false;
-                pendingSSID       = "";
-                pendingPassword   = "";
-                currentSSID       = "";
-                currentPassword   = "";
-                isWifiDisconnected = false;
-
-                // Aktifkan kembali kamera jika sebelumnya sempat mati sebelum masuk mode BLE provisioning
-                if (!isCameraActive) {
-                    Serial.println("[RESET] Re-initializing camera for BLE provisioning mode...");
-                    if (initCamera()) {
-                        isCameraActive = true;
-                    }
-                }
-
-                // 6. Init ulang BLE dari kondisi bersih
-                Serial.println("[BLE] Re-initializing BLE...");
-                initBLE(); // set bleActive = true, LED biru di dalamnya
-
-                Serial.println("[SYSTEM] WiFi reset done. BLE advertising aktif.");
-            }
-        }
-    } else {
-        // Tombol dilepas
-        if (resetTriggered) {
-            // Reset telah selesai & tombol baru dilepas — bersihkan semua flag
-            resetTriggered     = false;
-            resetButtonPressed = false;
-            resetLedPhase      = 0;
-            Serial.println("[RESET] Tombol dilepas — sistem siap.");
-        } else if (resetButtonPressed) {
-            // Tombol dilepas sebelum 5 detik — batalkan, kembalikan LED
-            Serial.println("[RESET] Tombol dilepas sebelum 5 detik — reset dibatalkan.");
-            if (wifiConnected)    ledGreen();
-            else if (bleActive)   ledBlue();
-            else                  ledOff();
-            resetButtonPressed = false;
-            resetLedPhase      = 0;
-        }
-    }
-
     // BLE provisioning
     if (bleActive) {
         if (shouldScanWifi && deviceConnected) {
