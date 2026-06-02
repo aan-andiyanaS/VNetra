@@ -46,6 +46,7 @@
 #undef sensor_t
 #include "esp_timer.h"
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <Preferences.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -130,7 +131,7 @@ TaskHandle_t TOF_TaskHandle;
 #define FRAME_HEADER_SZ  9     // 1B type + 8B timestamp_us (little-endian)
 
 // ======== TUNING ========
-static constexpr uint8_t  JPEG_QUALITY      = 15;      // 0=best, 63=worst
+static constexpr uint8_t  JPEG_QUALITY      = 20;      // 0=best, 63=worst
 static constexpr uint32_t TARGET_FRAME_US   = 66666;   // ~15 FPS
 static constexpr uint32_t WS_PING_INTERVAL  = 10000;   // ms — heartbeat setiap 10 detik
 static constexpr size_t   WS_BUF_MAX        = 130*1024;
@@ -463,6 +464,9 @@ bool connectToWifi(const String& ssid, const String& pass, const uint8_t* bssid 
     delay(100);
     
     WiFi.mode(WIFI_STA);
+    
+    // Nonaktifkan Wi-Fi Power Save Mode (Modem Sleep) untuk mencegah jitter/latensi tinggi
+    esp_wifi_set_ps(WIFI_PS_NONE);
     
     // PERBAIKAN ISU A: Set TX Power maksimal untuk mempercepat association
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
