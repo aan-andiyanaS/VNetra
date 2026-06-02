@@ -568,33 +568,29 @@ class CameraStreamActivity : AppCompatActivity() {
     private fun initTofGrid() {
         // Buat 64 cell dulu dengan pembobotan (weight) agar berukuran sama rata secara otomatis
         tofViews = Array(64) { i ->
-            val actualRow = i / 8
-            val col = i % 8
-            
             android.widget.TextView(this).apply {
-                if (actualRow > 0) {
-                    val displayRow = actualRow - 1
-                    layoutParams = android.widget.GridLayout.LayoutParams(
-                        android.widget.GridLayout.spec(displayRow, 1f), // Tambahkan bobot 1f
-                        android.widget.GridLayout.spec(col, 1f)  // Tambahkan bobot 1f
-                    ).apply {
-                        width  = 0   // Harus 0 agar weight membagi ruang rata
-                        height = 0   // Harus 0 agar weight membagi ruang rata
-                        setMargins(1, 1, 1, 1)
-                    }
-                    gravity = android.view.Gravity.CENTER
-                    setTextColor(android.graphics.Color.WHITE)
-                    textSize = 7.5f
-                    text     = "—"
-                    setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
-                } else {
-                    visibility = android.view.View.GONE
+                val row = i / 8
+                val col = i % 8
+                layoutParams = android.widget.GridLayout.LayoutParams(
+                    android.widget.GridLayout.spec(row, 1f), // Tambahkan bobot 1f
+                    android.widget.GridLayout.spec(col, 1f)  // Tambahkan bobot 1f
+                ).apply {
+                    width  = 0   // Harus 0 agar weight membagi ruang rata
+                    height = 0   // Harus 0 agar weight membagi ruang rata
+                    setMargins(1, 1, 1, 1)
                 }
-            }.also { 
-                if (actualRow > 0) {
-                    binding.gridTof.addView(it)
-                }
-            }
+                gravity = android.view.Gravity.CENTER
+                setTextColor(android.graphics.Color.WHITE)
+                textSize = 7.5f
+                text     = "—"
+                setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
+            }.also { binding.gridTof.addView(it) }
+        }
+
+        // Setelah GridLayout selesai dirender, geser grid ke atas sebesar tinggi 1 baris
+        // agar baris pertama berada tepat di luar bingkai kamera atas
+        binding.gridTof.post {
+            binding.gridTof.translationY = -(binding.gridTof.height / 8f)
         }
     }
 }
