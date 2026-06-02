@@ -26,13 +26,13 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
-        <!-- ToF 8x8 Grid Overlay (1:1 ratio, FOV scaled to 69%, shifted up slightly) -->
+        <!-- ToF 7x8 Grid Overlay (1:1 ratio, FOV scaled to 69%, shifted up slightly) -->
         <GridLayout
             android:id="@+id/gridTof"
             android:layout_width="0dp"
             android:layout_height="0dp"
             android:columnCount="8"
-            android:rowCount="8"
+            android:rowCount="7"
             android:visibility="visible"
             app:layout_constraintDimensionRatio="1:1"
             app:layout_constraintWidth_percent="0.69"
