@@ -199,6 +199,10 @@ static bool     powerSaveMode       = false;    // true = tidak ada client, skip
 static uint32_t lastClientLostTime  = 0;        // kapan client terakhir disconnect
 static bool     hadClientBefore     = false;    // pernah ada client (untuk trigger power save)
 
+// WiFi Parallel Init Task
+static volatile bool wifiInitDone   = false;  // task selesai (berhasil atau gagal)
+static volatile bool wifiInitResult = false;  // true = berhasil connect
+
 // ======== LED HELPERS ========
 void setLedColor(uint8_t r, uint8_t g, uint8_t b) {
     rgbLed.setPixelColor(0, rgbLed.Color(r, g, b));
@@ -218,17 +222,27 @@ void saveWiFiCredentials(const String& ssid, const String& pass) {
     preferences.begin("wifi", false);
     preferences.putString("ssid",      ssid);
     preferences.putString("password",  pass);
+    if (WiFi.status() == WL_CONNECTED) {
+        preferences.putBytes("bssid", WiFi.BSSID(), 6);
+        preferences.putInt("channel", WiFi.channel());
+    }
     preferences.putBool("configured",  true);
     preferences.end();
     Serial.println("[STORAGE] Credentials saved.");
 }
 
-bool loadWiFiCredentials(String& ssid, String& pass) {
+bool loadWiFiCredentials(String& ssid, String& pass, uint8_t* bssid, int& channel) {
     preferences.begin("wifi", true);
     bool ok = preferences.getBool("configured", false);
     if (ok) {
         ssid = preferences.getString("ssid",     "");
         pass = preferences.getString("password", "");
+        if (preferences.getBytesLength("bssid") == 6) {
+            preferences.getBytes("bssid", bssid, 6);
+        } else {
+            memset(bssid, 0, 6);
+        }
+        channel = preferences.getInt("channel", 0);
     }
     preferences.end();
     return ok && ssid.length() > 0;
@@ -239,6 +253,32 @@ void clearWiFiCredentials() {
     preferences.clear();
     preferences.end();
     Serial.println("[STORAGE] Credentials cleared.");
+}
+
+// ======== ACCEL BIAS CACHE (NVS) ========
+// Menyimpan hasil kalibrasi akselerometer ke NVS agar tidak perlu
+// mengulang 500-sample calibration setiap kali device dinyalakan.
+void saveAccelBias(const float bias[3]) {
+    preferences.begin("sensors", false);
+    preferences.putFloat("bias_x", bias[0]);
+    preferences.putFloat("bias_y", bias[1]);
+    preferences.putFloat("bias_z", bias[2]);
+    preferences.putBool("bias_ok", true);
+    preferences.end();
+    Serial.printf("[CAL] Bias saved to NVS: X=%.4f Y=%.4f Z=%.4f\n",
+                  bias[0], bias[1], bias[2]);
+}
+
+bool loadAccelBias(float bias[3]) {
+    preferences.begin("sensors", true);
+    bool ok = preferences.getBool("bias_ok", false);
+    if (ok) {
+        bias[0] = preferences.getFloat("bias_x", 0.0f);
+        bias[1] = preferences.getFloat("bias_y", 0.0f);
+        bias[2] = preferences.getFloat("bias_z", 0.0f);
+    }
+    preferences.end();
+    return ok;
 }
 
 // ======== CAMERA INIT ========
@@ -412,23 +452,39 @@ void startCameraServer() {
 }
 
 // ======== WIFI CONNECT ========
-bool connectToWifi(const String& ssid, const String& pass) {
+bool connectToWifi(const String& ssid, const String& pass, const uint8_t* bssid = nullptr, int channel = 0) {
     Serial.printf("[WiFi] Connecting to: %s\n", ssid.c_str());
     ledYellow();
+    
+    // PERBAIKAN ISU A: Putuskan state radio kotor sebelum connect
+    WiFi.disconnect(false);
+    delay(100);
+    
     WiFi.mode(WIFI_STA);
+    
+    // PERBAIKAN ISU A: Set TX Power maksimal untuk mempercepat association
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);
 
     // Konfigurasi WiFi untuk koneksi stabil
     WiFi.setAutoReconnect(true);  // Auto-reconnect jika sinyal hilang sebentar
     WiFi.persistent(false);       // Jangan simpan ke flash (kita punya NVS sendiri)
 
-    WiFi.begin(ssid.c_str(), pass.c_str());
+    // PERBAIKAN ISU A: Gunakan BSSID dan channel jika valid (skip channel scanning)
+    bool hasBssid = (bssid != nullptr) && (bssid[0] != 0 || bssid[1] != 0 || bssid[2] != 0 || bssid[3] != 0 || bssid[4] != 0 || bssid[5] != 0);
+    if (channel > 0 && hasBssid) {
+        Serial.printf("[WiFi] Fast connect (Channel %d)\n", channel);
+        WiFi.begin(ssid.c_str(), pass.c_str(), channel, bssid);
+    } else {
+        WiFi.begin(ssid.c_str(), pass.c_str());
+    }
 
     int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 40) {
-        delay(500);
-        Serial.print(".");
+    // PERBAIKAN ISU A: Polling lebih cepat 150ms agar tidak telat deteksi WL_CONNECTED
+    while (WiFi.status() != WL_CONNECTED && attempts < 133) { // 133 * 150ms ~= 20s
+        delay(150);
+        if (attempts % 4 == 0) Serial.print(".");
         attempts++;
-        if (attempts % 2 == 0) ledYellow(); else ledOff();
+        if (attempts % 4 == 0) ledYellow(); else ledOff();
     }
     Serial.println();
 
@@ -634,7 +690,16 @@ void initBLE() {
 // ======== SENSOR TASKS ========
 float accel_bias[3] = {0.0f, 0.0f, 0.0f};
 
-void calibrateAccelBias(int n_samples = 500) {
+void calibrateAccelBias(int n_samples = 200) {
+    // ── Cek cache NVS dulu — skip kalibrasi jika sudah pernah dilakukan ──
+    // Bias hanya perlu diukur ulang jika device di-remount atau firmware baru.
+    // Untuk reset bias: hapus namespace "sensors" dari NVS.
+    if (loadAccelBias(accel_bias)) {
+        Serial.printf("[CAL] Bias loaded from NVS: X=%.4f Y=%.4f Z=%.4f m/s²\n",
+                      accel_bias[0], accel_bias[1], accel_bias[2]);
+        return; // skip kalibrasi, hemat ~400ms–1s
+    }
+
     Serial.println("[CAL] Kalibrasi akselerometer — jangan gerakkan device...");
     double sum[3] = {0, 0, 0};
 
@@ -656,9 +721,8 @@ void calibrateAccelBias(int n_samples = 500) {
         (float)(sum[2] / n_samples)
     };
 
-    // Hitung arah gravitasi dominan dari mean, lalu kurangi g_const
     float g_meas = sqrt(mean[0]*mean[0] + mean[1]*mean[1] + mean[2]*mean[2]);
-    float scale  = g_const / g_meas;  // normalisasi ke g_const yang diharapkan
+    float scale  = g_const / g_meas;
 
     accel_bias[0] = mean[0] - mean[0] * scale;
     accel_bias[1] = mean[1] - mean[1] * scale;
@@ -666,6 +730,9 @@ void calibrateAccelBias(int n_samples = 500) {
 
     Serial.printf("[CAL] Accel bias: X=%.4f Y=%.4f Z=%.4f m/s²\n",
                   accel_bias[0], accel_bias[1], accel_bias[2]);
+
+    // Simpan ke NVS agar boot berikutnya langsung load
+    saveAccelBias(accel_bias);
 }
 
 void initEKFState(float ax, float ay, float az) {
@@ -826,6 +893,90 @@ void TOF_Task(void *pvParameters) {
   }
 }
 
+// ======== WIFI PARALLEL INIT TASK ========
+// Struct untuk meneruskan credentials ke task tanpa global sementara
+typedef struct {
+    char     ssid[64];
+    char     pass[64];
+    uint8_t  bssid[6];
+    int      channel;
+    bool     hasCredentials;
+} WifiInitParams_t;
+
+void wifiInitTask(void* pvParams) {
+    WifiInitParams_t* p = (WifiInitParams_t*)pvParams;
+
+    bool connected = false;
+    if (p->hasCredentials) {
+        for (int i = 0; i < 3 && !connected; i++) {
+            if (connectToWifi(p->ssid, p->pass, p->bssid, p->channel)) {
+                connected = true;
+            } else if (i < 2) {
+                Serial.println("[WiFi] Retry dalam 2 detik...");
+                vTaskDelay(pdMS_TO_TICKS(2000));
+            }
+        }
+    }
+
+    if (connected) {
+        // ── BUG FIX: startCameraServer dipanggil di sini, bukan di setup() ──
+        // Server harus langsung aktif saat WiFi connect agar mobile app
+        // tidak timeout menunggu. Setup() masih sibuk dengan sensor init
+        // yang bisa 5-10 detik — terlalu lama bagi app yang sudah punya IP.
+        startCameraServer();
+        ledOff();
+        Serial.println("[WS] Server aktif — mobile app bisa connect sekarang.");
+    }
+
+    wifiInitResult = connected;
+    wifiInitDone   = true;
+    Serial.println(connected
+        ? "[WiFi Task] Connected & server ready!"
+        : "[WiFi Task] Gagal — akan masuk BLE.");
+    vTaskDelete(NULL);
+}
+
+// ======== TOF DEFERRED INIT TASK ========
+// VL53L5CX butuh upload firmware 90KB via I2C 100kHz = 7-10 detik.
+// Di-defer ke background task agar tidak memblokir boot path.
+// TOF data akan mulai tersedia beberapa detik setelah device siap.
+void TOF_InitTask(void* pvParams) {
+    Serial.println("[TOF] Background init VL53L5CX...");
+    // Pegang mutex selama upload firmware agar tidak tabrakan dengan IMU_Task
+    if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
+        Wire.setClock(100000);
+        bool ok = false;
+        for (int i = 0; i < 3; i++) {
+            if (myImager.begin()) {
+                ok = true;
+                break;
+            }
+            Serial.println("[WARN] VL53L5CX gagal inisialisasi, mencoba ulang...");
+            xSemaphoreGive(i2c_mutex);
+            vTaskDelay(pdMS_TO_TICKS(500));
+            if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) != pdTRUE) {
+                break;
+            }
+        }
+        if (ok) {
+            Wire.setClock(400000);
+            myImager.setWireMaxPacketSize(128);
+            myImager.setResolution(8 * 8);
+            myImager.setRangingFrequency(10);
+            myImager.startRanging();
+        }
+        xSemaphoreGive(i2c_mutex);
+
+        if (ok) {
+            xTaskCreatePinnedToCore(TOF_Task, "TOF_Task", 6144, NULL, 1, &TOF_TaskHandle, 1);
+            Serial.println("[OK] VL53L5CX Started (deferred).");
+        } else {
+            Serial.println("[WARN] VL53L5CX tidak terdeteksi!");
+        }
+    }
+    vTaskDelete(NULL);
+}
+
 // ======== SETUP ========
 void setup() {
     rgbLed.begin();
@@ -837,21 +988,52 @@ void setup() {
     delay(1000);
     Serial.println("\n===== ESP32-S3 CAM BLE Provisioning + WebSocket =====");
 
-    Serial.println("[1.5/2] Initializing I2C & Sensors...");
     i2c_mutex = xSemaphoreCreateMutex();
-    ws_mutex  = xSemaphoreCreateMutex();  // Mutex untuk ws.binaryAll() thread safety
-    wsQueue   = xQueueCreate(20, sizeof(WsMessage_t)); // Queue untuk WebSocket thread safety
-    
-    // POWER UP SENSORS FIRST
+    ws_mutex  = xSemaphoreCreateMutex();
+    wsQueue   = xQueueCreate(20, sizeof(WsMessage_t));
+
+    // ── [FAST BOOT] Cek credentials & mulai WiFi di background SEBELUM sensor init ──
+    // WiFi connect (terutama BSSID fast-path) bisa ~1 detik;
+    // sensor init (kalibrasi + VL53L5CX firmware upload) bisa 5–10 detik.
+    // Dengan paralel keduanya, waktu total = max(WiFi, Sensor) bukan jumlahnya.
+    static WifiInitParams_t wifiParams;
+    memset(&wifiParams, 0, sizeof(wifiParams));
+    int ch = 0;
+    String tmpSSID, tmpPass;
+    if (loadWiFiCredentials(tmpSSID, tmpPass, wifiParams.bssid, ch)) {
+        strncpy(wifiParams.ssid, tmpSSID.c_str(), sizeof(wifiParams.ssid) - 1);
+        strncpy(wifiParams.pass, tmpPass.c_str(), sizeof(wifiParams.pass) - 1);
+        wifiParams.channel       = ch;
+        wifiParams.hasCredentials = true;
+        Serial.println("[WiFi] Memulai koneksi di background: " + tmpSSID);
+        // Jalankan di Core 0 (sama dengan loop), sensor init berjalan di Core 1 via FreeRTOS
+        xTaskCreatePinnedToCore(wifiInitTask, "WiFiInit", 4096, &wifiParams, 1, NULL, 0);
+    } else {
+        wifiInitDone   = true; // tidak ada credentials, langsung selesai
+        wifiInitResult = false;
+    }
+
+    // ── Inisialisasi Sensor (berjalan paralel dengan WiFi task di atas) ──
+    Serial.println("[SENSOR] Initializing I2C & Sensors...");
     pinMode(LPN_PIN, OUTPUT);
     digitalWrite(LPN_PIN, HIGH);
     delay(200); // Tunggu VL53L5CX boot up
 
     Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(400000); 
+    Wire.setClock(400000);
 
-    if (!mpu.begin(0x68, &Wire)) {
-        Serial.println("[WARN] MPU6050 tidak terdeteksi!");
+    bool mpuOk = false;
+    for (int i = 0; i < 3; i++) {
+        if (mpu.begin(0x68, &Wire)) {
+            mpuOk = true;
+            break;
+        }
+        Serial.println("[WARN] MPU6050 gagal inisialisasi, mencoba ulang...");
+        delay(500);
+    }
+
+    if (!mpuOk) {
+        Serial.println("[WARN] MPU6050 tidak terdeteksi setelah 3x percobaan!");
     } else {
         mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
         mpu.setGyroRange(MPU6050_RANGE_250_DEG);
@@ -861,50 +1043,45 @@ void setup() {
         mpu.getEvent(&a, &g, &temp);
         initEKFState(a.acceleration.x - accel_bias[0], a.acceleration.y - accel_bias[1], a.acceleration.z - accel_bias[2]);
         last_ts_esp = millis();
-        // Aktifkan kembali IMU_Task
         xTaskCreatePinnedToCore(IMU_Task, "IMU_Task", 12288, NULL, 2, &EKF_TaskHandle, 1);
         Serial.println("[OK] MPU6050 & EKF Started.");
     }
 
-    Wire.setClock(100000); // 100kHz untuk upload firmware 90KB yang sangat rentan error
-    if (myImager.begin() == false) {
-        Serial.println("[WARN] VL53L5CX tidak terdeteksi!");
-    } else {
-        Wire.setClock(400000); // Kembalikan ke 400kHz setelah firmware sukses diupload
-        myImager.setWireMaxPacketSize(128); // ESP32 I2C transaction optimization
-        myImager.setResolution(8 * 8);
-        myImager.setRangingFrequency(10); // Turunkan ke 10Hz agar I2C stabil
-        myImager.startRanging();
-        xTaskCreatePinnedToCore(TOF_Task, "TOF_Task", 6144, NULL, 1, &TOF_TaskHandle, 1);
-        Serial.println("[OK] VL53L5CX Started.");
-    }
-
-    Serial.println("[1/2] Initializing camera...");
+    Serial.println("[CAM] Initializing camera...");
     if (!initCamera()) {
         Serial.println("[FATAL] Camera init failed! Halting.");
         ledRed();
         while (true) delay(1000);
     }
 
-    Serial.println("[2/2] Checking saved credentials...");
-    String savedSSID, savedPass;
-    if (loadWiFiCredentials(savedSSID, savedPass)) {
-        Serial.println("[INFO] Found: " + savedSSID);
-        if (connectToWifi(savedSSID, savedPass)) {
-            ledOff();
-            startCameraServer();
-        } else {
-            clearWiFiCredentials();
-            WiFi.disconnect();
-            delay(100);
-            initBLE();
-        }
+    // ── Tunggu WiFi task selesai ──
+    // Dalam kondisi normal (BSSID cache valid), WiFi sudah connect
+    // jauh sebelum sensor init selesai, jadi loop ini tidak pernah menunggu.
+    Serial.println("[WiFi] Menunggu hasil koneksi WiFi background...");
+    while (!wifiInitDone) {
+        delay(10);
+    }
+
+    if (wifiInitResult) {
+        // startCameraServer() sudah dipanggil di dalam wifiInitTask — tidak perlu lagi di sini.
+        Serial.println("[BOOT] WiFi & server sudah aktif.");
+    } else if (wifiParams.hasCredentials) {
+        Serial.println("[WiFi] Gagal terkoneksi setelah 3x percobaan. Masuk mode BLE.");
+        WiFi.disconnect();
+        delay(100);
+        initBLE();
     } else {
         WiFi.mode(WIFI_STA);
         WiFi.disconnect();
         delay(100);
         initBLE();
     }
+
+    // ── Defer VL53L5CX init ke background task ──
+    // Upload firmware 90KB via I2C ~8 detik berjalan di background.
+    // ToF data mulai tersedia setelah task ini selesai.
+    xTaskCreatePinnedToCore(TOF_InitTask, "TOFInit", 4096, NULL, 1, NULL, 1);
+    Serial.println("[BOOT] Setup selesai. VL53L5CX init berjalan di background.");
 }
 
 // ======== LOOP ========
@@ -959,22 +1136,30 @@ void loop() {
                 // 1. Hapus kredensial dari flash (NVS/Preferences)
                 clearWiFiCredentials();
 
+                // PERBAIKAN ISU B: Reset flag di awal secara atomik
+                wifiConnected = false;
+                deviceIP      = "";
+
                 // 2. Tutup semua koneksi WebSocket yang masih aktif secara graceful
                 if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                     ws.closeAll();
                     xSemaphoreGive(ws_mutex);
                 }
                 wsClientConnected = false;
-                delay(100);
+                
+                // PERBAIKAN ISU B: Flush queue agar task (IMU/TOF) tidak memproses pointer ke WiFi mati
+                xQueueReset(wsQueue);
+                
+                delay(500); // Tambah delay tutup ws
 
                 // 3. Putuskan WiFi dan matikan radio WiFi sepenuhnya
                 //    WiFi & BLE berbagi radio (co-existence); WiFi harus MATI
                 //    sebelum BLE stack diinisialisasi ulang, jika tidak bisa crash.
                 WiFi.disconnect(true);  // true = juga clear AP/STA config internal
                 WiFi.mode(WIFI_OFF);
-                wifiConnected = false;
-                deviceIP      = "";
-                delay(300);
+                
+                // PERBAIKAN ISU B: Delay lebih panjang untuk transisi radio co-existence
+                delay(1000);
 
                 // 4. Deinit BLE jika masih aktif (cegah double-init crash)
                 if (bleActive) {

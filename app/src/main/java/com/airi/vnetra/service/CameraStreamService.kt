@@ -92,10 +92,12 @@ class CameraStreamService : Service() {
     private val binder       = LocalBinder()
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var streamJob: Job?             = null
+    private var watchdogJob: Job?           = null
     private var activeWebSocket: WebSocket? = null
     private var reconnectAttempts           = 0
     private var ipAddress                   = ""
     private var stopped                     = false   // flag: service sedang/sudah di-stop
+    private var lastDataReceivedTime        = 0L
 
     // Anti-putus locks
     private var wakeLock: PowerManager.WakeLock? = null
@@ -104,10 +106,10 @@ class CameraStreamService : Service() {
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.SECONDS)
-        // Tidak gunakan pingInterval — ESPAsyncWebServer tidak membalas WebSocket ping (opcode 0x9)
-        // sehingga OkHttp akan force-disconnect setelah timeout.
-        // Heartbeat sudah ditangani firmware via FRAME_TYPE_HBEAT setiap 10 detik.
+        .readTimeout(15, TimeUnit.SECONDS)
+        .pingInterval(5, TimeUnit.SECONDS)
+        // Sengaja gunakan pingInterval agar OkHttp force-disconnect (cancel) saat socket mati/half-open
+        // karena ESPAsyncWebServer tidak membalas ping.
         .build()
 
     // DROP_OLDEST: selalu tampilkan frame terbaru, tidak ada lag buffer
@@ -190,6 +192,7 @@ class CameraStreamService : Service() {
 
     fun stopStreamAndRelease() {
         runCatching { streamJob?.cancel() };       streamJob = null
+        runCatching { watchdogJob?.cancel() };     watchdogJob = null
         runCatching { activeWebSocket?.close(1000, "Stopped") }; activeWebSocket = null
         _connectionState.value = ConnectionState.DISCONNECTED
         runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
@@ -215,9 +218,24 @@ class CameraStreamService : Service() {
 
     private fun startStreaming(ip: String) {
         streamJob?.cancel()
+        watchdogJob?.cancel()
         runCatching { activeWebSocket?.cancel() }
         activeWebSocket   = null
         reconnectAttempts = 0
+        lastDataReceivedTime = System.currentTimeMillis()
+
+        watchdogJob = serviceScope.launch {
+            while (isActive && !stopped) {
+                delay(2000)
+                if (_connectionState.value == ConnectionState.CONNECTED) {
+                    if (System.currentTimeMillis() - lastDataReceivedTime > 12_000L) {
+                        Log.e(TAG, "Watchdog timeout: no data for >12s, canceling socket")
+                        runCatching { activeWebSocket?.cancel() }
+                        lastDataReceivedTime = System.currentTimeMillis() // Reset timer
+                    }
+                }
+            }
+        }
 
         streamJob = serviceScope.launch {
             while (isActive && !stopped) {
@@ -241,6 +259,7 @@ class CameraStreamService : Service() {
 
                         override fun onMessage(ws: WebSocket, bytes: ByteString) {
                             if (stopped) return
+                            lastDataReceivedTime = System.currentTimeMillis()
                             runCatching {
                                 val raw = bytes.toByteArray()
                                 if (raw.size < FRAME_HEADER_SZ) {

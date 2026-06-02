@@ -94,8 +94,9 @@ class CameraStreamActivity : AppCompatActivity() {
             val binder = service as? CameraStreamService.LocalBinder ?: return
             streamService = binder.getService()
             isBound       = true
-            startCollectingFrames()
-            startCollectingSensors()
+            // startCollectingFrames dan startCollectingSensors tidak dipanggil di sini.
+            // Mereka akan dipanggil oleh startObservingConnectionState() saat state
+            // berubah ke CONNECTED, termasuk saat reconnect setelah ESP32 restart.
             startObservingConnectionState()
         }
 
@@ -296,12 +297,24 @@ class CameraStreamActivity : AppCompatActivity() {
             streamService?.connectionState?.collect { state ->
                 if (isDestroyed || isFinishing || isAkhiring) return@collect
                 when (state) {
-                    CameraStreamService.ConnectionState.CONNECTED    -> showBadgeSafe()
-                    CameraStreamService.ConnectionState.CONNECTING   -> {
+                    CameraStreamService.ConnectionState.CONNECTED -> {
+                        showBadgeSafe()
+                        // ── RECONNECT FIX ──
+                        // 1. Sembunyikan spinner reconnecting SEGERA saat connect berhasil
+                        // 2. Restart collectors agar data segar mengalir
+                        // (CancellationException di-rethrow agar tidak trigger ERROR state)
+                        showStreamStateSafe(StreamState.STREAMING)
+                        startCollectingFrames()
+                        startCollectingSensors()
+                    }
+                    CameraStreamService.ConnectionState.CONNECTING -> {
                         hideBadgeSafe()
                         showStreamStateSafe(StreamState.CONNECTING)
+                        clearStaleSensorDisplay()
                     }
-                    CameraStreamService.ConnectionState.DISCONNECTED -> hideBadgeSafe()
+                    CameraStreamService.ConnectionState.DISCONNECTED -> {
+                        hideBadgeSafe()
+                    }
                 }
             }
         }
@@ -312,22 +325,21 @@ class CameraStreamActivity : AppCompatActivity() {
     // ──────────────────────────────────────────────────────────────────────────
 
     private fun startCollectingFrames() {
+        // ── Capture referensi di main thread sebelum pindah ke Dispatchers.Default ──
+        val svc = streamService ?: return
+
         frameCollectJob?.cancel()
         frameCount     = 0
         fpsWindowStart = System.currentTimeMillis()
 
+        val options = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.RGB_565
+            inMutable         = true
+        }
+
         frameCollectJob = lifecycleScope.launch(Dispatchers.Default) {
-            withContext(Dispatchers.Main) {
-                if (!isDestroyed && !isFinishing) showStreamStateSafe(StreamState.STREAMING)
-            }
-
-            val options = BitmapFactory.Options().apply {
-                inPreferredConfig = Bitmap.Config.RGB_565
-                inMutable         = true
-            }
-
             try {
-                streamService?.frameFlow?.collect { jpegBytes ->
+                svc.frameFlow.collect { jpegBytes ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     val bitmap = runCatching {
                         BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)
@@ -340,27 +352,28 @@ class CameraStreamActivity : AppCompatActivity() {
                         }
                     }
                 }
-                withContext(Dispatchers.Main) {
-                    if (!isDestroyed && !isFinishing && !isAkhiring)
-                        showStreamStateSafe(StreamState.ERROR("Stream berakhir."))
-                }
+                // SharedFlow tidak pernah complete secara normal.
+                // Jika collect() keluar, berarti coroutine di-cancel — tidak perlu error UI.
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e  // re-throw: biarkan sistem menangani cancellation, JANGAN tampilkan error
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     if (!isDestroyed && !isFinishing && !isAkhiring)
-                        showStreamStateSafe(StreamState.ERROR("Error: ${e.message}"))
+                        showStreamStateSafe(StreamState.ERROR("Error stream: ${e.message}"))
                 }
             }
         }
     }
 
     private fun startCollectingSensors() {
-        // Cancel collector sebelumnya agar tidak ada multiple collectors saat reconnect
+        val svc = streamService ?: return  // capture di main thread
+
         imuCollectJob?.cancel()
         tofCollectJob?.cancel()
 
         imuCollectJob = lifecycleScope.launch(Dispatchers.Default) {
             try {
-                streamService?.imuFlow?.collect { imuData ->
+                svc.imuFlow.collect { imuData ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring && imuData.size >= 6) {
@@ -370,6 +383,8 @@ class CameraStreamActivity : AppCompatActivity() {
                         }
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e  // re-throw cancellation
             } catch (e: Exception) {
                 android.util.Log.e("CameraStreamActivity", "IMU collect error", e)
             }
@@ -377,7 +392,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
         tofCollectJob = lifecycleScope.launch(Dispatchers.Default) {
             try {
-                streamService?.tofFlow?.collect { tofData ->
+                svc.tofFlow.collect { tofData ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring
@@ -388,6 +403,8 @@ class CameraStreamActivity : AppCompatActivity() {
                         }
                     }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e  // re-throw cancellation
             } catch (e: Exception) {
                 android.util.Log.e("CameraStreamActivity", "TOF collect error", e)
             }
@@ -515,6 +532,25 @@ class CameraStreamActivity : AppCompatActivity() {
         runCatching { stateCollectJob?.cancel() }; stateCollectJob = null
         runCatching { imuCollectJob?.cancel() };   imuCollectJob   = null
         runCatching { tofCollectJob?.cancel() };   tofCollectJob   = null
+    }
+
+    /**
+     * Bersihkan tampilan sensor saat ESP32 disconnect / sedang reconnect.
+     * Mencegah angka lama (stale) masih terlihat ketika tidak ada data masuk.
+     */
+    private fun clearStaleSensorDisplay() {
+        if (isDestroyed || isFinishing) return
+        runOnUiThread {
+            runCatching {
+                binding.tvImuPitch.text = "Pitch: —"
+                binding.tvImuRoll.text  = "Roll: —"
+                binding.tvImuAccel.text = "Accel: —"
+                binding.ivCameraFrame.setImageResource(android.R.color.transparent)
+                if (::tofViews.isInitialized) {
+                    tofViews.forEach { it.text = "—" }
+                }
+            }
+        }
     }
 
     private var isFullscreen = false

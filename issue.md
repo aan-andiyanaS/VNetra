@@ -1,77 +1,62 @@
-# Laporan Perubahan dan Penyelesaian Bug (Issue Tracker)
+# Dokumentasi Perbaikan Koneksi dan Recovery Otomatis VNetra
 
-Dokumen ini merangkum seluruh perubahan yang **belum di-commit** (unstaged) sejak commit terakhir (`5de32af` — *fix: resolve sensor_t conflict and type mismatch*), penyelesaian bug, serta penjelasan detail dari fitur dan fungsi baru pada proyek VNetra.
-
-**File yang berubah:**
-- `firmware-vnetra/firmware-vnetra/firmware-vnetra.ino` — +190 baris
-- `app/src/main/java/com/airi/vnetra/service/CameraStreamService.kt` — +81 baris
-- `app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt` — +75 baris
-- `app/src/main/res/layout/activity_camera_stream.xml` — +36 baris
-- `docs/formula-matematis-v8.md` — +20 baris
-- `firmware-vnetra/saran.md` — file baru (kosong)
-
-## 1. Penyelesaian Bug (Bug Fixes)
-
-Berikut adalah daftar bug yang berhasil diselesaikan pada pembaruan ini:
-
-*   **Bug Crash pada Firmware akibat Thread-Safety WebSocket:**
-    *   **Masalah:** Pemanggilan fungsi `ws.binaryAll()` sebelumnya dilakukan langsung dari dalam task FreeRTOS (`IMU_Task` dan `TOF_Task`) dan juga dari `loop()`. Library `ESPAsyncWebServer` tidak *thread-safe*, sehingga akses konkuren ini menyebabkan korupsi memori dan *crash* (ESP32 restart mendadak).
-    *   **Penyelesaian:** Diimplementasikan sistem **Message Queue** (`wsQueue`) dan **Mutex** (`ws_mutex`). Task sensor (`IMU_Task` dan `TOF_Task`) sekarang hanya mengalokasikan memori (`malloc`), membuat objek `WsMessage_t`, dan memasukkannya ke dalam `wsQueue`. Proses pengiriman data sesungguhnya dieksekusi secara aman di dalam `loop()` utama yang dilindungi oleh `ws_mutex`.
-*   **Bug `wsClientConnected` Tidak Akurat Saat Disconnect (Firmware):**
-    *   **Masalah:** Saat sebuah klien WebSocket memutus koneksi, kondisi `wsClientConnected` dicek dengan `ws.count() > 1`. Logika ini **salah** — ketika callback `WS_EVT_DISCONNECT` dipanggil, `ws.count()` sudah otomatis berkurang 1 (klien sudah dihapus dari daftar). Akibatnya, `wsClientConnected` tetap `true` meskipun tidak ada klien yang terhubung, dan ESP32 terus membuang sumber daya untuk mengirim data.
-    *   **Penyelesaian:** Kondisi diperbaiki menjadi `ws.count() > 0` agar akurat sesuai perilaku nyata library.
-*   **Bug Timeout Koneksi WebSocket di Android (OkHttp):**
-    *   **Masalah:** Aplikasi Android sering terputus dari ESP32 setelah beberapa detik. Hal ini disebabkan karena konfigurasi `pingInterval(15, TimeUnit.SECONDS)` pada OkHttp. ESPAsyncWebServer ternyata tidak mendukung balasan otomatis untuk WebSocket Ping (opcode 0x9), sehingga OkHttp mengira koneksi mati (*timeout*).
-    *   **Penyelesaian:** `pingInterval` dihapus dari OkHttp. Sebagai gantinya, ESP32 sekarang mengirimkan paket data *Heartbeat* buatan sendiri (`FRAME_TYPE_HBEAT`) setiap 10 detik. Aplikasi Android akan mendeteksi frame ini sebagai tanda bahwa koneksi masih hidup.
-*   **Bug Sensor VL53L5CX (ToF) Gagal Inisialisasi:**
-    *   **Masalah:** Sering terjadi kegagalan saat sensor ToF sedang mengunggah *firmware* bawaannya (sekitar 90KB) via I2C, yang rentan terhadap *error* jika *clock* terlalu tinggi.
-    *   **Penyelesaian:** Kecepatan I2C (`Wire.setClock`) diturunkan menjadi 100kHz khusus saat inisialisasi sensor `myImager.begin()`. Setelah inisialisasi berhasil, *clock* dikembalikan ke 400kHz. Frekuensi *ranging* sensor juga diturunkan dari 15Hz ke 10Hz agar komunikasi I2C lebih stabil.
-*   **Bug Akurasi Akselerometer (Gravitasi tidak nol saat diam):**
-    *   **Masalah:** Terdapat *offset* (bias) bawaan pabrik pada MPU-6050, sehingga meskipun perangkat diam, akselerometer masih mencatat adanya pergerakan.
-    *   **Penyelesaian:** Ditambahkan fungsi **Kalibrasi Bias Statis** (`calibrateAccelBias()`). Saat *booting*, ESP32 akan mengambil 500 sampel untuk mengukur *offset* gravitasi dan menghitung nilai bias. Nilai bias ini kemudian secara otomatis dikurangkan dari data pembacaan sensor (*de-biasing*) pada setiap iterasi sebelum diproses oleh algoritma EKF.
-*   **Bug Tampilan Grid ToF di Android Tidak Terlihat atau Berantakan:**
-    *   **Masalah:** Pembuatan kotak-kotak Grid ToF sebelumnya menggunakan *layout weights* yang tidak dapat diprediksi ukurannya sebelum dirender di layar, sehingga sering kali grid tidak tampil.
-    *   **Penyelesaian:** Modifikasi algoritma pembuatan grid. Grid sekarang di-set ukurannya ke 1x1 piksel dengan posisi baris/kolom eksplisit (deterministik). Setelah *GridLayout* berhasil mengkalkulasi lebar dan tinggi area utamanya di layar (`binding.gridTof.post`), barulah ukuran tiap *cell* (kotak) diatur secara pasti dalam satuan piksel (misalnya `gridW / 8`).
-*   **Bug Frame Drop (Android):**
-    *   **Masalah:** Beberapa frame sensor hilang/terlewat karena proses *render* UI yang terlalu sibuk di Android.
-    *   **Penyelesaian:** Menambahkan kapasitas antrean (*buffer capacity*) pada `_imuFlow` dan `_tofFlow` dari 2 menjadi 4. Selain itu, kecepatan pengiriman data IMU dari ESP32 dikurangi (dari 200Hz menjadi ~20Hz), sehingga beban jaringan dan CPU Android jauh berkurang.
-*   **Bug Stack Overflow pada FreeRTOS Task (Firmware):**
-    *   **Masalah:** Stack size yang dialokasikan untuk `IMU_Task` (8192 byte) dan `TOF_Task` (4096 byte) terlalu kecil setelah penambahan fitur baru (queue, malloc, kalibrasi), berpotensi menyebabkan *stack overflow* dan crash ESP32 yang sulit dideteksi.
-    *   **Penyelesaian:** Stack size `IMU_Task` dinaikkan dari **8192 → 12288 byte** (ditambah 50%), dan `TOF_Task` dari **4096 → 6144 byte** (ditambah 50%), memberi ruang aman untuk semua operasi baru.
-*   **Bug Interval Polling ToF Terlalu Lambat (Firmware):**
-    *   **Masalah:** `TOF_Task` memiliki delay `vTaskDelay(60ms)` yang terlalu lambat, menyebabkan data jarak dari VL53L5CX tidak bisa diambil secara konsisten sesuai frekuensi ranging 10Hz (idealnya setiap ~100ms, bukan diperiksa tiap 60ms).
-    *   **Penyelesaian:** Delay loop `TOF_Task` diturunkan dari **60ms → 10ms**, sehingga polling lebih responsif dan tidak ada data frame yang terlewat dari sensor.
+## Ringkasan Perubahan
+Pembaruan ini berfokus pada penyelesaian bug "Half-open TCP connection" yang menyebabkan aplikasi Android *freeze* (tidak menerima data meskipun status masih `CONNECTED` pasca ESP32 restart). Selain itu, terdapat optimalisasi waktu *booting* (Fast Boot) dan stabilitas inisialisasi sensor di sisi *firmware* ESP32, serta perbaikan *UI state* Android selama masa re-koneksi.
 
 ---
 
-## 2. Penjelasan Detail Fitur dan Fungsi yang Diperbarui
+## 1. Android App: Perbaikan Koneksi & Watchdog (`CameraStreamService.kt`)
 
-### A. Firmware ESP32 (`firmware-vnetra.ino`)
+### Bug yang Diperbaiki:
+*   **Half-open Socket (Freeze State):** Sebelumnya, jika ESP32 di-restart paksa (mati daya), OkHttp di Android tidak segera mendeteksi terputusnya *socket* karena tidak adanya *ping reply* dari `ESPAsyncWebServer`. Akibatnya, aplikasi tertahan di state `CONNECTED` tanpa data.
 
-*   **`ws_mutex` & `wsQueue` (Sistem Antrean Pesan):**
-    *   **Fungsi:** Menjamin keamanan pertukaran data antara *task* pembacaan sensor (berjalan paralel di *core* CPU) dengan pengiriman WiFi. Data yang dibaca sensor dibungkus lalu dilempar ke antrean. Loop utama bertugas membaca antrean tersebut satu per satu dan mengirimkannya ke klien (Android).
-*   **`calibrateAccelBias()`:**
-    *   **Fungsi:** Mengkalibrasi sensor gerak pada saat perangkat dinyalakan. Ia mengambil ratusan data mentah dalam keadaan diam, mencari selisih rata-ratanya terhadap gravitasi bumi ideal ($9.81 m/s^2$), dan menyimpan angka tersebut untuk mengoreksi bacaan sensor di waktu berikutnya.
-*   **Pengurangan Rate-Limit Frame IMU (`imu_send_tick`):**
-    *   **Fungsi:** Filter yang bertugas membatasi pengiriman data IMU. EKF (algoritma filter) tetap berjalan cepat di 200Hz demi akurasi perhitungan matematis. Namun, tidak semua datanya dikirim ke Android (cukup 1 dari 10 data, alias 20Hz), karena mata manusia tidak butuh 200 perbaruan UI dalam sedetik. Hal ini menghemat *bandwidth*.
-*   **Status Sensor Jarak (ToF Target Status):**
-    *   **Fungsi:** Paket data ToF tidak hanya mengirim jarak (mm) lagi, tapi sekarang memuat tambahan memori 64 byte untuk `target_status`. Format paket baru: **Header(1B) + Timestamp(8B) + Distance×64(128B) + Status×64(64B) = 201 byte**. Jika sensor mendeteksi jarak 0, Android dapat melihat kode *status* error-nya dari paket tambahan ini.
-*   **Optimasi I2C Transaction (`setWireMaxPacketSize`):**
-    *   **Fungsi:** Menambahkan pemanggilan `myImager.setWireMaxPacketSize(128)` setelah VL53L5CX berhasil di-inisialisasi. Ini mengoptimalkan ukuran maksimum paket I2C per transaksi di ESP32 agar sesuai dengan kemampuan hardware, mengurangi risiko *buffer overflow* di layer I2C dan meningkatkan stabilitas komunikasi sensor ToF.
-*   **Diagnostik Statistik Frame (`stat_frames_cam/imu/tof`):**
-    *   **Fungsi:** Tiga variabel counter baru (`stat_frames_cam`, `stat_frames_imu`, `stat_frames_tof`) dideklarasikan sebagai `volatile uint32_t`. Setiap frame yang berhasil dikirim ke antrian/klien akan menaikkan counter-nya. Setiap 10 detik (saat *heartbeat*), Serial Monitor menampilkan statistik `[DATA SENT] CAM: X | IMU: Y | TOF: Z` lalu di-reset, membantu mendeteksi apakah ada sensor yang berhenti mengirim data.
+### Fitur yang Ditambahkan/Diubah:
+*   **Implementasi Data Watchdog (`watchdogJob`):** 
+    *   **Ditambahkan:** Variabel `lastDataReceivedTime` untuk melacak kapan *frame* data terakhir (Kamera/IMU/ToF) masuk.
+    *   **Ditambahkan:** *Coroutine* baru `watchdogJob` yang berjalan di *background*. Jika statusnya `CONNECTED` tapi tidak ada data yang masuk selama lebih dari **12 detik**, *watchdog* akan memaksa pembatalan (cancel) `activeWebSocket`.
+    *   **Efek:** Memaksa putusnya koneksi yang "menggantung" sehingga mekanisme rekoneksi otomatis (yang sudah ada) bisa segera bekerja.
+*   **Optimalisasi OkHttp Builder:**
+    *   **Diubah:** Menambahkan `.pingInterval(5, TimeUnit.SECONDS)` dan `.readTimeout(15, TimeUnit.SECONDS)`.
+    *   **Alasan:** Meskipun `ESPAsyncWebServer` tidak merespons *ping*, *ping interval* dan *read timeout* ini digunakan secara sengaja untuk memicu *force-disconnect* secara agresif di level protokol saat *socket* sudah tidak sehat.
+*   **Pembersihan Resource:**
+    *   **Diubah:** Pemanggilan `watchdogJob?.cancel()` dipastikan dieksekusi saat koneksi dihentikan melalui `stopStreamAndRelease()` dan di awal `startStreaming()`.
 
-### B. Aplikasi Android (Kotlin & XML)
+---
 
-*   **`FRAME_TYPE_HBEAT` di `CameraStreamService.kt`:**
-    *   **Fungsi:** Menangkap paket data kode `0x03` dari ESP32. Jika data ini diterima, aplikasi mencatatnya di Log bahwa koneksi masih "sehat" (*Heartbeat diterima*), mencegah pemutusan paksa karena idle.
-*   **Logika Peringatan (Warning) Jarak ToF `0`:**
-    *   **Fungsi:** Membantu *debugging* sensor. Jika aplikasi Android mendeteksi semua kotak ToF berjarak 0, maka angka 0 tersebut akan digantikan dengan kode *status* error milik sensor dalam bentuk negatif (misal: `-4`, `-5`), lalu muncul peringatan (Warning Log) bahwa semua jarak berisi 0.
-*   **Manajemen Tugas (Job Cancellation) di `CameraStreamActivity.kt`:**
-    *   **Fungsi:** Memisahkan variabel kontrol tugas untuk Kamera, IMU, dan ToF (`imuCollectJob`, `tofCollectJob`). Ketika koneksi terputus dan mencoba menyambung lagi, fungsi ini memastikan tugas lama dihentikan total (di-cancel) sebelum memulai yang baru, menghindari *overlap* data di layar.
-*   **Pembaruan Tampilan Antarmuka (UI) EKF / MPU6050:**
-    *   **Fungsi:** Elemen UI untuk Pitch, Roll, dan Accel dipercantik. Kini memiliki judul panel "EKF / MPU6050" dengan warna cerah `#4FC3F7`, menggunakan huruf mesin tik (*monospace*), dan dibekali simbol derajat (°) serta satuan percepatan ($m/s^2$) agar lebih profesional dan mudah dibaca (File: `activity_camera_stream.xml`).
+## 2. Android App: Perbaikan UI/UX Rekoneksi (`CameraStreamActivity.kt`)
 
-### C. Pembaruan Dokumen Matematis (`formula-matematis-v8.md`)
+### Bug yang Diperbaiki:
+*   **Data Stale (Nyangkut) Saat Reconnect:** Sebelumnya, angka dari sensor IMU (Pitch, Roll, Accel) atau ToF yang lama masih tampil di layar selama proses rekoneksi.
+*   **Multiple Data Collectors & Error Palsu:** Saat rekoneksi berhasil, terjadi pemanggilan *collectors* data yang bertumpuk (*overlapping*), dan pembatalan (*cancellation*) tugas terkadang memicu pesan *error* palsu di antarmuka.
 
-*   **Fungsi:** Telah ditambahkan Bab **A.EKF.0** yang berisi landasan teori dari *Kalibrasi Bias Akselerometer Statis*. Penjelasan ini menguraikan rumus dasar bahwa bias adalah hasil pengurangan vektor rata-rata sampel dikurangi skala normalisasi gravitasi aktual. Ini menjelaskan fondasi teori mengapa `calibrateAccelBias()` di ESP32 diperlukan.
+### Fitur yang Ditambahkan/Diubah:
+*   **Manajemen Collector Terpusat:**
+    *   **Dihilangkan:** Pemanggilan `startCollectingFrames()` dan `startCollectingSensors()` di dalam `onServiceConnected`.
+    *   **Ditambahkan:** Pemanggilan fungsi-fungsi tersebut dipindahkan secara eksklusif ke dalam blok `CameraStreamService.ConnectionState.CONNECTED`. Ini memastikan data baru hanya dikumpulkan saat koneksi benar-benar sudah tersambung ulang.
+*   **Pembersihan Tampilan Sensor (`clearStaleSensorDisplay`):**
+    *   **Ditambahkan:** Fungsi `clearStaleSensorDisplay()` yang dipanggil saat *state* berubah ke `CONNECTING`. Fungsi ini mengubah teks Pitch, Roll, Accel, dan nilai ToF menjadi "—" (kosong) agar tidak membingungkan pengguna.
+*   **Penanganan Error Coroutine yang Lebih Baik:**
+    *   **Diubah:** Menambahkan tangkapan spesifik terhadap `kotlinx.coroutines.CancellationException` di dalam fungsi *collector*. Pengecualian ini sekarang di-*re-throw* (dilemparkan ulang) tanpa memicu `StreamState.ERROR(...)` pada UI, menghindari notifikasi *error* yang tidak relevan saat *stream* sengaja di-restart.
+
+---
+
+## 3. Firmware ESP32: Fast Boot, Sensor Retry, & WiFi Fix (`firmware-vnetra.ino`)
+
+### Bug yang Diperbaiki:
+*   **Waktu Booting Terlalu Lama:** Proses *booting* tertahan oleh inisialisasi sensor yang berjalan lambat, khususnya saat mengunggah *firmware* sensor VL53L5CX (bisa memakan waktu > 5-10 detik).
+*   **Inisialisasi Sensor Rentan Gagal:** Sensor MPU6050 atau VL53L5CX terkadang gagal menyala di percobaan pertama saat tegangan baru saja dihidupkan.
+*   **Crash Saat Disconnect dari WiFi (Isu B):** *Pointer queue* (antrean WebSocket) masih diproses oleh tugas sensor meskipun WiFi sudah terputus, dan transisi berbagi radio antara WiFi dan BLE terlalu cepat sehingga dapat memicu *crash*.
+
+### Fitur yang Ditambahkan/Diubah:
+*   **Fast Boot via Background WiFi Task (`wifiInitTask`):**
+    *   **Diubah:** Proses koneksi WiFi tidak lagi memblokir antrean utama (*main loop/setup*). Koneksi kini dialihkan ke *background task* di Core 0 (`wifiInitTask`). Ini membuat proses *connect* WiFi (termasuk *BSSID fast-path*) berjalan paralel dengan *hardware init*.
+*   **Inisialisasi Sensor VL53L5CX Terpisah (`TOF_InitTask`):**
+    *   **Ditambahkan:** Pengunggahan *firmware* internal VL53L5CX sebesar 90KB via I2C memakan banyak waktu. Hal ini sekarang dilakukan di dalam tugas *background* khusus (`TOF_InitTask`). Pengiriman data jarak akan otomatis dimulai segera setelah tugas ini berhasil selesai.
+*   **Mekanisme Retry (Percobaan Ulang) MPU6050:**
+    *   **Ditambahkan:** Loop *retry* sebanyak 3 kali (dengan *delay* 500ms) untuk pemanggilan `mpu.begin()`. Hal ini meningkatkan peluang sukses saat inisialisasi awal.
+*   **Perbaikan Transisi WiFi ke BLE (Crash Fix - Isu B):**
+    *   **Ditambahkan:** Membersihkan antrean data secara eksplisit menggunakan `xQueueReset(wsQueue)` saat transisi putus koneksi.
+    *   **Diubah:** Mengatur ulang (*reset*) bendera (*flag*) `wifiConnected = false` secara lebih awal dan menambahkan penundaan (*delay*) yang lebih panjang (1000ms) sebelum radio WiFi dimatikan, guna memberikan waktu penyelesaian komunikasi *co-existence* radio ESP32 yang lebih stabil sebelum beralih ke mode BLE.
+
+---
+*Status: Closed / Diselesaikan*
