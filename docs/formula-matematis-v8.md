@@ -104,6 +104,26 @@ $$\Delta t_{imu} := \max\!\left(\Delta t_{imu},\ \Delta t_{min}\right)$$
 
 ---
 
+**A.EKF.0 — Kalibrasi Bias Akselerometer Statis**
+
+Sebelum EKF mulai beroperasi secara iteratif, sistem wajib menghilangkan *offset* bawaan pabrik pada sensor akselerometer (MPU-6050). Tanpa kalibrasi ini, vektor gravitasi yang diukur tidak akan pernah selaras sempurna dengan estimasi gravitasi dari quaternion, sehingga menghasilkan nilai residual gerakan linier $\|\mathbf{a}_{lin}\| > 0$ (noise floor tinggi) meskipun perangkat dalam keadaan diam mutlak. Karena vektor status EKF hanya memodelkan bias giroskop $\mathbf{b}_\omega$, bias akselerometer harus dieliminasi di tahap pra-pemrosesan (hulu).
+
+Pada saat *boot* (perangkat wajib dalam keadaan diam statis), sistem mengambil himpunan $N=500$ sampel akselerometer mentah $\mathbf{a}_{raw}^{(i)}$ dan menghitung vektor rata-ratanya:
+
+$$\bar{\mathbf{a}} = \frac{1}{N} \sum_{i=1}^{N} \mathbf{a}_{raw}^{(i)}$$
+
+Dari $\bar{\mathbf{a}}$, kita mendapatkan magnitudo gravitasi nyata yang diukur oleh sensor pada lingkungan lokal $g_{meas} = \|\bar{\mathbf{a}}\|$. Menggunakan konstanta gravitasi ideal $g = 9.81\ \text{m/s}^2$, kita menghitung rasio skala normalisasi untuk mengekstrak vektor bias akselerometer statis $\mathbf{b}_a \in \mathbb{R}^3$:
+
+$$\mathbf{b}_a = \bar{\mathbf{a}} - \left( \bar{\mathbf{a}} \cdot \frac{g}{g_{meas}} \right)$$
+
+Setelah fase kalibrasi awal ini selesai, vektor konstanta $\mathbf{b}_a$ digunakan sebagai pengoreksi absolut selama masa operasional sistem. Pada fase iteratif dinamis (*IMU_Task*), semua pembacaan akselerometer mentah $\mathbf{a}_{raw,t}$ wajib dikurangi terlebih dahulu dengan vektor bias sebelum masuk ke persamaan fusi EKF (lihat A.EKF.3):
+
+$$\mathbf{a}_t = \mathbf{a}_{raw,t} - \mathbf{b}_a$$
+
+Melalui de-biasing prakondisi ini, kalkulasi residual akselerasi linier linier murni pada akhirnya akan menunjuk pada ekspektasi matematis ideal ($0.00\ \text{m/s}^2$) ketika perangkat diam.
+
+---
+
 **A.EKF.1 — State Vector dan Matriks Parameter**
 
 EKF melacak 7 variabel dalam satu vektor status — 4 komponen quaternion orientasi dan 3 komponen bias giroskop:

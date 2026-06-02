@@ -68,6 +68,7 @@ class CameraStreamService : Service() {
         private const val NOTIF_ID_STOPPED  = 1003
         private const val FRAME_TYPE_JPEG   = 0x01.toByte()
         private const val FRAME_TYPE_IMU    = 0x02.toByte()
+        private const val FRAME_TYPE_HBEAT  = 0x03.toByte()
         private const val FRAME_TYPE_TOF    = 0x04.toByte()
         private const val FRAME_HEADER_SZ   = 9
         private const val RECONNECT_BASE_MS = 1_000L
@@ -104,27 +105,29 @@ class CameraStreamService : Service() {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.SECONDS)
-        .pingInterval(15, TimeUnit.SECONDS)
+        // Tidak gunakan pingInterval — ESPAsyncWebServer tidak membalas WebSocket ping (opcode 0x9)
+        // sehingga OkHttp akan force-disconnect setelah timeout.
+        // Heartbeat sudah ditangani firmware via FRAME_TYPE_HBEAT setiap 10 detik.
         .build()
 
     // DROP_OLDEST: selalu tampilkan frame terbaru, tidak ada lag buffer
     private val _frameFlow = MutableSharedFlow<ByteArray>(
         replay              = 0,
-        extraBufferCapacity = 2,
+        extraBufferCapacity = 4,
         onBufferOverflow    = BufferOverflow.DROP_OLDEST
     )
     val frameFlow: SharedFlow<ByteArray> = _frameFlow
 
     private val _imuFlow = MutableSharedFlow<FloatArray>(
         replay              = 0,
-        extraBufferCapacity = 2,
+        extraBufferCapacity = 4,  // buffer lebih besar agar tidak drop saat Android busy render
         onBufferOverflow    = BufferOverflow.DROP_OLDEST
     )
     val imuFlow: SharedFlow<FloatArray> = _imuFlow
 
     private val _tofFlow = MutableSharedFlow<IntArray>(
         replay              = 0,
-        extraBufferCapacity = 2,
+        extraBufferCapacity = 4,  // buffer lebih besar agar tidak drop saat Android busy render
         onBufferOverflow    = BufferOverflow.DROP_OLDEST
     )
     val tofFlow: SharedFlow<IntArray> = _tofFlow
@@ -240,32 +243,64 @@ class CameraStreamService : Service() {
                             if (stopped) return
                             runCatching {
                                 val raw = bytes.toByteArray()
-                                if (raw.size < FRAME_HEADER_SZ) return
-                                val type = raw[0]
+                                if (raw.size < FRAME_HEADER_SZ) {
+                                    Log.w(TAG, "Frame terlalu kecil: ${raw.size}B < $FRAME_HEADER_SZ")
+                                    return
+                                }
+                                val type    = raw[0]
                                 val payload = raw.copyOfRange(FRAME_HEADER_SZ, raw.size)
-                                
+
+                                // Log setiap tipe frame yang diterima (kecuali JPEG dan IMU yang frekuensinya tinggi)
+                                when (type) {
+                                    FRAME_TYPE_JPEG -> { /* high freq, no log */ }
+                                    FRAME_TYPE_IMU  -> { /* high freq, no log */ }
+                                    FRAME_TYPE_TOF  -> Log.d(TAG, "TOF frame diterima: payload=${payload.size}B")
+                                    FRAME_TYPE_HBEAT -> Log.d(TAG, "Heartbeat diterima")
+                                    else -> Log.w(TAG, "Frame tidak dikenal: type=0x%02X size=${raw.size}B".format(type.toInt() and 0xFF))
+                                }
+
                                 serviceScope.launch {
-                                    runCatching {
-                                        when (type) {
-                                            FRAME_TYPE_JPEG -> _frameFlow.emit(payload)
-                                            FRAME_TYPE_IMU -> {
-                                                if (payload.size >= 24) {
-                                                    val floats = FloatArray(6)
-                                                    java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer().get(floats)
-                                                    _imuFlow.emit(floats)
-                                                }
-                                            }
-                                            FRAME_TYPE_TOF -> {
-                                                if (payload.size >= 128) {
-                                                    val ints = IntArray(64)
-                                                    val shortBuffer = java.nio.ByteBuffer.wrap(payload).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                                                    for (i in 0 until 64) {
-                                                        ints[i] = shortBuffer.get(i).toInt()
-                                                    }
-                                                    _tofFlow.emit(ints)
-                                                }
+                                    when (type) {
+                                        FRAME_TYPE_JPEG -> _frameFlow.emit(payload)
+                                        FRAME_TYPE_IMU  -> {
+                                            if (payload.size >= 24) {
+                                                val floats = FloatArray(6)
+                                                java.nio.ByteBuffer.wrap(payload)
+                                                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                                    .asFloatBuffer().get(floats)
+                                                _imuFlow.emit(floats)
                                             }
                                         }
+                                        FRAME_TYPE_TOF  -> {
+                                            if (payload.size >= 128) {
+                                                val ints = IntArray(64)
+                                                val buf  = java.nio.ByteBuffer.wrap(payload)
+                                                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                                    .asShortBuffer()
+                                                var allZero = true
+                                                
+                                                val targetStatus = if (payload.size >= 192) {
+                                                    payload.copyOfRange(128, 192)
+                                                } else null
+
+                                                for (i in 0 until 64) {
+                                                    ints[i] = buf.get(i).toInt() and 0xFFFF
+                                                    if (ints[i] == 0 && targetStatus != null) {
+                                                        // Jika jarak 0, tampilkan status sensor sebagai nilai negatif
+                                                        val status = targetStatus[i].toInt() and 0xFF
+                                                        ints[i] = status * -1
+                                                    }
+                                                    if (ints[i] > 0) allZero = false
+                                                }
+                                                _tofFlow.emit(ints)
+                                                if (allZero) {
+                                                    Log.w(TAG, "TOF WARNING: Frame berisi 0 (atau error status) semua!")
+                                                }
+                                            } else {
+                                                Log.e(TAG, "TOF payload terlalu kecil: ${payload.size}B < 128B!")
+                                            }
+                                        }
+                                        // FRAME_TYPE_HBEAT (0x03) diabaikan — sudah cukup sebagai keepalive
                                     }
                                 }
                             }

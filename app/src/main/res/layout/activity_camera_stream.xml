@@ -42,37 +42,53 @@
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 
-    <!-- IMU Data Panel (Top Left) -->
+    <!-- IMU / EKF Data Panel (Top Left) — lebih prominent -->
     <LinearLayout
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="top|start"
-        android:layout_margin="16dp"
+        android:layout_margin="8dp"
         android:orientation="vertical"
-        android:background="#80000000"
-        android:padding="8dp">
+        android:background="#CC000000"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
+
+        <!-- Label judul panel -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="● EKF / MPU6050"
+            android:textColor="#4FC3F7"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="4dp" />
 
         <TextView
             android:id="@+id/tvImuPitch"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Pitch: 0.0"
+            android:text="Pitch:  0.0°"
             android:textColor="#FFFFFF"
-            android:textSize="12sp" />
+            android:textSize="13sp"
+            android:fontFamily="monospace" />
         <TextView
             android:id="@+id/tvImuRoll"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Roll: 0.0"
+            android:text="Roll:   0.0°"
             android:textColor="#FFFFFF"
-            android:textSize="12sp" />
+            android:textSize="13sp"
+            android:fontFamily="monospace" />
         <TextView
             android:id="@+id/tvImuAccel"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Accel: 0.0"
+            android:text="Accel:  0.00 m/s²"
             android:textColor="#FFFFFF"
-            android:textSize="12sp" />
+            android:textSize="13sp"
+            android:fontFamily="monospace" />
     </LinearLayout>
 
     <!-- Overlay: Status + Controls (bottom) -->

@@ -92,6 +92,7 @@ using namespace BLA;
 #define LPN_PIN 14 // VL53L5CX enable pin
 
 SemaphoreHandle_t i2c_mutex;
+SemaphoreHandle_t ws_mutex;   // Proteksi ws.binaryAll() dari multiple FreeRTOS tasks
 Adafruit_MPU6050 mpu;
 SparkFun_VL53L5CX myImager;
 VL53L5CX_ResultsData measurementData;
@@ -122,9 +123,9 @@ TaskHandle_t TOF_TaskHandle;
 // ======== WebSocket FRAME PROTOCOL ========
 // Tipe frame — extensible untuk sensor masa depan
 #define FRAME_TYPE_JPEG  0x01  // Kamera JPEG
-#define FRAME_TYPE_IMU   0x02  // IMU/EKF (MPU6050) — reserved, belum aktif
+#define FRAME_TYPE_IMU   0x02  // IMU/EKF (MPU6050) — aktif, 6 float × 4B = 24B payload
 #define FRAME_TYPE_HBEAT 0x03  // Heartbeat / keepalive
-#define FRAME_TYPE_TOF   0x04  // ToF sensor (VL53L5CX) — reserved, belum aktif
+#define FRAME_TYPE_TOF   0x04  // ToF sensor (VL53L5CX) — aktif, 64 int16_t × 2B = 128B payload
 #define FRAME_TYPE_CTRL  0x05  // Control / config command
 #define FRAME_HEADER_SZ  9     // 1B type + 8B timestamp_us (little-endian)
 
@@ -140,6 +141,16 @@ static constexpr uint32_t HEAP_GUARD_BYTES  = 30000;
 static constexpr uint32_t POWER_SAVE_TIMEOUT = 30000;  // 30 detik tanpa client → hemat daya
 
 // ======== GLOBAL STATE ========
+typedef struct {
+    uint8_t* data;
+    size_t len;
+} WsMessage_t;
+QueueHandle_t wsQueue = NULL;
+
+volatile uint32_t stat_frames_cam = 0;
+volatile uint32_t stat_frames_imu = 0;
+volatile uint32_t stat_frames_tof = 0;
+
 Adafruit_NeoPixel rgbLed(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 Preferences        preferences;
 
@@ -305,8 +316,8 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             break;
         case WS_EVT_DISCONNECT:
             Serial.printf("[WS] Client #%u disconnected\n", client->id());
-            // Cek apakah masih ada client lain
-            wsClientConnected = (ws.count() > 1);
+            // ws.count() sudah terupdate (berkurang 1) saat callback ini dipanggil
+            wsClientConnected = (ws.count() > 0);
             if (!wsClientConnected && hadClientBefore) {
                 // Semua client disconnect — catat waktu untuk timer power save
                 lastClientLostTime = millis();
@@ -380,7 +391,16 @@ void captureAndSend() {
     if (fb)             esp_camera_fb_return(fb);
     else if (converted) free(jpg_buf);
 
-    ws.binaryAll(g_wsBuf, total);
+    // KRITIS: ws.binaryAll() dipanggil dari loop() DAN dari IMU_Task/TOF_Task
+    // ESPAsyncWebServer TIDAK thread-safe — gunakan mutex untuk cegah korupsi
+    if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        for (auto& client : ws.getClients()) {
+            if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+                client.binary(g_wsBuf, total);
+            }
+        }
+        xSemaphoreGive(ws_mutex);
+    }
 }
 
 // ======== START WEBSOCKET SERVER ========
@@ -612,6 +632,42 @@ void initBLE() {
 }
 
 // ======== SENSOR TASKS ========
+float accel_bias[3] = {0.0f, 0.0f, 0.0f};
+
+void calibrateAccelBias(int n_samples = 500) {
+    Serial.println("[CAL] Kalibrasi akselerometer — jangan gerakkan device...");
+    double sum[3] = {0, 0, 0};
+
+    for (int i = 0; i < n_samples; i++) {
+        sensors_event_t a, g, temp;
+        if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
+            mpu.getEvent(&a, &g, &temp);
+            xSemaphoreGive(i2c_mutex);
+        }
+        sum[0] += a.acceleration.x;
+        sum[1] += a.acceleration.y;
+        sum[2] += a.acceleration.z;
+        delay(2);
+    }
+
+    float mean[3] = {
+        (float)(sum[0] / n_samples),
+        (float)(sum[1] / n_samples),
+        (float)(sum[2] / n_samples)
+    };
+
+    // Hitung arah gravitasi dominan dari mean, lalu kurangi g_const
+    float g_meas = sqrt(mean[0]*mean[0] + mean[1]*mean[1] + mean[2]*mean[2]);
+    float scale  = g_const / g_meas;  // normalisasi ke g_const yang diharapkan
+
+    accel_bias[0] = mean[0] - mean[0] * scale;
+    accel_bias[1] = mean[1] - mean[1] * scale;
+    accel_bias[2] = mean[2] - mean[2] * scale;
+
+    Serial.printf("[CAL] Accel bias: X=%.4f Y=%.4f Z=%.4f m/s²\n",
+                  accel_bias[0], accel_bias[1], accel_bias[2]);
+}
+
 void initEKFState(float ax, float ay, float az) {
   float theta0 = atan2(ay, sqrt(ax*ax + az*az));
   float phi0   = atan2(-ax, az);
@@ -637,7 +693,9 @@ void IMU_Task(void *pvParameters) {
       xSemaphoreGive(i2c_mutex);
     }
 
-    float ax = a.acceleration.x; float ay = a.acceleration.y; float az = a.acceleration.z;
+    float ax = a.acceleration.x - accel_bias[0];
+    float ay = a.acceleration.y - accel_bias[1];
+    float az = a.acceleration.z - accel_bias[2];
     float wx = g.gyro.x;         float wy = g.gyro.y;         float wz = g.gyro.z;
 
     float wx_corr = wx - x_ekf(4); float wy_corr = wy - x_ekf(5); float wz_corr = wz - x_ekf(6);
@@ -703,14 +761,26 @@ void IMU_Task(void *pvParameters) {
 
     last_ts_esp = current_ts_esp;
 
-    if (wsClientConnected && !powerSaveMode) {
-      uint8_t imu_buf[33]; 
-      uint64_t ts_us = esp_timer_get_time();
-      imu_buf[0] = FRAME_TYPE_IMU;
-      memcpy(imu_buf + 1, &ts_us, 8);
-      float payload[6] = {theta, phi, wx_corr_deg, wy_corr_deg, wz_corr_deg, a_lin_mag};
-      memcpy(imu_buf + 9, payload, 24);
-      ws.binaryAll(imu_buf, 33);
+    // Rate-limit WebSocket send: EKF tetap 200Hz, tapi kirim ke WS hanya ~20Hz (setiap 10 iterasi)
+    // Mengurangi tekanan mutex dan bandwidth tanpa mengorbankan akurasi EKF
+    static uint8_t imu_send_tick = 0;
+    if (wsClientConnected && !powerSaveMode && (++imu_send_tick >= 10)) {
+      imu_send_tick = 0;
+      uint8_t* imu_buf = (uint8_t*)malloc(33);
+      if (imu_buf) {
+        uint64_t ts_us = esp_timer_get_time();
+        imu_buf[0] = FRAME_TYPE_IMU;
+        memcpy(imu_buf + 1, &ts_us, 8);
+        float payload[6] = {theta, phi, wx_corr_deg, wy_corr_deg, wz_corr_deg, a_lin_mag};
+        memcpy(imu_buf + 9, payload, 24);
+
+        WsMessage_t msg = {imu_buf, 33};
+        if (xQueueSend(wsQueue, &msg, 0) != pdTRUE) {
+            free(imu_buf); // Cegah memory leak jika queue penuh
+        } else {
+            stat_frames_imu++; // Counter untuk log statistik
+        }
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -733,15 +803,26 @@ void TOF_Task(void *pvParameters) {
       }
 
       if (gotData && wsClientConnected && !powerSaveMode) {
-        uint8_t tof_buf[137]; 
-        uint64_t ts_us = esp_timer_get_time();
-        tof_buf[0] = FRAME_TYPE_TOF;
-        memcpy(tof_buf + 1, &ts_us, 8);
-        memcpy(tof_buf + 9, measurementData.distance_mm, 128);
-        ws.binaryAll(tof_buf, 137);
+        // Alokasi memori tambahan untuk target_status (64 byte)
+        // Header(1) + TS(8) + Distance(128) + Status(64) = 201 bytes
+        uint8_t* tof_buf = (uint8_t*)malloc(201);
+        if (tof_buf) {
+          uint64_t ts_us = esp_timer_get_time();
+          tof_buf[0] = FRAME_TYPE_TOF;
+          memcpy(tof_buf + 1, &ts_us, 8);
+          memcpy(tof_buf + 9, measurementData.distance_mm, 128);
+          memcpy(tof_buf + 137, measurementData.target_status, 64); // Tambahkan status
+
+          WsMessage_t msg = {tof_buf, 201};
+          if (xQueueSend(wsQueue, &msg, 0) != pdTRUE) {
+              free(tof_buf); // Cegah memory leak jika queue penuh
+          } else {
+              stat_frames_tof++; // Counter untuk log statistik
+          }
+        }
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(60)); 
+    vTaskDelay(pdMS_TO_TICKS(10)); 
   }
 }
 
@@ -758,12 +839,16 @@ void setup() {
 
     Serial.println("[1.5/2] Initializing I2C & Sensors...");
     i2c_mutex = xSemaphoreCreateMutex();
+    ws_mutex  = xSemaphoreCreateMutex();  // Mutex untuk ws.binaryAll() thread safety
+    wsQueue   = xQueueCreate(20, sizeof(WsMessage_t)); // Queue untuk WebSocket thread safety
+    
+    // POWER UP SENSORS FIRST
     pinMode(LPN_PIN, OUTPUT);
     digitalWrite(LPN_PIN, HIGH);
-    delay(100);
-    
+    delay(200); // Tunggu VL53L5CX boot up
+
     Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(400000);
+    Wire.setClock(400000); 
 
     if (!mpu.begin(0x68, &Wire)) {
         Serial.println("[WARN] MPU6050 tidak terdeteksi!");
@@ -771,21 +856,26 @@ void setup() {
         mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
         mpu.setGyroRange(MPU6050_RANGE_250_DEG);
         mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+        calibrateAccelBias();
         sensors_event_t a, g, temp;
         mpu.getEvent(&a, &g, &temp);
-        initEKFState(a.acceleration.x, a.acceleration.y, a.acceleration.z);
+        initEKFState(a.acceleration.x - accel_bias[0], a.acceleration.y - accel_bias[1], a.acceleration.z - accel_bias[2]);
         last_ts_esp = millis();
-        xTaskCreatePinnedToCore(IMU_Task, "IMU_Task", 8192, NULL, 2, &EKF_TaskHandle, 1);
+        // Aktifkan kembali IMU_Task
+        xTaskCreatePinnedToCore(IMU_Task, "IMU_Task", 12288, NULL, 2, &EKF_TaskHandle, 1);
         Serial.println("[OK] MPU6050 & EKF Started.");
     }
 
+    Wire.setClock(100000); // 100kHz untuk upload firmware 90KB yang sangat rentan error
     if (myImager.begin() == false) {
         Serial.println("[WARN] VL53L5CX tidak terdeteksi!");
     } else {
+        Wire.setClock(400000); // Kembalikan ke 400kHz setelah firmware sukses diupload
+        myImager.setWireMaxPacketSize(128); // ESP32 I2C transaction optimization
         myImager.setResolution(8 * 8);
-        myImager.setRangingFrequency(15);
+        myImager.setRangingFrequency(10); // Turunkan ke 10Hz agar I2C stabil
         myImager.startRanging();
-        xTaskCreatePinnedToCore(TOF_Task, "TOF_Task", 4096, NULL, 1, &TOF_TaskHandle, 1);
+        xTaskCreatePinnedToCore(TOF_Task, "TOF_Task", 6144, NULL, 1, &TOF_TaskHandle, 1);
         Serial.println("[OK] VL53L5CX Started.");
     }
 
@@ -870,7 +960,10 @@ void loop() {
                 clearWiFiCredentials();
 
                 // 2. Tutup semua koneksi WebSocket yang masih aktif secara graceful
-                ws.closeAll();
+                if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    ws.closeAll();
+                    xSemaphoreGive(ws_mutex);
+                }
                 wsClientConnected = false;
                 delay(100);
 
@@ -1000,11 +1093,30 @@ void loop() {
             }
         }
 
+        // PROSES ANTRIAN WEBSOCKET DARI SENSOR
+        WsMessage_t msg;
+        while (xQueueReceive(wsQueue, &msg, 0) == pdTRUE) {
+            if (!powerSaveMode && wsClientConnected && ws.count() > 0) {
+                if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    for (auto& client : ws.getClients()) {
+                        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+                            client.binary(msg.data, msg.len);
+                        }
+                    }
+                    xSemaphoreGive(ws_mutex);
+                }
+            }
+            free(msg.data); // Bebaskan memori yang dialokasikan di task
+        }
+
         // Capture & kirim frame (dilewati jika powerSaveMode atau tidak ada client)
         if (nowUs - lastFrameUs >= TARGET_FRAME_US) {
             lastFrameUs = nowUs;
             captureAndSend();
-            if (!powerSaveMode && wsClientConnected) framesSent++;
+            if (!powerSaveMode && wsClientConnected) {
+                framesSent++;
+                stat_frames_cam++;
+            }
         }
 
         // Bersihkan koneksi WS mati setiap 2 detik
@@ -1052,13 +1164,20 @@ void loop() {
         if (nowMs - lastHbeat >= WS_PING_INTERVAL) {
             lastHbeat = nowMs;
 
-            // Log statistik
+            // Log statistik yang diperkaya untuk cek aliran data sensor
             Serial.printf("[STAT] Heap: %u B | WS clients: %u | FPS ~%.1f | PowerSave: %s\n",
                 esp_get_free_heap_size(),
                 ws.count(),
                 (float)framesSent * 1000.0f / WS_PING_INTERVAL,
                 powerSaveMode ? "ON" : "OFF");
+            
+            Serial.printf("       [DATA SENT] CAM: %u | IMU: %u | TOF: %u\n", 
+                stat_frames_cam, stat_frames_imu, stat_frames_tof);
+            
             framesSent = 0;
+            stat_frames_cam = 0;
+            stat_frames_imu = 0;
+            stat_frames_tof = 0;
 
             // Heartbeat ke client aktif
             if (ws.count() > 0) {
@@ -1066,7 +1185,14 @@ void loop() {
                 const uint64_t ts = esp_timer_get_time();
                 hbeat[0] = FRAME_TYPE_HBEAT;
                 memcpy(hbeat + 1, &ts, 8);
-                ws.binaryAll(hbeat, FRAME_HEADER_SZ);
+                if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    for (auto& client : ws.getClients()) {
+                        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+                            client.binary(hbeat, FRAME_HEADER_SZ);
+                        }
+                    }
+                    xSemaphoreGive(ws_mutex);
+                }
             }
         }
     }

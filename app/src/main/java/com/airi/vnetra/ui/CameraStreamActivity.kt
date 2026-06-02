@@ -63,6 +63,8 @@ class CameraStreamActivity : AppCompatActivity() {
     private var isBound          = false
     private var frameCollectJob: Job? = null
     private var stateCollectJob: Job? = null
+    private var imuCollectJob:   Job? = null
+    private var tofCollectJob:   Job? = null
     private var ipAddress:       String = ""
 
     private lateinit var tofViews: Array<android.widget.TextView>
@@ -352,15 +354,19 @@ class CameraStreamActivity : AppCompatActivity() {
     }
 
     private fun startCollectingSensors() {
-        lifecycleScope.launch(Dispatchers.Default) {
+        // Cancel collector sebelumnya agar tidak ada multiple collectors saat reconnect
+        imuCollectJob?.cancel()
+        tofCollectJob?.cancel()
+
+        imuCollectJob = lifecycleScope.launch(Dispatchers.Default) {
             try {
                 streamService?.imuFlow?.collect { imuData ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring && imuData.size >= 6) {
-                            binding.tvImuPitch.text = "Pitch: %.1f".format(imuData[0])
-                            binding.tvImuRoll.text = "Roll: %.1f".format(imuData[1])
-                            binding.tvImuAccel.text = "Accel: %.2f".format(imuData[5])
+                            binding.tvImuPitch.text = "Pitch: %.1f°".format(imuData[0])
+                            binding.tvImuRoll.text  = "Roll: %.1f°".format(imuData[1])
+                            binding.tvImuAccel.text = "Accel: %.2f m/s²".format(imuData[5])
                         }
                     }
                 }
@@ -369,12 +375,13 @@ class CameraStreamActivity : AppCompatActivity() {
             }
         }
 
-        lifecycleScope.launch(Dispatchers.Default) {
+        tofCollectJob = lifecycleScope.launch(Dispatchers.Default) {
             try {
                 streamService?.tofFlow?.collect { tofData ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     withContext(Dispatchers.Main) {
-                        if (!isDestroyed && !isFinishing && !isAkhiring && tofData.size >= 64 && ::tofViews.isInitialized) {
+                        if (!isDestroyed && !isFinishing && !isAkhiring
+                            && tofData.size >= 64 && ::tofViews.isInitialized) {
                             for (i in 0 until 64) {
                                 tofViews[i].text = "${tofData[i]}"
                             }
@@ -506,6 +513,8 @@ class CameraStreamActivity : AppCompatActivity() {
     private fun cancelAllJobs() {
         runCatching { frameCollectJob?.cancel() }; frameCollectJob = null
         runCatching { stateCollectJob?.cancel() }; stateCollectJob = null
+        runCatching { imuCollectJob?.cancel() };   imuCollectJob   = null
+        runCatching { tofCollectJob?.cancel() };   tofCollectJob   = null
     }
 
     private var isFullscreen = false
@@ -521,22 +530,52 @@ class CameraStreamActivity : AppCompatActivity() {
     }
 
     private fun initTofGrid() {
-        tofViews = Array(64) { android.widget.TextView(this) }
-        for (i in 0 until 64) {
-            val tv = android.widget.TextView(this).apply {
-                layoutParams = android.widget.GridLayout.LayoutParams().apply {
-                    width = 0
-                    height = 0
-                    columnSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
-                    rowSpec = android.widget.GridLayout.spec(android.widget.GridLayout.UNDEFINED, 1f)
+        // Buat 64 cell dulu tanpa ukuran — ukuran akan di-set setelah GridLayout selesai di-layout
+        tofViews = Array(64) { i ->
+            android.widget.TextView(this).apply {
+                // Posisi eksplisit: row = i/8, col = i%8 — deterministik, tidak bergantung auto-placement
+                val row = i / 8
+                val col = i % 8
+                layoutParams = android.widget.GridLayout.LayoutParams(
+                    android.widget.GridLayout.spec(row),
+                    android.widget.GridLayout.spec(col)
+                ).apply {
+                    width  = 1   // placeholder ≥1 agar view tidak di-skip oleh measure pass
+                    height = 1
+                    setMargins(1, 1, 1, 1)
                 }
                 gravity = android.view.Gravity.CENTER
                 setTextColor(android.graphics.Color.WHITE)
-                textSize = 10f
-                setBackgroundColor(android.graphics.Color.parseColor("#40000000"))
+                textSize = 7.5f
+                text     = "—"
+                setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
+            }.also { binding.gridTof.addView(it) }
+        }
+
+        // Setelah GridLayout selesai di-measure & di-layout, baru set ukuran pixel exakt per-cell.
+        // Ini garantees cell terlihat — weight-spec approach tidak reliable sebelum first layout pass.
+        binding.gridTof.post {
+            val gridW = binding.gridTof.width
+            val gridH = binding.gridTof.height
+            if (gridW <= 0 || gridH <= 0) return@post
+
+            val cellW = gridW / 8
+            val cellH = gridH / 8
+
+            tofViews.forEachIndexed { i, tv ->
+                val row = i / 8
+                val col = i % 8
+                tv.layoutParams = android.widget.GridLayout.LayoutParams(
+                    android.widget.GridLayout.spec(row),
+                    android.widget.GridLayout.spec(col)
+                ).apply {
+                    width  = cellW
+                    height = cellH
+                    setMargins(1, 1, 1, 1)
+                }
             }
-            tofViews[i] = tv
-            binding.gridTof.addView(tv)
+            binding.gridTof.requestLayout()
+            android.util.Log.d("TofGrid", "Cell sized: ${cellW}x${cellH}px, grid: ${gridW}x${gridH}px")
         }
     }
 }
