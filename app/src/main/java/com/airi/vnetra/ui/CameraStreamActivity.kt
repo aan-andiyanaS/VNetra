@@ -566,18 +566,18 @@ class CameraStreamActivity : AppCompatActivity() {
     }
 
     private fun initTofGrid() {
-        // Buat 64 cell dulu tanpa ukuran — ukuran akan di-set setelah GridLayout selesai di-layout
+        // Buat 64 cell dulu dengan pembobotan (weight) agar berukuran sama rata secara otomatis
         tofViews = Array(64) { i ->
             android.widget.TextView(this).apply {
                 // Posisi eksplisit: row = i/8, col = i%8 — deterministik, tidak bergantung auto-placement
                 val row = i / 8
                 val col = i % 8
                 layoutParams = android.widget.GridLayout.LayoutParams(
-                    android.widget.GridLayout.spec(row),
-                    android.widget.GridLayout.spec(col)
+                    android.widget.GridLayout.spec(row, 1f), // Tambahkan bobot 1f
+                    android.widget.GridLayout.spec(col, 1f)  // Tambahkan bobot 1f
                 ).apply {
-                    width  = 1   // placeholder ≥1 agar view tidak di-skip oleh measure pass
-                    height = 1
+                    width  = 0   // Harus 0 agar weight membagi ruang rata
+                    height = 0   // Harus 0 agar weight membagi ruang rata
                     setMargins(1, 1, 1, 1)
                 }
                 gravity = android.view.Gravity.CENTER
@@ -586,32 +586,6 @@ class CameraStreamActivity : AppCompatActivity() {
                 text     = "—"
                 setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
             }.also { binding.gridTof.addView(it) }
-        }
-
-        // Setelah GridLayout selesai di-measure & di-layout, baru set ukuran pixel exakt per-cell.
-        // Ini garantees cell terlihat — weight-spec approach tidak reliable sebelum first layout pass.
-        binding.gridTof.post {
-            val gridW = binding.gridTof.width
-            val gridH = binding.gridTof.height
-            if (gridW <= 0 || gridH <= 0) return@post
-
-            val cellW = gridW / 8
-            val cellH = gridH / 8
-
-            tofViews.forEachIndexed { i, tv ->
-                val row = i / 8
-                val col = i % 8
-                tv.layoutParams = android.widget.GridLayout.LayoutParams(
-                    android.widget.GridLayout.spec(row),
-                    android.widget.GridLayout.spec(col)
-                ).apply {
-                    width  = cellW
-                    height = cellH
-                    setMargins(1, 1, 1, 1)
-                }
-            }
-            binding.gridTof.requestLayout()
-            android.util.Log.d("TofGrid", "Cell sized: ${cellW}x${cellH}px, grid: ${gridW}x${gridH}px")
         }
     }
 }
