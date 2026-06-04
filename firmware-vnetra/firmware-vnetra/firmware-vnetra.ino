@@ -1169,7 +1169,7 @@ void setup() {
     Serial.println("[SENSOR] Initializing I2C & Sensors...");
     pinMode(LPN_PIN, OUTPUT);
     digitalWrite(LPN_PIN, HIGH);
-    delay(200); // Tunggu VL53L5CX boot up
+    delay(100); // Tunggu VL53L5CX boot up (diselaraskan dengan issue.md)
 
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(400000);
