@@ -132,7 +132,7 @@ TaskHandle_t TOF_TaskHandle;
 
 // ======== TUNING ========
 static constexpr uint8_t  JPEG_QUALITY      = 20;      // 0=best, 63=worst
-static constexpr uint32_t TARGET_FRAME_US   = 66666;   // ~15 FPS
+static constexpr uint32_t TARGET_FRAME_US   = 100000;   // ~10 FPS
 static constexpr uint32_t WS_PING_INTERVAL  = 10000;   // ms — heartbeat setiap 10 detik
 static constexpr size_t   WS_BUF_MAX        = 130*1024;
 static constexpr uint32_t HEAP_GUARD_BYTES  = 30000;
