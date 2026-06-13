@@ -422,9 +422,11 @@ class CameraStreamActivity : AppCompatActivity() {
                             // (Jangan auto-rebuild: bisa menimpa pilihan user & menyebabkan crash)
                             if (tofData.size != tofViews.size) return@withContext
 
-                            // Update cell values
+                            // Update cell values and background colors based on distance
                             for (i in tofData.indices) {
-                                tofViews[i].text = "${tofData[i]}"
+                                val distance = tofData[i]
+                                tofViews[i].text = "$distance"
+                                tofViews[i].setBackgroundColor(getColorForDistance(distance))
                             }
                         }
                     }
@@ -573,10 +575,34 @@ class CameraStreamActivity : AppCompatActivity() {
                 binding.tvImuAccel.text = "Accel: —"
                 binding.ivCameraFrame.setImageResource(android.R.color.transparent)
                 if (::tofViews.isInitialized) {
-                    tofViews.forEach { it.text = "—" }
+                    tofViews.forEach {
+                        it.text = "—"
+                        it.setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
+                    }
                 }
             }
         }
+    }
+
+    /**
+     * Mengembalikan warna gradasi semi-transparan berdasarkan jarak ToF.
+     * Jarak <= 200mm = Merah penuh.
+     * Jarak >= 2000mm = Hijau penuh.
+     * Jarak di antaranya = Gradasi (Merah -> Oranye -> Kuning -> Hijau).
+     */
+    private fun getColorForDistance(distance: Int): Int {
+        if (distance <= 0) {
+            // Default background: semi-transparent black
+            return android.graphics.Color.parseColor("#60000000")
+        }
+        val minDistance = 200f
+        val maxDistance = 2000f
+        val clampedDistance = distance.coerceIn(minDistance.toInt(), maxDistance.toInt()).toFloat()
+        val ratio = (clampedDistance - minDistance) / (maxDistance - minDistance)
+        val hue = ratio * 120f // 0f (Merah) s.d 120f (Hijau)
+        val hsv = floatArrayOf(hue, 1f, 1f)
+        // Alpha: 96 (~37% opacity) agar background grid tidak menutupi gambar kamera di belakangnya
+        return android.graphics.Color.HSVToColor(96, hsv)
     }
 
     private var isFullscreen = false
