@@ -1,31 +1,37 @@
-# Ringkasan Perbaikan Mode Resolusi ToF (8x8 & 4x4)
+# Plan: Implementasi Gradasi Warna Dinamis Berdasarkan Jarak pada Grid ToF
 
-Dokumen ini merangkum semua perubahan, penambahan fitur, serta pengurangan kode pada komit/perubahan terakhir guna memperbaiki stabilitas perpindahan mode sensor ToF VL53L5CX (4x4 dan 8x8).
+## 📌 Deskripsi Tugas
+Tujuan dari task ini adalah menambahkan indikator visual yang intuitif berupa gradasi warna pada setiap *cell* (sel) di antarmuka Android berdasarkan pembacaan jarak dari sensor ToF. 
+- **Semakin dekat** jarak objek = Warna latar *cell* menjadi **Merah** 🔴
+- **Semakin jauh** jarak objek = Warna latar *cell* menjadi **Hijau** 🟢
 
-## 🚀 Fitur dan Perbaikan yang Ditambahkan
+## 🛠️ Rencana Implementasi (High-Level)
 
-### 1. Perbaikan Kritis pada Android (Mencegah Force Close)
-*   **Perbaikan Urutan Render UI (`CameraStreamActivity`):** Memperbaiki bug *crash* (force close) saat perpindahan dari 8x8 ke 4x4. Sebelumnya, mengubah matriks matriks kolom/baris (`columnCount`) saat sel-sel lama masih ada menyebabkan _ArrayIndexOutOfBoundsException_ internal pada Android `GridLayout`. Solusinya: Pemanggilan `removeAllViews()` kini dilakukan **sebelum** melakukan pembaruan matriks kolom/baris.
-*   **Penanganan Transisi Frame yang Aman:** Alih-alih melakukan *auto-rebuild* grid saat menerima data dengan ukuran tidak terduga, sistem pada `tofCollectJob` kini dirancang untuk mendeteksi _mismatch_ antara jumlah sel layar dan panjang paket data. Jika terjadi ketidaksesuaian (karena proses transisi asinkron), aplikasi secara otomatis mengabaikan (skip) frame tersebut hingga ukuran layar dan data berhasil sinkron. Hal ini mencegah error *crash loop*.
+### 1. Tentukan Batas Jarak (Thresholds)
+Tentukan nilai batas jarak (dalam milimeter) untuk dijadikan acuan normalisasi. Nilai ini bisa disesuaikan nanti melalui pengujian langsung.
+- `MIN_DISTANCE` (misal: `200` mm) -> Jarak ini dan di bawahnya akan bernilai Merah penuh.
+- `MAX_DISTANCE` (misal: `1500` mm atau `2000` mm) -> Jarak ini dan di atasnya akan bernilai Hijau penuh.
 
-### 2. Persistensi State Mode & Sinkronisasi
-*   **Simpan Preferensi Lokal (SharedPreferences):** Mengimplementasikan mekanisme penyimpanan resolusi yang dipilih menggunakan `SharedPreferences`. Jika pengguna memilih mode 4x4 dan menutup aplikasi, aplikasi akan memuat antarmuka 4x4 secara *default* di sesi berikutnya.
-*   **Sinkronisasi Mode Auto-Reconnect:** Apabila koneksi terputus atau ESP32 mengalami *restart* mendadak, firmware secara bawaan kembali ke mode awal (8x8). Kini, aplikasi Android otomatis mendeteksi hal tersebut dan secara proaktif mengirimkan paket sinkronisasi ulang (`SET_TOF_MODE:4`) tepat ketika status koneksi tercapai (`CONNECTED`). 
+### 2. Pembuatan Fungsi Kalkulasi Warna (Color Interpolation)
+Buat sebuah fungsi utilitas (*helper method*) yang menerima input jarak aktual (angka) dan mengembalikan format warna UI (biasanya `Int` ARGB).
+**Rekomendasi Algoritma Pendekatan:**
+- **Menggunakan HSB/HSV (Paling Direkomendasikan):** 
+  - Dalam spektrum warna HSV, nilai `Hue` untuk Merah adalah `0` dan Hijau adalah `120`.
+  - Hitung persentase/rasio jarak dari `MIN_DISTANCE` hingga `MAX_DISTANCE`.
+  - Konversi rasio tersebut menjadi nilai `Hue` (dari `0` hingga `120`).
+  - Gunakan kelas pembantu `Color.HSVToColor()` bawaan Android SDK untuk mendapatkan kode warna akhir.
+- **Alternatif (Color Blending):** Anda juga bisa menggunakan `ColorUtils.blendARGB()` dari *AndroidX* untuk mencampurkan dua kode warna heksadesimal berdasarkan rasio kedekatan.
 
-### 3. Perbaikan Kritis dan Stabilitas Firmware (ESP32)
-*   **Parsing *String* Teks WebSocket yang Aman:** Modifikasi cara firmware membaca perintah teks WebSocket. Sebelumnya program mencoba membaca *pointer* data secara kasar (tanpa pengaman batas akhir) yang dapat merusak tumpukan memori (*stack corruption*). Kini, perintah diurai menggunakan metode *buffer null-terminated* murni (`char cmdBuf[32]`) dibantu dengan alokasi statis dan fungsi `memcpy` secara aman.
-*   **Stabilitas Komunikasi Sensor I2C (Mencegah Hang):** Menambahkan *delay settling* selama 100ms tepat setelah sensor dimatikan asupan sinyalnya dengan fungsi `stopRanging()`. 
-*   **Modulasi Clock I2C Dinamis:** Mengamankan transisi register konfigurasi ukuran/frekuensi menggunakan kecepatan pita I2C yang diturunkan perlahan menjadi `100kHz`, dan kemudian dikembalikan menuju batas batas kencang `400kHz` sesaat sebelum instruksi penembakan *laser* dihidupkan ulang (`startRanging()`). Hal ini dirancang mengeliminasi isu VL53L5CX mogok kerja.
-*   **Dinamisasi Panjang Payload UDP/WS:** Memori paket dinamisasi total; tidak lagi boros mengirim memori paket 64-elemen (ukuran paket 8x8) ketika sensor sedang berada di mode 4x4 (16-elemen).
+### 3. Integrasi pada Pembaruan UI (*UI Rendering*)
+- Cari metode/blok kode di aktivitas Anda (sepertinya di dalam `CameraStreamActivity`) yang bertugas menerima *payload* data sensor ToF dan memperbarui teks jarak di setiap *cell* pada `GridLayout`.
+- Pada setiap iterasi sel, panggil fungsi kalkulasi warna yang telah dibuat dengan menyuplai jarak sel tersebut.
+- Ubah properti warna latar belakang dari `View` atau `TextView` milik sel tersebut (contohnya menggunakan `setBackgroundColor(color)`).
 
----
+### 4. Hal yang Harus Diperhatikan (Performa)
+- Logika ini akan berjalan terus menerus pada **setiap frame data sensor** (kurang lebih 15 FPS) dan pada seluruh *cell* (bisa sampai 64 *cell* di mode 8x8).
+- **Efisiensi:** Pastikan operasi matematika di dalam kalkulasi warna sesederhana mungkin. Hindari instansiasi/pembuatan objek kelas secara masif di dalam *looping* pembaruan bingkai/frame untuk mencegah *Garbage Collection* yang berlebihan (dapat membuat aplikasi *patah-patah/stuttering*).
 
-## 🗑️ Hal yang Dihapus / Dikurangkan
-
-### 1. Penghapusan Sinkronisasi Redundan (`tofResJob` & `StateFlow`)
-*   Logika observer asinkron berbasis *Coroutine StateFlow* bernama `tofResJob` yang sebelumnya digunakan di dalam `CameraStreamService` dihapus sepenuhnya. Hal ini secara drastis mengurangi risiko terjadinya _race conditions_ atau keadaan ketika status variabel ukuran dan fungsi antar muka grafis saling berbalapan (yang mana sering memicu *force close*). 
-*   Status resolusi kini dipegang tunggal secara langsung oleh parameter fungsi aktivitas, dan panjang antrean data terkirimlah yang menjadi tolak ukur sah pergantian mode.
-
-### 2. Penghapusan Kode Sensor Pemicu Crash
-*   Baris manipulasi teks tidak aman `String((char*)data).substring(0, len)` pada modul pemroses WebSocket *server* dihilangkan.
-*   Penempatan paksa/tanam baku setelan `setResolution(8 * 8)` pada inisialisasi awal sensor (InitTask) dihapuskan, beralih pada penerapan mode ukuran modular berdasarkan preferensi tersimpan sewaktu alat dihidupkan.
+## ✅ Kriteria Penerimaan (Acceptance Criteria)
+- [ ] *Cell* pada grid mengubah warnanya secara *real-time* saat mendeteksi pergerakan objek mendekat/menjauh.
+- [ ] Transisi warna berjalan dengan halus (gradual dari Merah -> Kuning -> Hijau).
+- [ ] *Frame rate* aplikasi tidak drop atau patah-patah ketika mode gradasi warna ini aktif.
