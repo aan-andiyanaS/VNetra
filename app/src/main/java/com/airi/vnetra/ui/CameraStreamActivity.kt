@@ -69,6 +69,10 @@ class CameraStreamActivity : AppCompatActivity() {
 
     private lateinit var tofViews: Array<android.widget.TextView>
 
+    // Mode ToF aktif: 4 atau 8 (4x4 atau 8x8)
+    // Di-load dari SharedPreferences agar persisten antar sesi
+    private var currentTofMode: Int = 8
+
     // FPS counter
     private var frameCount     = 0
     private var fpsWindowStart = 0L
@@ -137,7 +141,10 @@ class CameraStreamActivity : AppCompatActivity() {
 
         setupBadgeSwipeGesture()
         setupClickListeners()
+        // Load mode tersimpan sebelum init grid
+        currentTofMode = loadTofMode()
         initTofGrid()
+        updateTofModeButtons(currentTofMode)
         showStreamStateSafe(StreamState.CONNECTING)
 
         requestNotificationPermission()
@@ -252,6 +259,16 @@ class CameraStreamActivity : AppCompatActivity() {
         }
 
         binding.ivCameraFrame.setOnClickListener { toggleFullscreen() }
+
+        // ── Tombol mode ToF ──────────────────────────────────────────────────
+        binding.btnTof8x8.setOnClickListener {
+            if (currentTofMode == 8) return@setOnClickListener
+            switchTofMode(8)
+        }
+        binding.btnTof4x4.setOnClickListener {
+            if (currentTofMode == 4) return@setOnClickListener
+            switchTofMode(4)
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -299,13 +316,15 @@ class CameraStreamActivity : AppCompatActivity() {
                 when (state) {
                     CameraStreamService.ConnectionState.CONNECTED -> {
                         showBadgeSafe()
-                        // ── RECONNECT FIX ──
-                        // 1. Sembunyikan spinner reconnecting SEGERA saat connect berhasil
-                        // 2. Restart collectors agar data segar mengalir
-                        // (CancellationException di-rethrow agar tidak trigger ERROR state)
                         showStreamStateSafe(StreamState.STREAMING)
                         startCollectingFrames()
                         startCollectingSensors()
+                        // Resend mode command agar firmware ikut mode yang dipilih user
+                        // (ESP32 selalu default 8x8 saat boot, jadi perlu dikirim ulang)
+                        if (currentTofMode != 8) {
+                            streamService?.sendTofModeCommand(currentTofMode)
+                            android.util.Log.d("CameraStreamActivity", "Resent TOF mode ${currentTofMode}x${currentTofMode} after reconnect")
+                        }
                     }
                     CameraStreamService.ConnectionState.CONNECTING -> {
                         hideBadgeSafe()
@@ -396,8 +415,15 @@ class CameraStreamActivity : AppCompatActivity() {
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring
-                            && tofData.size >= 64 && ::tofViews.isInitialized) {
-                            for (i in 0 until 64) {
+                            && ::tofViews.isInitialized) {
+
+                            // Jika ukuran data tidak cocok dengan jumlah cell grid,
+                            // firmware sedang transisi mode — skip frame ini dan tunggu.
+                            // (Jangan auto-rebuild: bisa menimpa pilihan user & menyebabkan crash)
+                            if (tofData.size != tofViews.size) return@withContext
+
+                            // Update cell values
+                            for (i in tofData.indices) {
                                 tofViews[i].text = "${tofData[i]}"
                             }
                         }
@@ -565,32 +591,111 @@ class CameraStreamActivity : AppCompatActivity() {
         data class ERROR(val message: String) : StreamState()
     }
 
-    private fun initTofGrid() {
-        // Buat 64 cell dulu dengan pembobotan (weight) agar berukuran sama rata secara otomatis
-        tofViews = Array(64) { i ->
+    // ── TOF Mode Switching ────────────────────────────────────────────────────
+
+    /**
+     * Ganti mode TOF: kirim command ke service/firmware, rebuild grid, simpan preference.
+     */
+    private fun switchTofMode(resolution: Int) {
+        if (isDestroyed || isFinishing) return
+        currentTofMode = resolution
+        saveTofMode(resolution)
+        // Kirim command ke firmware via service
+        streamService?.sendTofModeCommand(resolution)
+        // Rebuild grid lokal agar UI langsung responsif
+        rebuildTofGrid(resolution)
+        updateTofModeButtons(resolution)
+        Toast.makeText(this,
+            "Mode ToF: ${resolution}x${resolution}" +
+            if (resolution == 4) " — SNR lebih baik" else "",
+            Toast.LENGTH_SHORT).show()
+    }
+
+    /** Simpan mode ke SharedPreferences */
+    private fun saveTofMode(mode: Int) {
+        runCatching {
+            getSharedPreferences("vnetra_prefs", android.content.Context.MODE_PRIVATE)
+                .edit().putInt("tof_mode", mode).apply()
+        }
+    }
+
+    /** Load mode dari SharedPreferences (default 8x8) */
+    private fun loadTofMode(): Int {
+        return runCatching {
+            getSharedPreferences("vnetra_prefs", android.content.Context.MODE_PRIVATE)
+                .getInt("tof_mode", 8)
+        }.getOrDefault(8)
+    }
+
+    /**
+     * Update visual tombol mode (aktif = biru terang, tidak aktif = abu-abu gelap).
+     */
+    private fun updateTofModeButtons(activeMode: Int) {
+        if (isDestroyed || isFinishing) return
+        runCatching {
+            if (activeMode == 8) {
+                binding.btnTof8x8.setTextColor(android.graphics.Color.WHITE)
+                binding.btnTof8x8.backgroundTintList =
+                    android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#1565C0"))
+                binding.btnTof4x4.setTextColor(android.graphics.Color.parseColor("#90A4AE"))
+                binding.btnTof4x4.backgroundTintList =
+                    android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#263238"))
+            } else {
+                binding.btnTof4x4.setTextColor(android.graphics.Color.WHITE)
+                binding.btnTof4x4.backgroundTintList =
+                    android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#1565C0"))
+                binding.btnTof8x8.setTextColor(android.graphics.Color.parseColor("#90A4AE"))
+                binding.btnTof8x8.backgroundTintList =
+                    android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor("#263238"))
+            }
+        }
+    }
+
+    /**
+     * Hapus semua cell lama dari gridTof dan buat ulang sesuai resolusi baru.
+     * @param resolution 4 = 4x4 (16 cell), 8 = 8x8 (64 cell)
+     */
+    private fun rebuildTofGrid(resolution: Int) {
+        if (isDestroyed || isFinishing) return
+        val numCells   = resolution * resolution
+        val textSizeSp = if (resolution == 4) 11f else 7.5f
+
+        // PENTING: Hapus semua view SEBELUM mengubah columnCount/rowCount.
+        // Jika columnCount diubah dari 8→4 sementara 64 view dengan spec col=7 masih ada,
+        // GridLayout akan crash di layout pass Choreographer (ArrayIndexOutOfBounds internal Android).
+        binding.gridTof.removeAllViews()
+        binding.gridTof.columnCount = resolution
+        binding.gridTof.rowCount    = resolution
+
+        // Buat cell baru
+        tofViews = Array(numCells) { i ->
+            val row = i / resolution
+            val col = i % resolution
             android.widget.TextView(this).apply {
-                val row = i / 8
-                val col = i % 8
                 layoutParams = android.widget.GridLayout.LayoutParams(
-                    android.widget.GridLayout.spec(row, 1f), // Tambahkan bobot 1f
-                    android.widget.GridLayout.spec(col, 1f)  // Tambahkan bobot 1f
+                    android.widget.GridLayout.spec(row, 1f),
+                    android.widget.GridLayout.spec(col, 1f)
                 ).apply {
-                    width  = 0   // Harus 0 agar weight membagi ruang rata
-                    height = 0   // Harus 0 agar weight membagi ruang rata
+                    width  = 0
+                    height = 0
                     setMargins(1, 1, 1, 1)
                 }
                 gravity = android.view.Gravity.CENTER
                 setTextColor(android.graphics.Color.WHITE)
-                textSize = 7.5f
+                textSize = textSizeSp
                 text     = "—"
                 setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
             }.also { binding.gridTof.addView(it) }
         }
 
-        // Setelah GridLayout selesai dirender, geser grid ke atas sebesar tinggi 1 baris
-        // agar baris pertama berada tepat di luar bingkai kamera atas
+        // Reset translasi dan re-apply offset agar baris pertama di atas bingkai
         binding.gridTof.post {
-            binding.gridTof.translationY = -(binding.gridTof.height / 8f)
+            binding.gridTof.translationY = -(binding.gridTof.height.toFloat() / resolution)
         }
+    }
+
+    private fun initTofGrid() {
+        // Bangun grid sesuai mode yang tersimpan
+        rebuildTofGrid(currentTofMode)
     }
 }

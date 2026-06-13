@@ -109,6 +109,12 @@ BLA::Matrix<3, 3> R;
 TaskHandle_t EKF_TaskHandle;
 TaskHandle_t TOF_TaskHandle;
 
+// ======== TOF RESOLUTION MODE ========
+// Resolusi aktif VL53L5CX: 8 (mode 8x8, 64 cell) atau 4 (mode 4x4, 16 cell)
+// Diubah via WebSocket command: SET_TOF_MODE:4 / SET_TOF_MODE:8
+volatile uint8_t  tofResolution     = 8;   // Default 8x8
+volatile bool     tofModeChangePending = false; // Flag: perlu restart ranging
+
 // ======== RESET BUTTON — GPIO 0 (BOOT) ========
 #define RESET_BUTTON_PIN 0
 #define RESET_HOLD_TIME  5000   // ms — tahan 5 detik untuk reset
@@ -377,6 +383,27 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                 esp_camera_sensor_t* s = esp_camera_sensor_get();
                 if (s) s->set_quality(s, data[1]);
                 Serial.printf("[WS] JPEG quality → %d\n", data[1]);
+            }
+            // Command teks: SET_TOF_MODE:4 atau SET_TOF_MODE:8
+            if (info->opcode == WS_TEXT && len > 0 && len < 32) {
+                // Salin ke buffer null-terminated (data[] mungkin tidak null-terminated)
+                char cmdBuf[32] = {0};
+                memcpy(cmdBuf, data, len);
+                String cmd = String(cmdBuf);
+                cmd.trim();
+                if (cmd == "SET_TOF_MODE:4") {
+                    if (tofResolution != 4) {
+                        tofResolution = 4;
+                        tofModeChangePending = true;
+                        Serial.println("[TOF] Mode change requested → 4x4");
+                    }
+                } else if (cmd == "SET_TOF_MODE:8") {
+                    if (tofResolution != 8) {
+                        tofResolution = 8;
+                        tofModeChangePending = true;
+                        Serial.println("[TOF] Mode change requested → 8x8");
+                    }
+                }
             }
             break;
         }
@@ -866,6 +893,24 @@ void IMU_Task(void *pvParameters) {
 
 void TOF_Task(void *pvParameters) {
   for (;;) {
+    // ── Handle mode change request ──────────────────────────────────────────
+    if (tofModeChangePending) {
+      tofModeChangePending = false;
+      uint8_t newRes = tofResolution; // snapshot
+      Serial.printf("[TOF] Applying mode change → %dx%d\n", newRes, newRes);
+      if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
+        myImager.stopRanging();
+        vTaskDelay(pdMS_TO_TICKS(100)); // Tunggu sensor settle setelah stopRanging
+        Wire.setClock(100000);           // Turunkan clock I2C untuk config ulang
+        myImager.setResolution(newRes * newRes);
+        myImager.setRangingFrequency(newRes == 4 ? 15 : 10);
+        Wire.setClock(400000);           // Kembalikan ke fast I2C
+        myImager.startRanging();
+        xSemaphoreGive(i2c_mutex);
+      }
+      Serial.printf("[TOF] Mode %dx%d aktif.\n", newRes, newRes);
+    }
+
     bool dataReady = false;
     if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
       dataReady = myImager.isDataReady();
@@ -880,17 +925,28 @@ void TOF_Task(void *pvParameters) {
       }
 
       if (gotData && wsClientConnected && !powerSaveMode) {
-        // Alokasi memori tambahan untuk target_status (64 byte)
-        // Header(1) + TS(8) + Distance(128) + Status(64) = 201 bytes
-        uint8_t* tof_buf = (uint8_t*)malloc(201);
+        uint8_t  curRes   = tofResolution;           // snapshot untuk konsistensi
+        uint16_t numCells = (uint16_t)curRes * curRes; // 16 (4x4) atau 64 (8x8)
+        uint16_t distSize = numCells * 2;             // int16_t per cell
+        uint16_t statSize = numCells;                 // 1 byte status per cell
+
+        // Payload layout:
+        // [0]       : FRAME_TYPE_TOF (1B)
+        // [1..8]    : timestamp_us (8B)
+        // [9]       : resolusi (1B) — 4 = 4x4, 8 = 8x8
+        // [10..9+distSize] : distance_mm (int16 × numCells)
+        // [10+distSize ..]  : target_status (byte × numCells)
+        uint16_t totalSize = 1 + 8 + 1 + distSize + statSize;
+        uint8_t* tof_buf = (uint8_t*)malloc(totalSize);
         if (tof_buf) {
           uint64_t ts_us = esp_timer_get_time();
           tof_buf[0] = FRAME_TYPE_TOF;
           memcpy(tof_buf + 1, &ts_us, 8);
-          memcpy(tof_buf + 9, measurementData.distance_mm, 128);
-          memcpy(tof_buf + 137, measurementData.target_status, 64); // Tambahkan status
+          tof_buf[9] = curRes;  // resolusi (4 atau 8)
+          memcpy(tof_buf + 10, measurementData.distance_mm, distSize);
+          memcpy(tof_buf + 10 + distSize, measurementData.target_status, statSize);
 
-          WsMessage_t msg = {tof_buf, 201};
+          WsMessage_t msg = {tof_buf, totalSize};
           if (xQueueSend(wsQueue, &msg, 0) != pdTRUE) {
               free(tof_buf); // Cegah memory leak jika queue penuh
           } else {
@@ -899,7 +955,7 @@ void TOF_Task(void *pvParameters) {
         }
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(10)); 
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
@@ -978,8 +1034,8 @@ void TOF_InitTask(void* pvParams) {
         if (ok) {
             Wire.setClock(400000);
             myImager.setWireMaxPacketSize(128);
-            myImager.setResolution(8 * 8);
-            myImager.setRangingFrequency(10);
+            myImager.setResolution(tofResolution * tofResolution); // gunakan mode yang dipilih
+            myImager.setRangingFrequency(tofResolution == 4 ? 15 : 10);
             myImager.startRanging();
         }
         xSemaphoreGive(i2c_mutex);

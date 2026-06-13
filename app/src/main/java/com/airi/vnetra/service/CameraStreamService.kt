@@ -291,32 +291,41 @@ class CameraStreamService : Service() {
                                             }
                                         }
                                         FRAME_TYPE_TOF  -> {
-                                            if (payload.size >= 128) {
-                                                val ints = IntArray(64)
-                                                val buf  = java.nio.ByteBuffer.wrap(payload)
-                                                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                                    .asShortBuffer()
-                                                var allZero = true
-                                                
-                                                val targetStatus = if (payload.size >= 192) {
-                                                    payload.copyOfRange(128, 192)
-                                                } else null
+                                            // Format baru: [0]=resolusi, [1..]= distance_mm, [1+distSize..]= target_status
+                                            if (payload.size >= 2) {
+                                                val resMode = payload[0].toInt() and 0xFF  // 4 atau 8
+                                                val numCells = resMode * resMode           // 16 atau 64
+                                                val distSize = numCells * 2                // bytes jarak
 
-                                                for (i in 0 until 64) {
-                                                    ints[i] = buf.get(i).toInt() and 0xFFFF
-                                                    if (ints[i] == 0 && targetStatus != null) {
-                                                        // Jika jarak 0, tampilkan status sensor sebagai nilai negatif
-                                                        val status = targetStatus[i].toInt() and 0xFF
-                                                        ints[i] = status * -1
+                                                if (payload.size >= 1 + distSize) {
+                                                    val ints = IntArray(numCells)
+                                                    val buf  = java.nio.ByteBuffer.wrap(payload, 1, distSize)
+                                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                                        .asShortBuffer()
+                                                    var allZero = true
+
+                                                    val statusOffset = 1 + distSize
+                                                    val targetStatus = if (payload.size >= statusOffset + numCells) {
+                                                        payload.copyOfRange(statusOffset, statusOffset + numCells)
+                                                    } else null
+
+                                                    for (i in 0 until numCells) {
+                                                        ints[i] = buf.get(i).toInt() and 0xFFFF
+                                                        if (ints[i] == 0 && targetStatus != null) {
+                                                            val status = targetStatus[i].toInt() and 0xFF
+                                                            ints[i] = status * -1
+                                                        }
+                                                        if (ints[i] > 0) allZero = false
                                                     }
-                                                    if (ints[i] > 0) allZero = false
-                                                }
-                                                _tofFlow.emit(ints)
-                                                if (allZero) {
-                                                    Log.w(TAG, "TOF WARNING: Frame berisi 0 (atau error status) semua!")
+                                                    _tofFlow.emit(ints)
+                                                    if (allZero) {
+                                                        Log.w(TAG, "TOF WARNING: Frame berisi 0 (atau error status) semua!")
+                                                    }
+                                                } else {
+                                                    Log.e(TAG, "TOF payload terlalu kecil untuk ${resMode}x${resMode}: ${payload.size}B < ${1 + distSize}B")
                                                 }
                                             } else {
-                                                Log.e(TAG, "TOF payload terlalu kecil: ${payload.size}B < 128B!")
+                                                Log.e(TAG, "TOF payload terlalu kecil: ${payload.size}B < 2B!")
                                             }
                                         }
                                         // FRAME_TYPE_HBEAT (0x03) diabaikan — sudah cukup sebagai keepalive
@@ -373,6 +382,24 @@ class CameraStreamService : Service() {
     }
 
     // ── Locks ────────────────────────────────────────────────────────────────
+
+    /**
+     * Kirim command mode TOF ke ESP32 via WebSocket (teks).
+     * @param resolution 4 untuk 4x4, 8 untuk 8x8
+     */
+    fun sendTofModeCommand(resolution: Int) {
+        val cmd = when (resolution) {
+            4 -> "SET_TOF_MODE:4"
+            8 -> "SET_TOF_MODE:8"
+            else -> return
+        }
+        runCatching {
+            activeWebSocket?.send(cmd)
+            Log.d(TAG, "Sent TOF mode command: $cmd")
+        }.onFailure {
+            Log.e(TAG, "Failed to send TOF mode command: ${it.message}")
+        }
+    }
 
     private fun acquireWakeLock() {
         runCatching {

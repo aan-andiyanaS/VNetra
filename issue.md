@@ -1,44 +1,31 @@
-# Penyelarasan Sensor ToF (VL53L5CX) dan Kamera (OV2640)
+# Ringkasan Perbaikan Mode Resolusi ToF (8x8 & 4x4)
 
-Issue ini merangkum seluruh logika dan implementasi UI yang diterapkan untuk menyelaraskan pembacaan jarak dari sensor ToF dengan visualisasi stream dari kamera, mengingat terdapat perbedaan *Field of View* (FOV) dan *offset* fisik.
+Dokumen ini merangkum semua perubahan, penambahan fitur, serta pengurangan kode pada komit/perubahan terakhir guna memperbaiki stabilitas perpindahan mode sensor ToF VL53L5CX (4x4 dan 8x8).
 
-## 1. Spesifikasi Hardware
-*   **Sensor Kamera (OV2640):** Memiliki Field of View (FOV) sebesar **65°**.
-*   **Sensor ToF (VL53L5CX):** Memiliki Field of View (FOV) sebesar **45°** dengan resolusi 8x8 zona.
-*   **Offset Fisik:** Posisi modul kamera berada **0,5 cm di bawah** sensor ToF. (Artinya, ToF melihat area yang sedikit lebih tinggi daripada area yang ditangkap kamera).
+## 🚀 Fitur dan Perbaikan yang Ditambahkan
 
-## 2. Masalah yang Diselesaikan
-Jika grid 8x8 ToF sekadar diletakkan di atas layar kamera secara *fullscreen*, maka:
-1.  Kotak pembacaan ToF akan merepresentasikan sudut 65°, padahal aslinya ToF hanya memancarkan sinar selebar 45°. Ini menyebabkan ketidaktepatan horizontal (objek di layar terlihat masuk zona pinggir, padahal tidak terdeteksi ToF).
-2.  Karena kamera berada 0,5 cm lebih rendah dari ToF, pusat pandangan ToF sedikit bergeser ke atas dibandingkan pusat layar kamera (Parallax error).
+### 1. Perbaikan Kritis pada Android (Mencegah Force Close)
+*   **Perbaikan Urutan Render UI (`CameraStreamActivity`):** Memperbaiki bug *crash* (force close) saat perpindahan dari 8x8 ke 4x4. Sebelumnya, mengubah matriks matriks kolom/baris (`columnCount`) saat sel-sel lama masih ada menyebabkan _ArrayIndexOutOfBoundsException_ internal pada Android `GridLayout`. Solusinya: Pemanggilan `removeAllViews()` kini dilakukan **sebelum** melakukan pembaruan matriks kolom/baris.
+*   **Penanganan Transisi Frame yang Aman:** Alih-alih melakukan *auto-rebuild* grid saat menerima data dengan ukuran tidak terduga, sistem pada `tofCollectJob` kini dirancang untuk mendeteksi _mismatch_ antara jumlah sel layar dan panjang paket data. Jika terjadi ketidaksesuaian (karena proses transisi asinkron), aplikasi secara otomatis mengabaikan (skip) frame tersebut hingga ukuran layar dan data berhasil sinkron. Hal ini mencegah error *crash loop*.
 
-## 3. Implementasi Solusi pada UI (Android)
+### 2. Persistensi State Mode & Sinkronisasi
+*   **Simpan Preferensi Lokal (SharedPreferences):** Mengimplementasikan mekanisme penyimpanan resolusi yang dipilih menggunakan `SharedPreferences`. Jika pengguna memilih mode 4x4 dan menutup aplikasi, aplikasi akan memuat antarmuka 4x4 secara *default* di sesi berikutnya.
+*   **Sinkronisasi Mode Auto-Reconnect:** Apabila koneksi terputus atau ESP32 mengalami *restart* mendadak, firmware secara bawaan kembali ke mode awal (8x8). Kini, aplikasi Android otomatis mendeteksi hal tersebut dan secara proaktif mengirimkan paket sinkronisasi ulang (`SET_TOF_MODE:4`) tepat ketika status koneksi tercapai (`CONNECTED`). 
 
-Untuk mengatasi masalah tersebut, telah dilakukan beberapa kalibrasi pada `CameraStreamActivity`:
+### 3. Perbaikan Kritis dan Stabilitas Firmware (ESP32)
+*   **Parsing *String* Teks WebSocket yang Aman:** Modifikasi cara firmware membaca perintah teks WebSocket. Sebelumnya program mencoba membaca *pointer* data secara kasar (tanpa pengaman batas akhir) yang dapat merusak tumpukan memori (*stack corruption*). Kini, perintah diurai menggunakan metode *buffer null-terminated* murni (`char cmdBuf[32]`) dibantu dengan alokasi statis dan fungsi `memcpy` secara aman.
+*   **Stabilitas Komunikasi Sensor I2C (Mencegah Hang):** Menambahkan *delay settling* selama 100ms tepat setelah sensor dimatikan asupan sinyalnya dengan fungsi `stopRanging()`. 
+*   **Modulasi Clock I2C Dinamis:** Mengamankan transisi register konfigurasi ukuran/frekuensi menggunakan kecepatan pita I2C yang diturunkan perlahan menjadi `100kHz`, dan kemudian dikembalikan menuju batas batas kencang `400kHz` sesaat sebelum instruksi penembakan *laser* dihidupkan ulang (`startRanging()`). Hal ini dirancang mengeliminasi isu VL53L5CX mogok kerja.
+*   **Dinamisasi Panjang Payload UDP/WS:** Memori paket dinamisasi total; tidak lagi boros mengirim memori paket 64-elemen (ukuran paket 8x8) ketika sensor sedang berada di mode 4x4 (16-elemen).
 
-### A. Kompensasi FOV (Field of View)
-Karena FOV ToF (45°) lebih sempit daripada FOV Kamera (65°), lebar grid ToF diperkecil secara proporsional.
-*   **Perhitungan:** $45 / 65 \approx 0.692$.
-*   **Implementasi:** Di file `activity_camera_stream.xml`, lebar `GridLayout` diatur menjadi 69% dari lebar frame kamera menggunakan atribut:
-    `app:layout_constraintWidth_percent="0.69"`
+---
 
-### B. Menjaga Bentuk Grid Persegi Sempurna (1:1)
-Pembacaan ToF 8x8 merepresentasikan area fisik yang persegi. Agar kotak di layar tidak memanjang atau melebar:
-*   **Implementasi:** Digunakan atribut `app:layout_constraintDimensionRatio="1:1"`.
-*   Digabungkan dengan `rowCount="8"` dan `columnCount="8"`, ini memastikan ke-64 sel memiliki ukuran yang presisi (kotak sempurna).
+## 🗑️ Hal yang Dihapus / Dikurangkan
 
-### C. Kompensasi Parallax (Pergeseran Vertikal / Translasi)
-Karena ToF diposisikan 0,5 cm lebih tinggi dari kamera, grid ToF di layar harus digeser sedikit ke atas. Melalui beberapa eksperimen visual, titik optimal didapatkan dengan menggeser grid persis 1 baris ke atas.
-*   **Implementasi XML:** Grid dikunci ke bagian atas bingkai kamera menggunakan `app:layout_constraintTop_toTopOf="@id/ivCameraFrame"` dan `app:layout_constraintVertical_bias="0.0"`.
-*   **Implementasi Kotlin:** Setelah antarmuka di-*render*, grid didorong naik ke atas sebesar 1 baris (1/8 dari tingginya) secara terprogram menggunakan fungsi `.post`:
-    ```kotlin
-    binding.gridTof.post {
-        binding.gridTof.translationY = -(binding.gridTof.height / 8f)
-    }
-    ```
-*   **Hasil Visual:** Baris pertama (index 0-7) berada di luar batas pandangan atas layar kamera, sementara baris ke-2 hingga ke-8 tumpang tindih secara presisi dengan visual objek di depan kamera.
+### 1. Penghapusan Sinkronisasi Redundan (`tofResJob` & `StateFlow`)
+*   Logika observer asinkron berbasis *Coroutine StateFlow* bernama `tofResJob` yang sebelumnya digunakan di dalam `CameraStreamService` dihapus sepenuhnya. Hal ini secara drastis mengurangi risiko terjadinya _race conditions_ atau keadaan ketika status variabel ukuran dan fungsi antar muka grafis saling berbalapan (yang mana sering memicu *force close*). 
+*   Status resolusi kini dipegang tunggal secara langsung oleh parameter fungsi aktivitas, dan panjang antrean data terkirimlah yang menjadi tolak ukur sah pergantian mode.
 
-## 4. Langkah Pengujian Selanjutnya
-Jika diperlukan penyesuaian (*fine-tuning*) di masa mendatang:
-*   **Horizontal:** Ubah nilai `0.69` jika area pembacaan kiri-kanan terasa kurang akurat.
-*   **Vertikal:** Ubah pembagi pada `translationY` (misalnya `/ 6f` atau `/ 10f`) jika benda pada jarak tertentu masih belum pas menyentuh kotak grid.
+### 2. Penghapusan Kode Sensor Pemicu Crash
+*   Baris manipulasi teks tidak aman `String((char*)data).substring(0, len)` pada modul pemroses WebSocket *server* dihilangkan.
+*   Penempatan paksa/tanam baku setelan `setResolution(8 * 8)` pada inisialisasi awal sensor (InitTask) dihapuskan, beralih pada penerapan mode ukuran modular berdasarkan preferensi tersimpan sewaktu alat dihidupkan.
