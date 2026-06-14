@@ -52,6 +52,78 @@
             app:layout_constraintStart_toStartOf="@id/ivCameraFrame"
             app:layout_constraintEnd_toEndOf="@id/ivCameraFrame" />
 
+        <!-- Clock Direction Indicator (10 - 2) mapped across pixel width -->
+        <LinearLayout
+            android:id="@+id/clockDirectionIndicator"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:weightSum="5"
+            android:background="#40000000"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp"
+            app:layout_constraintTop_toTopOf="@id/ivCameraFrame"
+            app:layout_constraintBottom_toBottomOf="@id/ivCameraFrame"
+            app:layout_constraintStart_toStartOf="@id/ivCameraFrame"
+            app:layout_constraintEnd_toEndOf="@id/ivCameraFrame">
+
+            <TextView
+                android:id="@+id/tvClock10"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="10"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvClock11"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="11"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvClock12"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="12"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvClock1"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="1"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvClock2"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="2"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+        </LinearLayout>
+
     </androidx.constraintlayout.widget.ConstraintLayout>
 
     <!-- IMU / EKF Data Panel (Top Left) — lebih prominent -->
