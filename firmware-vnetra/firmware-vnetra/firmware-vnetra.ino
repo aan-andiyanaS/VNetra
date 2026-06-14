@@ -961,21 +961,35 @@ void TOF_Task(void *pvParameters) {
           tof_buf[9] = curRes;  // resolusi (4 atau 8)
 
           // [M2] Filter target_status sebelum dikirim ke Android.
-          // Hanya status 5 (valid range) dan 6 (wrap-around, masih usable) yang dikirim.
-          // Status lain (misal: 255=no target, 4=low signal, 0=not updated) dikirim
-          // sebagai sentinel -1 agar Android TIDAK menampilkan nilai stale lama.
+          // Status yang diterima sebagai data VALID:
+          //   5  = VALID RANGE          ← sinyal bersih, akurasi terbaik
+          //   6  = WRAP AROUND          ← jarak > 4m, masih bisa dipakai
+          //   9  = RANGE VALID MERGED   ← sering terjadi di cell pinggir (sudut FoV besar),
+          //                               sigma noise lebih tinggi tapi jarak masih valid
           //
-          // Referensi status VL53L5CX:
-          //   0  = not updated      7  = rate fail
-          //   1  = sigma fail       8  = hardware fail
-          //   4  = phase fail       9  = wrap-around fail
-          //   5  = VALID RANGE ✓   255 = no target in zone
-          //   6  = WRAP-AROUND ✓
+          // Status INVALID (kirim sentinel -1 agar Android tampilkan "–"):
+          //   0  = not updated (data lama, belum di-refresh)
+          //   1  = sigma fail  (noise terlalu besar, data tidak dapat dipercaya)
+          //   4  = phase fail  (interferensi, multi-path, atau target terlalu dekat)
+          //   7  = rate fail   (target bergerak sangat cepat)
+          //   8  = hardware fail
+          //   255 = no target in zone  (tidak ada objek)
+          //
+          // Rentang jarak valid: 20mm (minimum) – 4000mm (maksimum SparkFun library)
+          // Jika jarak di luar rentang ini walau status valid → kirim -1 juga.
+          static const uint16_t TOF_MIN_DIST_MM = 20;
+          static const uint16_t TOF_MAX_DIST_MM = 4000;
+
           int16_t filtered_dist[64]; // 64 = max cells (8x8), cukup untuk mode 4x4 (16) juga
           for (uint16_t ci = 0; ci < numCells; ci++) {
-            uint8_t st = measurementData.target_status[ci];
-            if (st == 5 || st == 6) {
-              filtered_dist[ci] = measurementData.distance_mm[ci];
+            uint8_t  st   = measurementData.target_status[ci];
+            int16_t  dist = measurementData.distance_mm[ci];
+            // Terima status 5 (valid), 6 (wrap-around), 9 (merged pulse – cell pinggir)
+            bool statusOk = (st == 5 || st == 6 || st == 9);
+            // Validasi range: dist harus positif dan dalam batas sensor
+            bool rangeOk  = (dist >= (int16_t)TOF_MIN_DIST_MM && dist <= (int16_t)TOF_MAX_DIST_MM);
+            if (statusOk && rangeOk) {
+              filtered_dist[ci] = dist;
             } else {
               // -1 = sentinel: "tidak ada target valid" — bukan error sensor
               filtered_dist[ci] = -1;

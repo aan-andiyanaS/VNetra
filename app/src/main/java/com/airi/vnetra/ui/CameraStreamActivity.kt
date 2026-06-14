@@ -86,6 +86,13 @@ class CameraStreamActivity : AppCompatActivity() {
     // Di-load dari SharedPreferences agar persisten antar sesi
     private var currentTofMode: Int = 8
 
+    // Temporal holdover: tahan nilai terakhir yang valid selama N frame sebelum tampil "—".
+    // Ini mencegah cell terluar (yang memiliki SNR lebih rendah) flicker antara angka dan "—"
+    // karena status sensor (9/255) kadang muncul selang-seling antar frame.
+    // Nilai 5 frame @ 10Hz = 0.5 detik toleransi sebelum cell dianggap benar-benar kosong.
+    private val HOLDOVER_FRAMES = 5
+    private var holdoverCount: IntArray? = null  // countdown per cell; -1 = sudah ditampilkan "—"
+
     // FPS counter
     private var frameCount     = 0
     private var fpsWindowStart = 0L
@@ -439,6 +446,12 @@ class CameraStreamActivity : AppCompatActivity() {
 
                             if (smoothedTofData == null || smoothedTofData!!.size != tofData.size) {
                                 smoothedTofData = FloatArray(tofData.size) { i -> tofData[i].toFloat() }
+                                holdoverCount   = null  // Inisialisasi ulang saat ukuran berubah
+                            }
+
+                            // Inisialisasi holdover counter jika belum ada atau ukuran berubah
+                            if (holdoverCount == null || holdoverCount!!.size != tofData.size) {
+                                holdoverCount = IntArray(tofData.size) { HOLDOVER_FRAMES }
                             }
 
                             val alpha = 0.3f // Faktor smoothing EMA
@@ -449,11 +462,34 @@ class CameraStreamActivity : AppCompatActivity() {
                                 if (rawDistance <= 0) {
                                     // rawDistance == -1 : sentinel firmware (cell status tidak valid)
                                     // rawDistance ==  0 : tidak ada target terdeteksi
-                                    // Kedua kasus: tampilkan "—" abu-abu
-                                    tofViews[i].text = "—"
-                                    tofViews[i].setBackgroundColor(colorInvalidCell)  // pre-computed constant
-                                    smoothedTofData!![i] = 0f
+                                    //
+                                    // TEMPORAL HOLDOVER: jangan langsung tampilkan "—".
+                                    // Kurangi counter dulu. Cell terluar sering berganti valid/invalid
+                                    // secara selang-seling karena SNR rendah di sudut FoV — holdover
+                                    // mencegah flicker "—" yang tidak nyaman ditampilkan ke pengguna.
+                                    val remaining = holdoverCount!![i]
+                                    if (remaining > 0) {
+                                        // Masih dalam masa toleransi: tahan nilai EMA terakhir
+                                        holdoverCount!![i] = remaining - 1
+                                        val held = smoothedTofData!![i].toInt()
+                                        if (held > 0) {
+                                            // Tampilkan nilai terakhir yang valid (dengan warna sedikit redup)
+                                            tofViews[i].text = "$held"
+                                            tofViews[i].setBackgroundColor(
+                                                getColorForDistance(held, dimmed = true)
+                                            )
+                                        }
+                                        // Jika belum pernah ada nilai valid (held == 0), biarkan tampil apa adanya
+                                    } else {
+                                        // Counter habis: cell benar-benar tidak ada target → tampilkan "—"
+                                        tofViews[i].text = "—"
+                                        tofViews[i].setBackgroundColor(colorInvalidCell)
+                                        smoothedTofData!![i] = 0f
+                                    }
                                 } else {
+                                    // Data valid: reset holdover counter, update EMA
+                                    holdoverCount!![i] = HOLDOVER_FRAMES
+
                                     if (smoothedTofData!![i] <= 0f) {
                                         smoothedTofData!![i] = rawDistance.toFloat()
                                     } else {
@@ -627,18 +663,24 @@ class CameraStreamActivity : AppCompatActivity() {
      * Jarak >= 2000mm = Hijau penuh.
      * Jarak di antaranya = Gradasi (Merah -> Oranye -> Kuning -> Hijau).
      *
+     * @param dimmed Jika true, warna lebih transparan (alpha 48 ~19%) untuk menandai
+     *               bahwa nilai ini sedang dalam masa holdover (data terakhir yang valid,
+     *               bukan data segar). Normal alpha = 96 (~37%).
+     *
      * OPTIMASI: gunakan hsvTemp (pre-allocated FloatArray) untuk menghindari
      * alokasi objek baru di setiap cell setiap frame.
      */
-    private fun getColorForDistance(distance: Int): Int {
+    private fun getColorForDistance(distance: Int, dimmed: Boolean = false): Int {
         if (distance <= 0) return colorInvalidCell
         val minDistance = 200f
         val maxDistance = 2000f
         val clampedDistance = distance.coerceIn(minDistance.toInt(), maxDistance.toInt()).toFloat()
         val ratio = (clampedDistance - minDistance) / (maxDistance - minDistance)
         hsvTemp[0] = ratio * 120f // 0f (Merah) s.d 120f (Hijau) — hsvTemp[1] & [2] sudah 1f
-        // Alpha: 96 (~37% opacity) agar background grid tidak menutupi gambar kamera di belakangnya
-        return android.graphics.Color.HSVToColor(96, hsvTemp)
+        // Alpha normal: 96 (~37% opacity) agar grid tidak menutupi gambar kamera
+        // Alpha dimmed: 48 (~19% opacity) sebagai petunjuk visual bahwa data sedang holdover
+        val alpha = if (dimmed) 48 else 96
+        return android.graphics.Color.HSVToColor(alpha, hsvTemp)
     }
 
     private var isFullscreen = false
@@ -724,6 +766,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
         // Reset state EMA saat resolusi berubah agar tidak ada data lama dari mode sebelumnya.
         smoothedTofData = null
+        holdoverCount   = null  // Reset holdover counter juga agar tidak ada counter stale
 
         // PENTING: Hapus semua view SEBELUM mengubah columnCount/rowCount.
         // Jika columnCount diubah dari 8→4 sementara 64 view dengan spec col=7 masih ada,
