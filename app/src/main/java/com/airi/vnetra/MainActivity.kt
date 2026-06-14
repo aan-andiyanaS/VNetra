@@ -31,6 +31,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 
 /**
  * MainActivity — BLE Scanner / Landing screen
@@ -79,8 +82,29 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Edge-to-edge layout setup
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // Apply Window Insets safely to avoid status/navigation bar overlaps
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { v, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(
+                16.dpToPx(),
+                systemBars.top + 16.dpToPx(),
+                16.dpToPx(),
+                systemBars.bottom + 16.dpToPx()
+            )
+            insets
+        }
 
         sessionManager = SessionManager(this)
 
@@ -261,5 +285,9 @@ class MainActivity : AppCompatActivity() {
                 b.root.setOnClickListener { onClick(sr) }
             }
         }
+    }
+
+    private fun Int.dpToPx(): Int {
+        return (this * resources.displayMetrics.density).toInt()
     }
 }

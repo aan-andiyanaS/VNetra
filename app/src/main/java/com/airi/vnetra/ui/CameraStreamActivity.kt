@@ -32,6 +32,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import android.view.ViewGroup
+import android.widget.FrameLayout
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 
 /**
  * CameraStreamActivity v5 — Simplified
@@ -66,6 +71,9 @@ class CameraStreamActivity : AppCompatActivity() {
     private var imuCollectJob:   Job? = null
     private var tofCollectJob:   Job? = null
     private var ipAddress:       String = ""
+
+    private var currentTopInset = 0
+    private var currentBottomInset = 0
 
     private lateinit var tofViews: Array<android.widget.TextView>
 
@@ -143,8 +151,20 @@ class CameraStreamActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Edge-to-edge layout setup
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        
         binding = ActivityCameraStreamBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // Set support action bar with the custom toolbar
+        setSupportActionBar(binding.toolbar)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
@@ -158,6 +178,28 @@ class CameraStreamActivity : AppCompatActivity() {
 
         supportActionBar?.title = "Live Camera — $ipAddress"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
+
+        // Apply dynamic safe area margins and padding using Window Insets
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            currentTopInset = systemBars.top
+            currentBottomInset = systemBars.bottom
+            
+            // Set padding to toolbar so it draws behind status bar, but text starts below
+            binding.toolbar.setPadding(0, systemBars.top, 0, 0)
+            
+            // Update upper views (IMU panel & connection badge) margins
+            updateUpperViewsMargins()
+            
+            // Adjust bottom control panel padding to stay above system navigation bar
+            binding.layoutControls.setPadding(
+                binding.layoutControls.paddingLeft,
+                binding.layoutControls.paddingTop,
+                binding.layoutControls.paddingRight,
+                systemBars.bottom + 16.dpToPx()
+            )
+            insets
+        }
 
         setupBadgeSwipeGesture()
         setupClickListeners()
@@ -686,7 +728,14 @@ class CameraStreamActivity : AppCompatActivity() {
     private var isFullscreen = false
     private fun toggleFullscreen() {
         isFullscreen = !isFullscreen
-        if (isFullscreen) supportActionBar?.hide() else supportActionBar?.show()
+        if (isFullscreen) {
+            supportActionBar?.hide()
+        } else {
+            supportActionBar?.show()
+        }
+        binding.root.post {
+            updateUpperViewsMargins()
+        }
     }
 
     private sealed class StreamState {
@@ -805,5 +854,37 @@ class CameraStreamActivity : AppCompatActivity() {
     private fun initTofGrid() {
         // Bangun grid sesuai mode yang tersimpan
         rebuildTofGrid(currentTofMode)
+    }
+
+    private fun updateUpperViewsMargins() {
+        if (!::binding.isInitialized) return
+        val isToolbarVisible = binding.toolbar.visibility == View.VISIBLE
+        val imuParams = binding.layoutImu.layoutParams as? FrameLayout.LayoutParams ?: return
+        val badgeParams = binding.badgeSwipeContainer.layoutParams as? FrameLayout.LayoutParams ?: return
+
+        if (isToolbarVisible) {
+            val actionBarHeight = getActionBarHeight()
+            imuParams.topMargin = currentTopInset + actionBarHeight + 8.dpToPx()
+            badgeParams.topMargin = currentTopInset + actionBarHeight + 12.dpToPx()
+        } else {
+            imuParams.topMargin = currentTopInset + 8.dpToPx()
+            badgeParams.topMargin = currentTopInset + 12.dpToPx()
+        }
+
+        binding.layoutImu.layoutParams = imuParams
+        binding.badgeSwipeContainer.layoutParams = badgeParams
+    }
+
+    private fun getActionBarHeight(): Int {
+        val tv = android.util.TypedValue()
+        return if (theme.resolveAttribute(android.R.attr.actionBarSize, tv, true)) {
+            android.util.TypedValue.complexToDimensionPixelSize(tv.data, resources.displayMetrics)
+        } else {
+            56.dpToPx()
+        }
+    }
+
+    private fun Int.dpToPx(): Int {
+        return (this * resources.displayMetrics.density).toInt()
     }
 }

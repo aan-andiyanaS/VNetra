@@ -1,63 +1,45 @@
-# Penanganan Isu Lag dan Delay pada Sensor ToF & Kamera (Fix FPS Drop)
+# Plan Perbaikan UI: Penyesuaian Layout untuk Edge-to-Edge & Safe Area (Notch/Nav-bar)
 
-## 📌 Deskripsi Masalah
+## 📌 Deskripsi Masalah UI
+Berdasarkan pengujian pada beberapa jenis perangkat/layar *smartphone*:
+1. **Bagian Atas (Status Bar Overlap):** Teks status koneksi ("Connected"/"Disconnected"), judul/header aplikasi, teks pembacaan IMU (Pitch, Roll, Accel), dan badge status seringkali saling bertumpuk (overlap) dengan *System Status Bar* bawaan HP (seperti jam, indikator baterai, sinyal, maupun poni/notch kamera).
+2. **Bagian Bawah (Navigation Bar Overlap):** Tombol-tombol aksi utama di bagian bawah layar, seperti tombol **"AKHIRI"** pada mode *Live Camera*, terpotong atau tertutup secara transparan oleh *System Navigation Bar* (baik dalam mode 3-tombol maupun mode *gesture* layar penuh).
 
-Setelah melakukan peningkatan akurasi pada sensor VL53L5CX (dengan meningkatkan `integration_time` dan melakukan pemulusan data UI), performa aplikasi Android turun drastis. Indikator masalahnya adalah:
-1. **FPS Kamera drop** dari stabil di 9-10 FPS menjadi hanya 1.5 FPS atau bahkan diam/stuck.
-2. **Sistem Lag & Disconnect**: Data yang diterima aplikasi sering putus nyambung (disconnect dari ESP32) dan frame lambat ter-update.
-3. **Delay Sensor Tinggi**: Jarak ToF menjadi lambat bereaksi, sehingga sangat berbahaya jika digunakan oleh tunanetra untuk navigasi *real-time*.
-4. **Pembacaan "Nyangkut"**: Cell terluar sering tertahan pada pembacaan objek dekat, dan tidak merespon saat objek dijauhkan.
+Hal ini membuat beberapa bagian informasi terhalang dan tombol menjadi sulit di-klik.
 
----
+## 🛠️ Rencana Eksekusi (Untuk Junior Developer)
 
-## 🛠️ Langkah Perbaikan & Perubahan Kode
+Tujuan utama dari perbaikan ini adalah memastikan aplikasi mendukung mode *Edge-to-Edge* secara sempurna, di mana aplikasi tetap bisa menggambar hingga ke ujung layar, namun elemen interaktif dan teks penting didorong ke dalam zona aman (*Safe Area* / *Window Insets*).
 
-Untuk menyelesaikan masalah ini, dilakukan optimasi dua arah: **Sisi Firmware (ESP32)** dan **Sisi Aplikasi (Android)**.
+Berikut adalah langkah *high-level* yang perlu dikerjakan:
 
-### 1. Perbaikan Sisi Firmware (`firmware-vnetra.ino`)
+### 1. Aktifkan Edge-to-Edge Display di Level Window
+Pada setiap Activity utama (khususnya `CameraStreamActivity`, `DeviceConfigActivity`, dan `MainActivity`):
+- Di dalam fungsi `onCreate()`, tepat sebelum atau sesudah `setContentView(...)`, panggil fungsi untuk memberitahu sistem agar aplikasi diizinkan merender di bawah *system bars*:
+  ```kotlin
+  androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
+  ```
 
-**Tujuan:** Mengembalikan frekuensi I2C dan memfilter pembacaan *invalid* (agar Android tidak lag memproses data kotor).
+### 2. Terapkan Listener WindowInsets pada Root View / Container Utama
+Agar elemen UI tidak tertabrak *System Bars*, kita perlu mendeteksi tinggi dari *Status Bar* (atas) dan *Navigation Bar* (bawah) secara dinamis, lalu mengaplikasikannya sebagai *padding* atau *margin*:
+- Gunakan `ViewCompat.setOnApplyWindowInsetsListener` pada *root layout* (contoh: `binding.root`).
+- Ekstrak nilai insets menggunakan `WindowInsetsCompat.Type.systemBars()`.
+- Dapatkan nilai `insets.top` (untuk batas atas) dan `insets.bottom` (untuk batas bawah).
 
-- **[MODIFIED] Mengembalikan Integration Time (Waktu Integrasi)**
-  - *Sebelumnya:* Sempat dicoba nilai 80ms (8x8) dan 100ms (4x4) untuk menambah akurasi.
-  - *Perubahan:* Dikembalikan ke nilai stabil sebelumnya, yaitu **30ms untuk 8x8** dan **50ms untuk 4x4**. 
-  - *Alasan:* Integration time yang terlalu lama memonopoli `i2c_mutex`, menyebabkan thread IMU dan kamera (serta *WebSocket loop*) *starving* (kelaparan CPU/bandwidth) yang membuat ESP32 gagal mengirim stream.
+### 3. Penyesuaian Spesifik pada Masing-Masing Layar
+Tugas detail yang harus diubah di XML atau secara terprogram (*programmatically*):
+
+- **Di Layar Camera Stream (`CameraStreamActivity`):**
+  - **Teks IMU & Badge:** Tambahkan *margin-top* senilai `insets.top` pada container yang menampung teks IMU (Pitch/Roll/Accel) dan Badge "Menerima data dari ESP32" agar terdorong ke bawah melewati *notch* / *status bar*.
+  - **Tombol Akhiri:** Tambahkan *margin-bottom* atau *padding-bottom* senilai `insets.bottom` (ditambah sedikit ekstra padding ~16dp) pada tombol **"AKHIRI"** agar posisinya terangkat ke atas *navigation bar*.
   
-- **[MODIFIED] Menambahkan Filter Sentinel (`-1`) pada `TOF_Task`**
-  - *Sebelumnya:* Jika `target_status` tidak valid (bukan 5 atau 6), firmware tetap mengirimkan jarak terakhir atau `0`.
-  - *Perubahan:* Firmware kini mengirimkan jarak **`-1` (sebagai penanda sentinel/invalid)** apabila `target_status` menunjukkan data yang tidak reliabel (terutama pada sudut luar cell grid).
-  - *Alasan:* Ini memperbaiki masalah "nilai jarak yang nyangkut/stuck" di bagian pinggir layar, sekaligus memberikan *flag* pada Android untuk tidak menggambar warna/angka.
+- **Di Layar Konfigurasi & Scanner (`MainActivity` / `DeviceConfigActivity`):**
+  - **Header / App Bar:** Berikan *padding-top* senilai `insets.top` pada `Toolbar` atau teks judul paling atas agar tulisan "Connected"/"Disconnected" atau "ESP32 Config" tidak menabrak status bar.
+  - **Aksi Bawah:** Jika ada komponen yang menempel di layar bawah (misal tombol *View Camera*), pastikan *margin-bottom*-nya disesuaikan dengan `insets.bottom`.
 
-### 2. Perbaikan Sisi Layanan Android (`CameraStreamService.kt`)
-
-**Tujuan:** Memperbaiki sistem *keep-alive* WebSocket yang menyebabkan aplikasi berulang kali terputus (disconnect) dan menghasilkan 0 FPS.
-
-- **[MODIFIED] Konfigurasi `OkHttpClient` (Menghapus `pingInterval`)**
-  - *Sebelumnya:* Memiliki `.pingInterval(5, TimeUnit.SECONDS)`.
-  - *Perubahan:* `.pingInterval` **dihapus sama sekali**.
-  - *Alasan (Root Cause Terbesar):* OkHttp mengirim paket `Ping` setiap 5 detik. Namun, server `ESPAsyncWebServer` yang sibuk memproses JPEG kamera sering gagal/terlambat membalas paket `Pong`. Karena `Pong` telat, OkHttp menganggap koneksi mati dan secara paksa **menutup koneksi tiap ~10 detik**. Ini menyebabkan aplikasi menghabiskan waktu berulang kali untuk *reconnect*, membuat FPS anjlok. 
-  - *Solusi Pengganti:* Layanan kini sepenuhnya mengandalkan paket *Heartbeat* (yang memang sudah dikirim ESP32 setiap 10 detik) dan *Watchdog Timeout* (12 detik tanpa data) bawaan aplikasi.
-
-### 3. Perbaikan Sisi UI Android (`CameraStreamActivity.kt`)
-
-**Tujuan:** Menghilangkan *Garbage Collection (GC) Pressure* yang sangat masif, yang menyebabkan HP Android tersendat (stuttering) akibat alokasi memori objek secara berulang di dalam *loop* frame 10Hz.
-
-- **[MODIFIED] Pra-komputasi Objek Warna (`colorInvalidCell`)**
-  - *Sebelumnya:* `android.graphics.Color.parseColor("#60000000")` dieksekusi **hingga 640 kali per detik** (di setiap cell invalid (misal 64 cell) * 10 FPS). String parsing sangat mahal.
-  - *Perubahan:* Dibuat variabel statis/field class `private val colorInvalidCell = android.graphics.Color.argb(96, 0, 0, 0)`.
-  - *Alasan:* Menghemat pemrosesan CPU UI. Jika nilai ToF `-1` atau `<= 0`, aplikasi hanya memanggil referensi konstanta, bukan menjalankan metode konversi teks.
-
-- **[MODIFIED] Pra-alokasi *Float Array* (`hsvTemp`)**
-  - *Sebelumnya:* Pemanggilan `floatArrayOf(hue, 1f, 1f)` membuat objek array baru untuk setiap cell grid yang valid pada setiap frame.
-  - *Perubahan:* Dibuat `private val hsvTemp = floatArrayOf(0f, 1f, 1f)` di level class, yang digunakan secara *reuse* (dipakai berulang) di fungsi `getColorForDistance`.
-  - *Alasan:* HP Android sebelumnya harus secara konstan menghapus ratusan `FloatArray` yang sudah tak terpakai setiap detiknya (*Garbage Collection pause*). GC pause inilah yang menahan proses render gambar kamera di layar.
-
----
-
-## ✅ Hasil Akhir (Result)
-
-Berdasarkan *screenshot* yang diambil via ADB setelah seluruh optimasi diterapkan:
-- **FPS Kamera:** Kembali naik dan stabil di **10.8 FPS** (berhasil melewati target 9-10 FPS).
-- **Koneksi:** Tidak ada lagi pesan "offline" berkala karena siklus *reconnect* palsu OkHttp telah diperbaiki.
-- **Tampilan Grid (ToF Heatmap):** Cell terluar kini dapat merender simbol garis strip `—` dengan warna transparan jika target menjauh / keluar jangkuan (tidak *nyangkut* lagi), sementara warna gradasi dari merah ke hijau pada cell bagian tengah tetap bekerja normal secara real-time.
-- **Responsivitas:** Karena tidak ada *GC pause* di UI Android dan tidak ada interupsi *mutex I2C* pada ESP32, delay penerimaan sensor sangat rendah dan siap dipakai berjalan oleh user.
+### 4. Checklist Pengujian (Testing)
+Setelah mengimplementasikan langkah-langkah di atas, lakukan pengujian pada kondisi berikut:
+- [ ] Tampilan pada device dengan *Gesture Navigation* (garis transparan di bawah layar).
+- [ ] Tampilan pada device dengan *3-Button Navigation* (tombol fisik back/home/recent virtual yang memakan banyak ruang).
+- [ ] Tampilan dalam orientasi *Portrait* dan *Landscape* (jika aplikasi mengizinkan rotasi).
+- [ ] Tidak ada lagi teks (IMU/Status) yang terpotong oleh jam/baterai, dan semua tombol (seperti AKHIRI) bebas dari blokir area *Navigation Bar*.

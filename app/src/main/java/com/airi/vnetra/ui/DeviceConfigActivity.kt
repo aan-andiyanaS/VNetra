@@ -24,6 +24,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import com.airi.vnetra.util.SessionManager
+import android.os.Build
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 
 /**
  * DeviceConfigActivity - WiFi Configuration screen
@@ -51,8 +55,20 @@ class DeviceConfigActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Edge-to-edge layout setup
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        
         binding = ActivityDeviceConfigBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // Set support action bar with the custom toolbar
+        setSupportActionBar(binding.toolbar)
 
         val deviceName = intent.getStringExtra("device_name") ?: "Unknown"
         deviceAddress  = intent.getStringExtra("device_address") ?: ""
@@ -61,6 +77,23 @@ class DeviceConfigActivity : AppCompatActivity() {
 
         supportActionBar?.title = deviceName
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
+
+        // Apply dynamic safe area padding using Window Insets
+        ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
+            val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            
+            // Padding top for toolbar so it draws behind status bar, but text starts below
+            binding.toolbar.setPadding(0, systemBars.top, 0, 0)
+            
+            // Bottom padding for the content view to stay above system navigation bar
+            binding.contentLayout.setPadding(
+                16.dpToPx(),
+                16.dpToPx(),
+                16.dpToPx(),
+                systemBars.bottom + 16.dpToPx()
+            )
+            insets
+        }
 
         sessionManager = SessionManager(this)
 
@@ -445,5 +478,9 @@ private fun observeState() {
                 binding.root.setOnClickListener { onClick(wifi) }
             }
         }
+    }
+
+    private fun Int.dpToPx(): Int {
+        return (this * resources.displayMetrics.density).toInt()
     }
 }

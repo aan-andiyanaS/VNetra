@@ -7,6 +7,16 @@
     android:background="#000000"
     tools:context=".ui.CameraStreamActivity">
 
+    <!-- Custom Toolbar for Edge-to-Edge Support -->
+    <androidx.appcompat.widget.Toolbar
+        android:id="@+id/toolbar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:minHeight="?attr/actionBarSize"
+        android:background="#80000000"
+        android:theme="@style/ThemeOverlay.AppCompat.Dark.ActionBar"
+        app:popupTheme="@style/ThemeOverlay.AppCompat.Light" />
+
     <!-- Container Camera & ToF (Aspect Ratio 4:3) -->
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/cameraContainer"
@@ -46,6 +56,7 @@
 
     <!-- IMU / EKF Data Panel (Top Left) — lebih prominent -->
     <LinearLayout
+        android:id="@+id/layoutImu"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="top|start"
@@ -95,6 +106,7 @@
 
     <!-- Overlay: Status + Controls (bottom) -->
     <LinearLayout
+        android:id="@+id/layoutControls"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
