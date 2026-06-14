@@ -845,9 +845,23 @@ class CameraStreamActivity : AppCompatActivity() {
             }.also { binding.gridTof.addView(it) }
         }
 
-        // Reset translasi dan re-apply offset agar baris pertama di atas bingkai
+        // Reset translasi dan re-apply offset agar overlay ToF sejajar dengan kamera.
+        //
+        // FoV Vertikal:
+        //   - VL53L5CX (ToF)  : 45°  → ±22.5° dari titik tengah
+        //   - OV2640 (Kamera) : 41°  → ±20.5° dari titik tengah
+        //
+        // Kamera hanya menangkap 41/45 ≈ 91.1% dari rentang vertikal ToF.
+        // Selisih FoV di atas/bawah masing-masing = (45° - 41°) / 2 = 2°.
+        // Proporsi offset atas = 2° / 45° ≈ 0.0444 dari tinggi grid.
+        //
+        // Geser grid ke atas sebesar proporsi tersebut sehingga bagian atas ToF
+        // yang "melampaui" bingkai kamera tersembunyi di luar tampilan.
+        val TOF_FOV_V    = 45f
+        val CAMERA_FOV_V = 41f
+        val overlapFraction = (TOF_FOV_V - CAMERA_FOV_V) / 2f / TOF_FOV_V  // ≈ 0.0444
         binding.gridTof.post {
-            binding.gridTof.translationY = -(binding.gridTof.height.toFloat() / resolution)
+            binding.gridTof.translationY = -(binding.gridTof.height.toFloat() * overlapFraction)
         }
     }
 
