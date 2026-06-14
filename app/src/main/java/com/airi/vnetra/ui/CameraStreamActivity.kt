@@ -69,6 +69,9 @@ class CameraStreamActivity : AppCompatActivity() {
 
     private lateinit var tofViews: Array<android.widget.TextView>
 
+    // Variabel untuk menyimpan data ToF yang di-smooth (Exponential Moving Average)
+    private var smoothedTofData: FloatArray? = null
+
     // Mode ToF aktif: 4 atau 8 (4x4 atau 8x8)
     // Di-load dari SharedPreferences agar persisten antar sesi
     private var currentTofMode: Int = 8
@@ -419,14 +422,36 @@ class CameraStreamActivity : AppCompatActivity() {
 
                             // Jika ukuran data tidak cocok dengan jumlah cell grid,
                             // firmware sedang transisi mode — skip frame ini dan tunggu.
-                            // (Jangan auto-rebuild: bisa menimpa pilihan user & menyebabkan crash)
-                            if (tofData.size != tofViews.size) return@withContext
+                            if (tofData.size != tofViews.size) {
+                                smoothedTofData = null // Reset smoothing array jika resolusi berubah
+                                return@withContext
+                            }
+
+                            if (smoothedTofData == null || smoothedTofData!!.size != tofData.size) {
+                                smoothedTofData = FloatArray(tofData.size) { i -> tofData[i].toFloat() }
+                            }
+
+                            val alpha = 0.3f // Faktor smoothing (semakin kecil semakin smooth tapi lambat)
 
                             // Update cell values and background colors based on distance
                             for (i in tofData.indices) {
-                                val distance = tofData[i]
-                                tofViews[i].text = "$distance"
-                                tofViews[i].setBackgroundColor(getColorForDistance(distance))
+                                val rawDistance = tofData[i]
+
+                                if (rawDistance <= 0) {
+                                    tofViews[i].text = if (rawDistance == 0) "—" else "Err: ${-rawDistance}"
+                                    tofViews[i].setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
+                                    smoothedTofData!![i] = 0f
+                                } else {
+                                    if (smoothedTofData!![i] <= 0f) {
+                                        smoothedTofData!![i] = rawDistance.toFloat()
+                                    } else {
+                                        smoothedTofData!![i] = alpha * rawDistance + (1.0f - alpha) * smoothedTofData!![i]
+                                    }
+
+                                    val smoothedDistance = smoothedTofData!![i].toInt()
+                                    tofViews[i].text = "$smoothedDistance"
+                                    tofViews[i].setBackgroundColor(getColorForDistance(smoothedDistance))
+                                }
                             }
                         }
                     }

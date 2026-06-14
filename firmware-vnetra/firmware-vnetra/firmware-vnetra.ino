@@ -904,6 +904,8 @@ void TOF_Task(void *pvParameters) {
         Wire.setClock(100000);           // Turunkan clock I2C untuk config ulang
         myImager.setResolution(newRes * newRes);
         myImager.setRangingFrequency(newRes == 4 ? 15 : 10);
+        // Tambahkan Integration Time untuk meningkatkan akurasi cell terluar
+        myImager.setIntegrationTime(newRes == 4 ? 30 : 50); 
         Wire.setClock(400000);           // Kembalikan ke fast I2C
         myImager.startRanging();
         xSemaphoreGive(i2c_mutex);
@@ -1036,6 +1038,8 @@ void TOF_InitTask(void* pvParams) {
             myImager.setWireMaxPacketSize(128);
             myImager.setResolution(tofResolution * tofResolution); // gunakan mode yang dipilih
             myImager.setRangingFrequency(tofResolution == 4 ? 15 : 10);
+            // Tambahkan Integration Time untuk meningkatkan akurasi cell terluar
+            myImager.setIntegrationTime(tofResolution == 4 ? 30 : 50);
             myImager.startRanging();
         }
         xSemaphoreGive(i2c_mutex);
