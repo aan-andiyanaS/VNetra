@@ -107,9 +107,10 @@ class CameraStreamService : Service() {
     private val client = OkHttpClient.Builder()
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
-        .pingInterval(5, TimeUnit.SECONDS)
-        // Sengaja gunakan pingInterval agar OkHttp force-disconnect (cancel) saat socket mati/half-open
-        // karena ESPAsyncWebServer tidak membalas ping.
+        // TIDAK menggunakan pingInterval: ESPAsyncWebServer tidak selalu membalas ping WebSocket
+        // tepat waktu → OkHttp menutup koneksi setiap ~10 detik → FPS = 0 berulang.
+        // Watchdog internal (12s no data) lebih reliable karena mengukur ACTUAL data flow:
+        // ESP32 mengirim heartbeat setiap 10 detik, jadi watchdog trigger jika koneksi benar mati.
         .build()
 
     // DROP_OLDEST: selalu tampilkan frame terbaru, tidak ada lag buffer
@@ -271,9 +272,9 @@ class CameraStreamService : Service() {
 
                                 // Log setiap tipe frame yang diterima (kecuali JPEG dan IMU yang frekuensinya tinggi)
                                 when (type) {
-                                    FRAME_TYPE_JPEG -> { /* high freq, no log */ }
-                                    FRAME_TYPE_IMU  -> { /* high freq, no log */ }
-                                    FRAME_TYPE_TOF  -> Log.d(TAG, "TOF frame diterima: payload=${payload.size}B")
+                                    FRAME_TYPE_JPEG  -> { /* high freq, no log */ }
+                                    FRAME_TYPE_IMU   -> { /* high freq, no log */ }
+                                    FRAME_TYPE_TOF   -> { /* high freq, no log */ }
                                     FRAME_TYPE_HBEAT -> Log.d(TAG, "Heartbeat diterima")
                                     else -> Log.w(TAG, "Frame tidak dikenal: type=0x%02X size=${raw.size}B".format(type.toInt() and 0xFF))
                                 }
@@ -302,25 +303,13 @@ class CameraStreamService : Service() {
                                                     val buf  = java.nio.ByteBuffer.wrap(payload, 1, distSize)
                                                         .order(java.nio.ByteOrder.LITTLE_ENDIAN)
                                                         .asShortBuffer()
-                                                    var allZero = true
-
-                                                    val statusOffset = 1 + distSize
-                                                    val targetStatus = if (payload.size >= statusOffset + numCells) {
-                                                        payload.copyOfRange(statusOffset, statusOffset + numCells)
-                                                    } else null
 
                                                     for (i in 0 until numCells) {
-                                                        ints[i] = buf.get(i).toInt() and 0xFFFF
-                                                        if (ints[i] == 0 && targetStatus != null) {
-                                                            val status = targetStatus[i].toInt() and 0xFF
-                                                            ints[i] = status * -1
-                                                        }
-                                                        if (ints[i] > 0) allZero = false
+                                                        // Gunakan .toInt() tanpa `and 0xFFFF` agar
+                                                        // sentinel -1 (0xFFFF sebagai int16) tetap -1.
+                                                        ints[i] = buf.get(i).toInt()
                                                     }
                                                     _tofFlow.emit(ints)
-                                                    if (allZero) {
-                                                        Log.w(TAG, "TOF WARNING: Frame berisi 0 (atau error status) semua!")
-                                                    }
                                                 } else {
                                                     Log.e(TAG, "TOF payload terlalu kecil untuk ${resMode}x${resMode}: ${payload.size}B < ${1 + distSize}B")
                                                 }

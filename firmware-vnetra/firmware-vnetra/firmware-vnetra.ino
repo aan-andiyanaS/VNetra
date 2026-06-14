@@ -903,9 +903,23 @@ void TOF_Task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(100)); // Tunggu sensor settle setelah stopRanging
         Wire.setClock(100000);           // Turunkan clock I2C untuk config ulang
         myImager.setResolution(newRes * newRes);
+        // Frequency & Integration Time:
+        // Kembali ke nilai default SparkFun yang STABIL.
+        // Menurunkan Hz atau menaikkan integration time menyebabkan I2C mutex
+        // terblokir terlalu lama → IMU Task tertunda → seluruh pipeline lag.
+        //
+        // CARA KERJA I2C CONTENTION:
+        //   IMU_Task  : butuh mutex setiap 5ms (200Hz)
+        //   TOF_Task  : butuh mutex setiap isDataReady() check = setiap 10ms
+        //   Integration time 80ms pada 8Hz → sensor "sibuk" 64% cycle time
+        //   → IMU_Task terpaksa menunggu → EKF tertunda → WebSocket queue menumpuk
+        //
+        // Default aman: 4x4=15Hz, 8x8=10Hz, integration time minimal (auto)
         myImager.setRangingFrequency(newRes == 4 ? 15 : 10);
-        // Tambahkan Integration Time untuk meningkatkan akurasi cell terluar
-        myImager.setIntegrationTime(newRes == 4 ? 30 : 50); 
+        // Integration time: nilai asli yang sudah terbukti stabil.
+        // 4x4=30ms (pada 15Hz: 30ms << 66ms period, aman)
+        // 8x8=50ms (pada 10Hz: 50ms << 100ms period, aman)
+        myImager.setIntegrationTime(newRes == 4 ? 30 : 50);
         Wire.setClock(400000);           // Kembalikan ke fast I2C
         myImager.startRanging();
         xSemaphoreGive(i2c_mutex);
@@ -945,7 +959,29 @@ void TOF_Task(void *pvParameters) {
           tof_buf[0] = FRAME_TYPE_TOF;
           memcpy(tof_buf + 1, &ts_us, 8);
           tof_buf[9] = curRes;  // resolusi (4 atau 8)
-          memcpy(tof_buf + 10, measurementData.distance_mm, distSize);
+
+          // [M2] Filter target_status sebelum dikirim ke Android.
+          // Hanya status 5 (valid range) dan 6 (wrap-around, masih usable) yang dikirim.
+          // Status lain (misal: 255=no target, 4=low signal, 0=not updated) dikirim
+          // sebagai sentinel -1 agar Android TIDAK menampilkan nilai stale lama.
+          //
+          // Referensi status VL53L5CX:
+          //   0  = not updated      7  = rate fail
+          //   1  = sigma fail       8  = hardware fail
+          //   4  = phase fail       9  = wrap-around fail
+          //   5  = VALID RANGE ✓   255 = no target in zone
+          //   6  = WRAP-AROUND ✓
+          int16_t filtered_dist[64]; // 64 = max cells (8x8), cukup untuk mode 4x4 (16) juga
+          for (uint16_t ci = 0; ci < numCells; ci++) {
+            uint8_t st = measurementData.target_status[ci];
+            if (st == 5 || st == 6) {
+              filtered_dist[ci] = measurementData.distance_mm[ci];
+            } else {
+              // -1 = sentinel: "tidak ada target valid" — bukan error sensor
+              filtered_dist[ci] = -1;
+            }
+          }
+          memcpy(tof_buf + 10, filtered_dist, distSize);
           memcpy(tof_buf + 10 + distSize, measurementData.target_status, statSize);
 
           WsMessage_t msg = {tof_buf, totalSize};
@@ -1037,10 +1073,21 @@ void TOF_InitTask(void* pvParams) {
             Wire.setClock(400000);
             myImager.setWireMaxPacketSize(128);
             myImager.setResolution(tofResolution * tofResolution); // gunakan mode yang dipilih
+
+            // Frequency & Integration Time:
+            // Kembali ke nilai default yang STABIL (tidak memblok I2C mutex).
+            // Lihat komentar di mode change handler untuk penjelasan lengkap.
             myImager.setRangingFrequency(tofResolution == 4 ? 15 : 10);
-            // Tambahkan Integration Time untuk meningkatkan akurasi cell terluar
+            // Integration time: nilai asli yang sudah terbukti stabil.
+            // 4x4=30ms (pada 15Hz: 30ms << 66ms period, aman)
+            // 8x8=50ms (pada 10Hz: 50ms << 100ms period, aman)
             myImager.setIntegrationTime(tofResolution == 4 ? 30 : 50);
+
             myImager.startRanging();
+            Serial.printf("[TOF] Init: %dx%d, Freq=%dHz, IntTime=%dms\n",
+                          tofResolution, tofResolution,
+                          (tofResolution == 4 ? 15 : 10),
+                          (tofResolution == 4 ? 30 : 50));
         }
         xSemaphoreGive(i2c_mutex);
 

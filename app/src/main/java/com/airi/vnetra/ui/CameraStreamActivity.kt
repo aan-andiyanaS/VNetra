@@ -72,6 +72,16 @@ class CameraStreamActivity : AppCompatActivity() {
     // Variabel untuk menyimpan data ToF yang di-smooth (Exponential Moving Average)
     private var smoothedTofData: FloatArray? = null
 
+    // Pre-alokasi untuk mengurangi GC pressure:
+    // floatArrayOf() di dalam loop ToF (64 cell × 10Hz = 640 alokasi/detik) menyebabkan GC pause.
+    // Gunakan array yang sama dan update nilainya.
+    private val hsvTemp = floatArrayOf(0f, 1f, 1f)
+
+    // Warna cell tidak valid (semi-transparan hitam = #60000000).
+    // Pre-compute sekali untuk menghindari Color.parseColor() di setiap cell setiap frame
+    // (hingga 640 string parse/detik setelah sentinel filter → lebih banyak cell invalid).
+    private val colorInvalidCell = android.graphics.Color.argb(96, 0, 0, 0)
+
     // Mode ToF aktif: 4 atau 8 (4x4 atau 8x8)
     // Di-load dari SharedPreferences agar persisten antar sesi
     private var currentTofMode: Int = 8
@@ -431,15 +441,17 @@ class CameraStreamActivity : AppCompatActivity() {
                                 smoothedTofData = FloatArray(tofData.size) { i -> tofData[i].toFloat() }
                             }
 
-                            val alpha = 0.3f // Faktor smoothing (semakin kecil semakin smooth tapi lambat)
+                            val alpha = 0.3f // Faktor smoothing EMA
 
-                            // Update cell values and background colors based on distance
                             for (i in tofData.indices) {
                                 val rawDistance = tofData[i]
 
                                 if (rawDistance <= 0) {
-                                    tofViews[i].text = if (rawDistance == 0) "—" else "Err: ${-rawDistance}"
-                                    tofViews[i].setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
+                                    // rawDistance == -1 : sentinel firmware (cell status tidak valid)
+                                    // rawDistance ==  0 : tidak ada target terdeteksi
+                                    // Kedua kasus: tampilkan "—" abu-abu
+                                    tofViews[i].text = "—"
+                                    tofViews[i].setBackgroundColor(colorInvalidCell)  // pre-computed constant
                                     smoothedTofData!![i] = 0f
                                 } else {
                                     if (smoothedTofData!![i] <= 0f) {
@@ -602,7 +614,7 @@ class CameraStreamActivity : AppCompatActivity() {
                 if (::tofViews.isInitialized) {
                     tofViews.forEach {
                         it.text = "—"
-                        it.setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
+                        it.setBackgroundColor(colorInvalidCell)  // gunakan konstanta, bukan parseColor
                     }
                 }
             }
@@ -614,20 +626,19 @@ class CameraStreamActivity : AppCompatActivity() {
      * Jarak <= 200mm = Merah penuh.
      * Jarak >= 2000mm = Hijau penuh.
      * Jarak di antaranya = Gradasi (Merah -> Oranye -> Kuning -> Hijau).
+     *
+     * OPTIMASI: gunakan hsvTemp (pre-allocated FloatArray) untuk menghindari
+     * alokasi objek baru di setiap cell setiap frame.
      */
     private fun getColorForDistance(distance: Int): Int {
-        if (distance <= 0) {
-            // Default background: semi-transparent black
-            return android.graphics.Color.parseColor("#60000000")
-        }
+        if (distance <= 0) return colorInvalidCell
         val minDistance = 200f
         val maxDistance = 2000f
         val clampedDistance = distance.coerceIn(minDistance.toInt(), maxDistance.toInt()).toFloat()
         val ratio = (clampedDistance - minDistance) / (maxDistance - minDistance)
-        val hue = ratio * 120f // 0f (Merah) s.d 120f (Hijau)
-        val hsv = floatArrayOf(hue, 1f, 1f)
+        hsvTemp[0] = ratio * 120f // 0f (Merah) s.d 120f (Hijau) — hsvTemp[1] & [2] sudah 1f
         // Alpha: 96 (~37% opacity) agar background grid tidak menutupi gambar kamera di belakangnya
-        return android.graphics.Color.HSVToColor(96, hsv)
+        return android.graphics.Color.HSVToColor(96, hsvTemp)
     }
 
     private var isFullscreen = false
@@ -711,6 +722,9 @@ class CameraStreamActivity : AppCompatActivity() {
         val numCells   = resolution * resolution
         val textSizeSp = if (resolution == 4) 11f else 7.5f
 
+        // Reset state EMA saat resolusi berubah agar tidak ada data lama dari mode sebelumnya.
+        smoothedTofData = null
+
         // PENTING: Hapus semua view SEBELUM mengubah columnCount/rowCount.
         // Jika columnCount diubah dari 8→4 sementara 64 view dengan spec col=7 masih ada,
         // GridLayout akan crash di layout pass Choreographer (ArrayIndexOutOfBounds internal Android).
@@ -735,7 +749,7 @@ class CameraStreamActivity : AppCompatActivity() {
                 setTextColor(android.graphics.Color.WHITE)
                 textSize = textSizeSp
                 text     = "—"
-                setBackgroundColor(android.graphics.Color.parseColor("#60000000"))
+                setBackgroundColor(colorInvalidCell)  // gunakan konstanta, bukan parseColor
             }.also { binding.gridTof.addView(it) }
         }
 
