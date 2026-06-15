@@ -93,6 +93,8 @@ class CameraStreamService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var streamJob: Job?             = null
     private var watchdogJob: Job?           = null
+    private var udpReceiverJob: Job?        = null
+    private var activeUdpSocket: java.net.DatagramSocket? = null
     private var activeWebSocket: WebSocket? = null
     private var reconnectAttempts           = 0
     private var ipAddress                   = ""
@@ -197,6 +199,8 @@ class CameraStreamService : Service() {
     fun stopStreamAndRelease() {
         runCatching { streamJob?.cancel() };       streamJob = null
         runCatching { watchdogJob?.cancel() };     watchdogJob = null
+        runCatching { udpReceiverJob?.cancel() };  udpReceiverJob = null
+        runCatching { activeUdpSocket?.close() };  activeUdpSocket = null
         runCatching { activeWebSocket?.close(1000, "Stopped") }; activeWebSocket = null
         _connectionState.value = ConnectionState.DISCONNECTED
         runCatching { if (wifiLock?.isHeld == true) wifiLock?.release() }
@@ -223,10 +227,16 @@ class CameraStreamService : Service() {
     private fun startStreaming(ip: String) {
         streamJob?.cancel()
         watchdogJob?.cancel()
+        udpReceiverJob?.cancel()
+        runCatching { activeUdpSocket?.close() }
+        activeUdpSocket   = null
         runCatching { activeWebSocket?.cancel() }
         activeWebSocket   = null
         reconnectAttempts = 0
         lastDataReceivedTime = System.currentTimeMillis()
+
+        // Start UDP Receiver
+        startUdpReceiver()
 
         watchdogJob = serviceScope.launch {
             while (isActive && !stopped) {
@@ -403,6 +413,102 @@ class CameraStreamService : Service() {
                 reconnectAttempts++
                 Log.d(TAG, "Reconnect in ${wait}ms (attempt ${reconnectAttempts})")
                 delay(wait)
+            }
+        }
+    }
+
+    private fun startUdpReceiver() {
+        udpReceiverJob?.cancel()
+        runCatching { activeUdpSocket?.close() }
+        activeUdpSocket = null
+
+        udpReceiverJob = serviceScope.launch(Dispatchers.IO) {
+            val socket = try {
+                java.net.DatagramSocket(8080).apply {
+                    reuseAddress = true
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Gagal menginisialisasi DatagramSocket pada port 8080: ${e.message}")
+                return@launch
+            }
+            activeUdpSocket = socket
+            Log.d(TAG, "UDP Receiver started on port 8080")
+
+            val buffer = ByteArray(256)
+            val packet = java.net.DatagramPacket(buffer, buffer.size)
+
+            try {
+                while (isActive && !stopped) {
+                    socket.receive(packet)
+                    if (stopped) break
+
+                    lastDataReceivedTime = System.currentTimeMillis() // Update watchdog
+
+                    val len = packet.length
+                    if (len < FRAME_HEADER_SZ) {
+                        continue
+                    }
+
+                    // Copy the received bytes to process asynchronously
+                    val raw = packet.data.copyOfRange(packet.offset, packet.offset + len)
+                    val type = raw[0]
+                    val payload = raw.copyOfRange(FRAME_HEADER_SZ, raw.size)
+
+                    // Process sensor data
+                    when (type) {
+                        FRAME_TYPE_IMU -> {
+                            when {
+                                payload.size >= 36 -> {
+                                    val floats = FloatArray(9)
+                                    java.nio.ByteBuffer.wrap(payload)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                        .asFloatBuffer().get(floats)
+                                    _imuFlow.emit(floats)
+                                }
+                                payload.size >= 24 -> {
+                                    val floats = FloatArray(9)
+                                    java.nio.ByteBuffer.wrap(payload, 0, 24)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                        .asFloatBuffer().get(floats, 0, 6)
+                                    _imuFlow.emit(floats)
+                                }
+                            }
+                        }
+                        FRAME_TYPE_TOF -> {
+                            if (payload.size >= 2) {
+                                val resMode = payload[0].toInt() and 0xFF
+                                val numCells = resMode * resMode
+                                val distSize = numCells * 2
+
+                                if (payload.size >= 1 + distSize) {
+                                    val ints = IntArray(numCells)
+                                    val buf = java.nio.ByteBuffer.wrap(payload, 1, distSize)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                        .asShortBuffer()
+
+                                    for (i in 0 until numCells) {
+                                        ints[i] = buf.get(i).toInt()
+                                    }
+                                    _tofFlow.emit(ints)
+                                } else {
+                                    Log.e(TAG, "UDP TOF payload terlalu kecil untuk ${resMode}x${resMode}: ${payload.size}B < ${1 + distSize}B")
+                                }
+                            } else {
+                                Log.e(TAG, "UDP TOF payload terlalu kecil: ${payload.size}B < 2B!")
+                            }
+                        }
+                    }
+                }
+            } catch (e: java.net.SocketException) {
+                Log.d(TAG, "UDP Socket closed or interrupted: ${e.message}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error di UDP Receiver: ${e.message}")
+            } finally {
+                runCatching { socket.close() }
+                if (activeUdpSocket === socket) {
+                    activeUdpSocket = null
+                }
+                Log.d(TAG, "UDP Receiver stopped")
             }
         }
     }

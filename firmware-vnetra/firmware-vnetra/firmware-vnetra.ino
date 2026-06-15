@@ -55,6 +55,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <AsyncUDP.h>
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
@@ -183,6 +184,12 @@ Preferences        preferences;
 AsyncWebServer  server(80);
 AsyncWebSocket  ws("/ws");
 volatile bool   wsClientConnected = false;
+
+// UDP Sensor Server
+AsyncUDP udpSensor;
+const int UDP_TARGET_PORT = 8080;
+volatile bool udpClientReady = false;
+IPAddress activeClientIp;
 
 // BLE
 BLEServer*         pServer       = nullptr;
@@ -372,6 +379,8 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             Serial.printf("[WS] Client #%u connected from %s\n",
                           client->id(), client->remoteIP().toString().c_str());
             client->client()->setNoDelay(true);
+            activeClientIp = client->remoteIP();
+            udpClientReady = true;
             wsClientConnected = true;
             hadClientBefore   = true;
             // Keluar dari power save mode saat client baru connect
@@ -385,6 +394,9 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             Serial.printf("[WS] Client #%u disconnected\n", client->id());
             // ws.count() sudah terupdate (berkurang 1) saat callback ini dipanggil
             wsClientConnected = (ws.count() > 0);
+            if (!wsClientConnected) {
+                udpClientReady = false;
+            }
             if (!wsClientConnected && hadClientBefore) {
                 // Semua client disconnect — catat waktu untuk timer power save
                 lastClientLostTime = millis();
@@ -924,9 +936,9 @@ void IMU_Task(void *pvParameters) {
                       * (fabsf(wx_corr_deg) * DEG2RAD_F)   // |ω_x^corr| °/s → rad/s
                       * cosf(theta * DEG2RAD_F);            // kompensasi pitch
 
-    // ── Rate-limit WebSocket send: EKF 200Hz → kirim ~20Hz (setiap 10 iterasi) ─
+    // ── Rate-limit UDP send: EKF 200Hz → kirim ~20Hz (setiap 10 iterasi) ──────
     static uint8_t imu_send_tick = 0;
-    if (wsClientConnected && !powerSaveMode && (++imu_send_tick >= 10)) {
+    if (udpClientReady && !powerSaveMode && (++imu_send_tick >= 10)) {
       imu_send_tick = 0;
       ekf_frame_count++;  // Hitung paket IMU dikirim untuk guard is_converged
 
@@ -945,28 +957,22 @@ void IMU_Task(void *pvParameters) {
       // Urutan field sesuai Formula A.6:
       // [0]=θ(°)  [1]=φ(°)  [2]=ωx_corr(°/s)  [3]=ωy_corr(°/s)  [4]=ωz_corr(°/s)
       // [5]=‖a_lin‖(m/s²)  [6]=ts_esp_ms(ms)  [7]=v_head_base(rad/s)  [8]=is_converged
-      uint8_t* imu_buf = (uint8_t*)malloc(45);
-      if (imu_buf) {
-        uint64_t ts_us = esp_timer_get_time();
-        imu_buf[0] = FRAME_TYPE_IMU;
-        memcpy(imu_buf + 1, &ts_us, 8);
-        float payload[9] = {
-            theta,         phi,                              // [0] [1]
-            wx_corr_deg,   wy_corr_deg,   wz_corr_deg,      // [2] [3] [4]
-            a_lin_mag,                                       // [5]
-            (float)millis(),                                 // [6] ts_esp_ms
-            v_head_base,                                     // [7]
-            is_converged                                     // [8]
-        };
-        memcpy(imu_buf + 9, payload, 36);
+      uint8_t imu_buf[45];
+      uint64_t ts_us = esp_timer_get_time();
+      imu_buf[0] = FRAME_TYPE_IMU;
+      memcpy(imu_buf + 1, &ts_us, 8);
+      float payload[9] = {
+          theta,         phi,                              // [0] [1]
+          wx_corr_deg,   wy_corr_deg,   wz_corr_deg,      // [2] [3] [4]
+          a_lin_mag,                                       // [5]
+          (float)millis(),                                 // [6] ts_esp_ms
+          v_head_base,                                     // [7]
+          is_converged                                     // [8]
+      };
+      memcpy(imu_buf + 9, payload, 36);
 
-        WsMessage_t msg = {imu_buf, 45};
-        if (xQueueSend(wsQueue, &msg, 0) != pdTRUE) {
-            free(imu_buf); // Cegah memory leak jika queue penuh
-        } else {
-            stat_frames_imu++; // Counter untuk log statistik
-        }
-      }
+      udpSensor.sendTo(imu_buf, 45, activeClientIp, UDP_TARGET_PORT);
+      stat_frames_imu++; // Counter untuk log statistik
     }
 
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -1022,21 +1028,17 @@ void TOF_Task(void *pvParameters) {
         xSemaphoreGive(i2c_mutex);
       }
 
-      if (gotData && wsClientConnected && !powerSaveMode) {
+      if (gotData && udpClientReady && !powerSaveMode) {
         uint8_t  curRes   = tofResolution;           // snapshot untuk konsistensi
         uint16_t numCells = (uint16_t)curRes * curRes; // 16 (4x4) atau 64 (8x8)
         uint16_t distSize = numCells * 2;             // int16_t per cell
         uint16_t statSize = numCells;                 // 1 byte status per cell
-
-        // Payload layout:
-        // [0]       : FRAME_TYPE_TOF (1B)
-        // [1..8]    : timestamp_us (8B)
-        // [9]       : resolusi (1B) — 4 = 4x4, 8 = 8x8
-        // [10..9+distSize] : distance_mm (int16 × numCells)
-        // [10+distSize ..]  : target_status (byte × numCells)
         uint16_t totalSize = 1 + 8 + 1 + distSize + statSize;
-        uint8_t* tof_buf = (uint8_t*)malloc(totalSize);
-        if (tof_buf) {
+
+        // totalSize is at most 1 + 8 + 1 + (64 * 2) + 64 = 202 bytes.
+        // We can safely use a stack buffer of 256 bytes.
+        uint8_t tof_buf[256];
+        if (totalSize <= 256) {
           uint64_t ts_us = esp_timer_get_time();
           tof_buf[0] = FRAME_TYPE_TOF;
           memcpy(tof_buf + 1, &ts_us, 8);
@@ -1080,12 +1082,8 @@ void TOF_Task(void *pvParameters) {
           memcpy(tof_buf + 10, filtered_dist, distSize);
           memcpy(tof_buf + 10 + distSize, measurementData.target_status, statSize);
 
-          WsMessage_t msg = {tof_buf, totalSize};
-          if (xQueueSend(wsQueue, &msg, 0) != pdTRUE) {
-              free(tof_buf); // Cegah memory leak jika queue penuh
-          } else {
-              stat_frames_tof++; // Counter untuk log statistik
-          }
+          udpSensor.sendTo(tof_buf, totalSize, activeClientIp, UDP_TARGET_PORT);
+          stat_frames_tof++; // Counter untuk log statistik
         }
       }
     }
@@ -1346,6 +1344,9 @@ void setup() {
     i2c_mutex = xSemaphoreCreateMutex();
     ws_mutex  = xSemaphoreCreateMutex();
     wsQueue   = xQueueCreate(20, sizeof(WsMessage_t));
+
+    // Initialize UDP Sensor Server
+    udpSensor.listen(8081);
 
     // ── [FAST BOOT] Cek credentials & mulai WiFi di background SEBELUM sensor init ──
     // WiFi connect (terutama BSSID fast-path) bisa ~1 detik;
