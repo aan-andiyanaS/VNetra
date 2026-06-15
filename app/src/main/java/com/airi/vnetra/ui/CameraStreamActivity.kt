@@ -104,6 +104,14 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var latestImuData: FloatArray? = null  // 9 field: [θ,φ,ωx,ωy,ωz,a,ts,vBase,conv]
     @Volatile private var latestTofData: IntArray?   = null  // 16 atau 64 nilai (mm), -1 = invalid
 
+    // ── Latency (Ping) Monitor State (L1.2) ───────────────────────────
+    @Volatile private var pingCamera:     Long = 0
+    @Volatile private var pingTofSmooth:  Long = 0
+    @Volatile private var pingFormulaEH:  Long = 0
+    @Volatile private var pingTerrain:    Long = 0
+    @Volatile private var pingTotalTof:   Long = 0
+    private var latencyMonitorJob: Job? = null
+
     // ── Formula H — One-shot alert + TTS Engine (P3.3) ────────────────
     private lateinit var formulaH: FormulaH
 
@@ -448,9 +456,14 @@ class CameraStreamActivity : AppCompatActivity() {
             try {
                 svc.frameFlow.collect { jpegBytes ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
+                    
+                    val startTime = System.currentTimeMillis()
                     val bitmap = runCatching {
                         BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)
-                    }.getOrNull() ?: return@collect
+                    }.getOrNull()
+                    pingCamera = System.currentTimeMillis() - startTime
+
+                    if (bitmap == null) return@collect
 
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring) {
@@ -477,6 +490,22 @@ class CameraStreamActivity : AppCompatActivity() {
 
         imuCollectJob?.cancel()
         tofCollectJob?.cancel()
+        latencyMonitorJob?.cancel()
+
+        // Reset state latency
+        pingCamera = 0
+        pingTofSmooth = 0
+        pingFormulaEH = 0
+        pingTerrain = 0
+        pingTotalTof = 0
+
+        // Start latency monitor polling job (5Hz = 200ms)
+        latencyMonitorJob = lifecycleScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(200)
+                updateLatencyMonitorUi()
+            }
+        }
 
         imuCollectJob = lifecycleScope.launch(Dispatchers.Default) {
             try {
@@ -509,14 +538,14 @@ class CameraStreamActivity : AppCompatActivity() {
             try {
                 svc.tofFlow.collect { tofData ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
-                    // P1.7: Simpan state ToF terbaru untuk Formula E dan J
                     latestTofData = tofData
+
+                    // Fase 1: Smoothing (EMA)
+                    val startSmooth = System.currentTimeMillis()
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring
                             && ::tofViews.isInitialized) {
 
-                            // Jika ukuran data tidak cocok dengan jumlah cell grid,
-                            // firmware sedang transisi mode — skip frame ini dan tunggu.
                             if (tofData.size != tofViews.size) {
                                 smoothedTofData = null // Reset smoothing array jika resolusi berubah
                                 return@withContext
@@ -527,7 +556,6 @@ class CameraStreamActivity : AppCompatActivity() {
                                 holdoverCount   = null  // Inisialisasi ulang saat ukuran berubah
                             }
 
-                            // Inisialisasi holdover counter jika belum ada atau ukuran berubah
                             if (holdoverCount == null || holdoverCount!!.size != tofData.size) {
                                 holdoverCount = IntArray(tofData.size) { HOLDOVER_FRAMES }
                             }
@@ -538,34 +566,22 @@ class CameraStreamActivity : AppCompatActivity() {
                                 val rawDistance = tofData[i]
 
                                 if (rawDistance <= 0) {
-                                    // rawDistance == -1 : sentinel firmware (cell status tidak valid)
-                                    // rawDistance ==  0 : tidak ada target terdeteksi
-                                    //
-                                    // TEMPORAL HOLDOVER: jangan langsung tampilkan "—".
-                                    // Kurangi counter dulu. Cell terluar sering berganti valid/invalid
-                                    // secara selang-seling karena SNR rendah di sudut FoV — holdover
-                                    // mencegah flicker "—" yang tidak nyaman ditampilkan ke pengguna.
                                     val remaining = holdoverCount!![i]
                                     if (remaining > 0) {
-                                        // Masih dalam masa toleransi: tahan nilai EMA terakhir
                                         holdoverCount!![i] = remaining - 1
                                         val held = smoothedTofData!![i].toInt()
                                         if (held > 0) {
-                                            // Tampilkan nilai terakhir yang valid (dengan warna sedikit redup)
                                             tofViews[i].text = "$held"
                                             tofViews[i].setBackgroundColor(
                                                 getColorForDistance(held, dimmed = true)
                                             )
                                         }
-                                        // Jika belum pernah ada nilai valid (held == 0), biarkan tampil apa adanya
                                     } else {
-                                        // Counter habis: cell benar-benar tidak ada target → tampilkan "—"
                                         tofViews[i].text = "—"
                                         tofViews[i].setBackgroundColor(colorInvalidCell)
                                         smoothedTofData!![i] = 0f
                                     }
                                 } else {
-                                    // Data valid: reset holdover counter, update EMA
                                     holdoverCount!![i] = HOLDOVER_FRAMES
 
                                     if (smoothedTofData!![i] <= 0f) {
@@ -581,26 +597,15 @@ class CameraStreamActivity : AppCompatActivity() {
                             }
                         }
                     }   // end withContext(Dispatchers.Main)
-                     // Formula E+H+J berjalan di Dispatchers.Default (scope collect)
+                    pingTofSmooth = System.currentTimeMillis() - startSmooth
 
+                    val imuSnap  = latestImuData
+                    val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
+                    val thetaDeg = rawTheta - 20f
 
-
-                    // ── Formula E + H: One-shot alert objek di depan (tanpa YOLO) ───
-                    // Berjalan di Dispatchers.Default, TIDAK di Main thread.
-                    // Tahap 1: gunakan kolom tengah (3 dan 4) sebagai proxy "objek di depan".
-                    // Tahap 2 (YOLO): ganti dengan loop per detection, trackingId = YOLO ID.
+                    // Fase 2: Formula E & H
+                    val startFormula = System.currentTimeMillis()
                     if (::formulaH.isInitialized) {
-                        val imuSnap  = latestImuData
-                        val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
-                        
-                        // Kompensasi sudut kemiringan fisik ToF (20 derajat ke bawah)
-                        // Karena MPU6050 tetap lurus (0 derajat), tetapi ToF menunduk 20 derajat,
-                        // kita kurangi 20 derajat dari raw pitch agar formula memahami orientasi aktual ToF.
-                        val thetaDeg = rawTheta - 20f
-
-                        // Kolom "tepat depan" bergantung resolusi:
-                        // 8×8 → kolom 3 & 4 (tengah 0..7)
-                        // 4×4 → kolom 1 & 2 (tengah 0..3)
                         for (col in FormulaUtils.centerColumns(currentTofMode)) {
                             val dObj = FormulaE.calculate(
                                 tofData    = tofData,
@@ -614,9 +619,12 @@ class CameraStreamActivity : AppCompatActivity() {
                                 clockDirection = 12    // kolom tengah = selalu JAM 12
                             )
                         }
+                    }
+                    pingFormulaEH = System.currentTimeMillis() - startFormula
 
-                        // Formula J: Terrain Detection — process() menangani 8×8 dan 4×4
-                        // Guard hanya untuk array size yang benar: 64 (8×8) atau 16 (4×4)
+                    // Fase 3: TerrainDetector
+                    val startTerrain = System.currentTimeMillis()
+                    if (::formulaH.isInitialized) {
                         val expectedSize = currentTofMode * currentTofMode
                         if (tofData.size == expectedSize) {
                             val terrainResult = terrainDetector.process(
@@ -629,7 +637,6 @@ class CameraStreamActivity : AppCompatActivity() {
                                 val isHigh   = terrainResult.alertLevel == TerrainDetector.AlertLevel.HIGH
                                 val cooldown = (nowMs - lastTerrainAlertTime) > TERRAIN_ALERT_COOLDOWN_MS
 
-                                // HIGH selalu dibunyikan; MED/INFO hanya jika sudah lewat cooldown
                                 if (isHigh || cooldown) {
                                     lastTerrainAlertTime = nowMs
 
@@ -665,6 +672,9 @@ class CameraStreamActivity : AppCompatActivity() {
                             }
                         }
                     } // end if (formulaH.isInitialized)
+                    pingTerrain = System.currentTimeMillis() - startTerrain
+
+                    pingTotalTof = pingTofSmooth + pingFormulaEH + pingTerrain
                 } // end collect { tofData ->
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e  // re-throw agar coroutine cancellation bisa propagate (jangan diswallow!)
@@ -795,6 +805,40 @@ class CameraStreamActivity : AppCompatActivity() {
         runCatching { stateCollectJob?.cancel() }; stateCollectJob = null
         runCatching { imuCollectJob?.cancel() };   imuCollectJob   = null
         runCatching { tofCollectJob?.cancel() };   tofCollectJob   = null
+        runCatching { latencyMonitorJob?.cancel() }; latencyMonitorJob = null
+    }
+
+    /**
+     * Update visual monitor latency (ping) di UI.
+     * Dijalankan pada thread utama.
+     */
+    private fun updateLatencyMonitorUi() {
+        if (isDestroyed || isFinishing) return
+        val cam = pingCamera
+        val tofTotal = pingTotalTof
+        val smooth = pingTofSmooth
+        val formula = pingFormulaEH
+        val terrain = pingTerrain
+        val maxBottleneck = maxOf(cam, tofTotal)
+
+        val text = """
+            === SYSTEM PING MONITOR ===
+            [Parallel Processing]
+            Cam Decode : $cam ms
+            ToF Total  : $tofTotal ms
+            ---------------------------
+            ► MAX BOTTLENECK : $maxBottleneck ms
+            
+            [Sequential ToF Details]
+            ├─ Smoothing : $smooth ms
+            ├─ Formula E/H : $formula ms
+            └─ Terrain J : $terrain ms
+            ===========================
+        """.trimIndent()
+        
+        runCatching {
+            binding.tvLatencyMonitor.text = text
+        }
     }
 
     /**
@@ -809,11 +853,19 @@ class CameraStreamActivity : AppCompatActivity() {
             formulaH.resetAllFlags()   // siap diperingatkan lagi saat reconnect
         }
         lastTerrainAlertTime = 0L      // reset cooldown terrain
+
+        pingCamera = 0
+        pingTofSmooth = 0
+        pingFormulaEH = 0
+        pingTerrain = 0
+        pingTotalTof = 0
+
         runOnUiThread {
             runCatching {
                 binding.tvImuPitch.text = "Pitch: —"
                 binding.tvImuRoll.text  = "Roll: —"
                 binding.tvImuAccel.text = "Accel: —"
+                binding.tvLatencyMonitor.text = "=== SYSTEM PING MONITOR ===\nCam Decode : —\nToF Total  : —\n---------------------------\n► MAX BOTTLENECK : —\n\n[Sequential ToF Details]\n├─ Smoothing : —\n├─ Formula E/H : —\n└─ Terrain J : —\n==========================="
                 binding.ivCameraFrame.setImageResource(android.R.color.transparent)
                 if (::tofViews.isInitialized) {
                     tofViews.forEach {

@@ -126,54 +126,84 @@
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 
-    <!-- IMU / EKF Data Panel (Top Left) — lebih prominent -->
+    <!-- IMU / EKF Data & Latency Monitor Panels (Top Left) -->
     <LinearLayout
         android:id="@+id/layoutImu"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="top|start"
         android:layout_margin="8dp"
-        android:orientation="vertical"
-        android:background="#CC000000"
-        android:paddingStart="10dp"
-        android:paddingEnd="10dp"
-        android:paddingTop="6dp"
-        android:paddingBottom="6dp">
+        android:orientation="vertical">
 
-        <!-- Label judul panel -->
-        <TextView
+        <!-- IMU / EKF Data Panel — lebih prominent -->
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="● EKF / MPU6050"
-            android:textColor="#4FC3F7"
-            android:textSize="10sp"
-            android:textStyle="bold"
-            android:layout_marginBottom="4dp" />
+            android:orientation="vertical"
+            android:background="#CC000000"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp">
 
-        <TextView
-            android:id="@+id/tvImuPitch"
+            <!-- Label judul panel -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="● EKF / MPU6050"
+                android:textColor="#4FC3F7"
+                android:textSize="10sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="4dp" />
+
+            <TextView
+                android:id="@+id/tvImuPitch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Pitch:  0.0°"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:fontFamily="monospace" />
+            <TextView
+                android:id="@+id/tvImuRoll"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Roll:   0.0°"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:fontFamily="monospace" />
+            <TextView
+                android:id="@+id/tvImuAccel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Accel:  0.00 m/s²"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:fontFamily="monospace" />
+        </LinearLayout>
+
+        <!-- Latency Monitor Panel -->
+        <LinearLayout
+            android:id="@+id/layoutLatencyMonitor"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Pitch:  0.0°"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp"
-            android:fontFamily="monospace" />
-        <TextView
-            android:id="@+id/tvImuRoll"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Roll:   0.0°"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp"
-            android:fontFamily="monospace" />
-        <TextView
-            android:id="@+id/tvImuAccel"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Accel:  0.00 m/s²"
-            android:textColor="#FFFFFF"
-            android:textSize="13sp"
-            android:fontFamily="monospace" />
+            android:layout_marginTop="8dp"
+            android:orientation="vertical"
+            android:background="#CC000000"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:paddingTop="6dp"
+            android:paddingBottom="6dp">
+
+            <TextView
+                android:id="@+id/tvLatencyMonitor"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="#FFFFFF"
+                android:textSize="10sp"
+                android:fontFamily="monospace"
+                android:text="=== SYSTEM PING MONITOR ===\nCam Decode : 0 ms\nToF Total  : 0 ms\n---------------------------\n► MAX BOTTLENECK : 0 ms\n\n[Sequential ToF Details]\n├─ Smoothing : 0 ms\n├─ Formula E/H : 0 ms\n└─ Terrain J : 0 ms\n===========================" />
+        </LinearLayout>
     </LinearLayout>
 
     <!-- Overlay: Status + Controls (bottom) -->
