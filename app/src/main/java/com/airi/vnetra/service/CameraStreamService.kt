@@ -138,6 +138,9 @@ class CameraStreamService : Service() {
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
+    private val _pingWebsocketFlow = MutableStateFlow(-1L)
+    val pingWebsocketFlow: StateFlow<Long> = _pingWebsocketFlow.asStateFlow()
+
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -255,6 +258,24 @@ class CameraStreamService : Service() {
                                 reconnectAttempts = 0
                                 setConnectionState(ConnectionState.CONNECTED)
                                 sendConnectedHeadsUp()
+                            }
+                            
+                            // Mulai mengirim PING setiap 1 detik
+                            serviceScope.launch {
+                                while (isActive && activeWebSocket == ws) {
+                                    runCatching { ws.send("PING:${System.currentTimeMillis()}") }
+                                    delay(1000)
+                                }
+                            }
+                        }
+
+                        override fun onMessage(ws: WebSocket, text: String) {
+                            if (stopped) return
+                            if (text.startsWith("PONG:")) {
+                                val sentTime = text.substringAfter("PONG:").toLongOrNull() ?: return
+                                val rtt = System.currentTimeMillis() - sentTime
+                                // OWD (One Way Delay) estimasi = RTT / 2
+                                _pingWebsocketFlow.value = rtt / 2
                             }
                         }
 

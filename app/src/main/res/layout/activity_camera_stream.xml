@@ -182,28 +182,31 @@
                 android:fontFamily="monospace" />
         </LinearLayout>
 
-        <!-- Latency Monitor Panel -->
-        <LinearLayout
-            android:id="@+id/layoutLatencyMonitor"
+        <!-- Latency Monitor Panel dipindah ke root FrameLayout di bawah -->
+    </LinearLayout>
+
+    <!-- Latency Monitor Panel (Top Right) -->
+    <LinearLayout
+        android:id="@+id/layoutLatencyMonitor"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_margin="8dp"
+        android:orientation="vertical"
+        android:background="#CC000000"
+        android:paddingStart="10dp"
+        android:paddingEnd="10dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
+
+        <TextView
+            android:id="@+id/tvLatencyMonitor"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:orientation="vertical"
-            android:background="#CC000000"
-            android:paddingStart="10dp"
-            android:paddingEnd="10dp"
-            android:paddingTop="6dp"
-            android:paddingBottom="6dp">
-
-            <TextView
-                android:id="@+id/tvLatencyMonitor"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:textColor="#FFFFFF"
-                android:textSize="10sp"
-                android:fontFamily="monospace"
-                android:text="=== SYSTEM PING MONITOR ===\nCam Decode : 0 ms\nToF Total  : 0 ms\n---------------------------\n► MAX BOTTLENECK : 0 ms\n\n[Sequential ToF Details]\n├─ Smoothing : 0 ms\n├─ Formula E/H : 0 ms\n└─ Terrain J : 0 ms\n===========================" />
-        </LinearLayout>
+            android:textColor="#FFFFFF"
+            android:textSize="10sp"
+            android:fontFamily="monospace"
+            android:text="=== SYSTEM PING MONITOR ===\nCam Decode : 0 ms\nWebSocket  : 0 ms\nToF Total  : 0 ms\n---------------------------\n► MAX BOTTLENECK : 0 ms\n\n[Sequential ToF Details]\n├─ Smoothing : 0 ms\n├─ Formula E/H : 0 ms\n└─ Terrain J : 0 ms\n===========================" />
     </LinearLayout>
 
     <!-- Overlay: Status + Controls (bottom) -->
@@ -215,6 +218,46 @@
         android:orientation="vertical"
         android:padding="16dp"
         android:background="#80000000">
+
+        <!-- Badge koneksi + Tombol Akhiri tersembunyi (geser untuk tampilkan) -->
+        <FrameLayout
+            android:id="@+id/badgeSwipeContainer"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="8dp">
+
+            <!-- Tombol Akhiri (tersembunyi di balik badge, muncul saat digeser) -->
+            <Button
+                android:id="@+id/btnAkhiriBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical|end"
+                android:text="Akhiri"
+                android:textColor="#FFFFFF"
+                android:textSize="11sp"
+                android:backgroundTint="#D32F2F"
+                android:paddingLeft="12dp"
+                android:paddingRight="12dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp"
+                android:visibility="gone" />
+
+            <!-- Badge koneksi utama -->
+            <TextView
+                android:id="@+id/tvConnectedBadge"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingLeft="10dp"
+                android:paddingRight="10dp"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp"
+                android:text="&#9679; Menerima data dari ESP32-S3  ‹ geser"
+                android:textColor="#FFFFFF"
+                android:textSize="11sp"
+                android:background="@drawable/badge_connected_bg"
+                android:visibility="gone" />
+        </FrameLayout>
 
         <ProgressBar
             android:id="@+id/progressStream"
@@ -316,47 +359,5 @@
         </LinearLayout>
 
     </LinearLayout>
-
-    <!-- Badge koneksi + Tombol Akhiri tersembunyi (geser untuk tampilkan)
-         Container ini bisa digeser ke kiri untuk memunculkan btnAkhiriBadge -->
-    <FrameLayout
-        android:id="@+id/badgeSwipeContainer"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|end"
-        android:layout_margin="12dp">
-
-        <!-- Tombol Akhiri (tersembunyi di balik badge, muncul saat digeser) -->
-        <Button
-            android:id="@+id/btnAkhiriBadge"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_vertical|end"
-            android:text="Akhiri"
-            android:textColor="#FFFFFF"
-            android:textSize="11sp"
-            android:backgroundTint="#D32F2F"
-            android:paddingLeft="12dp"
-            android:paddingRight="12dp"
-            android:paddingTop="4dp"
-            android:paddingBottom="4dp"
-            android:visibility="gone" />
-
-        <!-- Badge koneksi utama -->
-        <TextView
-            android:id="@+id/tvConnectedBadge"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:paddingLeft="10dp"
-            android:paddingRight="10dp"
-            android:paddingTop="4dp"
-            android:paddingBottom="4dp"
-            android:text="&#9679; Menerima data dari ESP32-S3  ‹ geser"
-            android:textColor="#FFFFFF"
-            android:textSize="11sp"
-            android:background="@drawable/badge_connected_bg"
-            android:visibility="gone" />
-
-    </FrameLayout>
 
 </FrameLayout>

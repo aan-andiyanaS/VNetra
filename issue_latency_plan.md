@@ -83,6 +83,15 @@ ToF Total  : 15 ms
 ===========================
 ```
 
+### Tahap 6: UI Revamp & WebSocket Ping
+Setelah evaluasi awal, antarmuka Latency Monitor disesuaikan ulang:
+1. **Pemindahan Latency Monitor**: Panel Latency Monitor dipindahkan ke sisi kanan atas (`top|end`) agar tidak menghalangi tampilan *frame* kamera dan ToF grid.
+2. **Pemindahan Indikator Koneksi**: *Badge* status koneksi ("Menerima data dari ESP32-S3") dipindahkan ke bagian bawah *frame* kamera, dekat dengan kontrol UI.
+3. **Pengukuran WebSocket Ping**:
+   - Di sisi Android (`CameraStreamService.kt`), *coroutine* pengirim mengirimkan teks `PING:{timestamp}` ke ESP32 setiap 1 detik.
+   - Di sisi ESP32 (`firmware-vnetra.ino`), *handler* WebSocket dimodifikasi untuk langsung merespons dengan `PONG:{timestamp}` setiap menerima pesan PING.
+   - Di sisi Android, selisih waktu penerimaan `PONG` dengan `timestamp` yang dikirim dikalkulasi sebagai RTT (*Round Trip Time*), lalu dibagi dua untuk memperkirakan *One Way Delay* (OWD) WebSocket, dan ditampilkan pada UI sebagai `WebSocket : XX ms`.
+
 ---
 
 ## ✅ Checklist Penerimaan (Acceptance Criteria)
@@ -90,3 +99,5 @@ ToF Total  : 15 ms
 - [ ] Proses parallel Kamera dan ToF terdeteksi jelas dan nilai terbesarnya secara otomatis disorot sebagai "MAX BOTTLENECK".
 - [ ] Pemecahan proses (merunut) di dalam ToF tampil terstruktur tanpa merusak kalkulasi totalnya.
 - [ ] Penambahan logika monitor waktu ini **TIDAK** menyebabkan beban kinerja (RAM/CPU) aplikasi menjadi *lag*.
+- [ ] Posisi indikator *ping* berada di sisi kanan atas dan *badge* koneksi berada di bawah *frame* kamera.
+- [ ] Waktu transfer data via WebSocket diukur secara akurat melalui *ping-pong mechanism* dengan perangkat ESP32.

@@ -399,7 +399,11 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                 memcpy(cmdBuf, data, len);
                 String cmd = String(cmdBuf);
                 cmd.trim();
-                if (cmd == "SET_TOF_MODE:4") {
+                
+                if (cmd.startsWith("PING:")) {
+                    String pongReply = "PONG:" + cmd.substring(5);
+                    client->text(pongReply);
+                } else if (cmd == "SET_TOF_MODE:4") {
                     if (tofResolution != 4) {
                         tofResolution = 4;
                         tofModeChangePending = true;

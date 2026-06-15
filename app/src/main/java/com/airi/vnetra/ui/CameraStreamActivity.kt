@@ -110,7 +110,10 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var pingFormulaEH:  Long = 0
     @Volatile private var pingTerrain:    Long = 0
     @Volatile private var pingTotalTof:   Long = 0
+    @Volatile private var pingWebsocket:  Long = -1L
+
     private var latencyMonitorJob: Job? = null
+    private var pingWebsocketJob: Job? = null
 
     // ── Formula H — One-shot alert + TTS Engine (P3.3) ────────────────
     private lateinit var formulaH: FormulaH
@@ -491,6 +494,7 @@ class CameraStreamActivity : AppCompatActivity() {
         imuCollectJob?.cancel()
         tofCollectJob?.cancel()
         latencyMonitorJob?.cancel()
+        pingWebsocketJob?.cancel()
 
         // Reset state latency
         pingCamera = 0
@@ -498,12 +502,25 @@ class CameraStreamActivity : AppCompatActivity() {
         pingFormulaEH = 0
         pingTerrain = 0
         pingTotalTof = 0
+        pingWebsocket = -1L
 
         // Start latency monitor polling job (5Hz = 200ms)
         latencyMonitorJob = lifecycleScope.launch {
             while (true) {
                 kotlinx.coroutines.delay(200)
                 updateLatencyMonitorUi()
+            }
+        }
+
+        pingWebsocketJob = lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                svc.pingWebsocketFlow.collect { ping ->
+                    pingWebsocket = ping
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("CameraStreamActivity", "Ping WS collect error", e)
             }
         }
 
@@ -806,6 +823,7 @@ class CameraStreamActivity : AppCompatActivity() {
         runCatching { imuCollectJob?.cancel() };   imuCollectJob   = null
         runCatching { tofCollectJob?.cancel() };   tofCollectJob   = null
         runCatching { latencyMonitorJob?.cancel() }; latencyMonitorJob = null
+        runCatching { pingWebsocketJob?.cancel() }; pingWebsocketJob = null
     }
 
     /**
@@ -815,6 +833,7 @@ class CameraStreamActivity : AppCompatActivity() {
     private fun updateLatencyMonitorUi() {
         if (isDestroyed || isFinishing) return
         val cam = pingCamera
+        val ws = if (pingWebsocket >= 0) "$pingWebsocket" else "?"
         val tofTotal = pingTotalTof
         val smooth = pingTofSmooth
         val formula = pingFormulaEH
@@ -825,6 +844,7 @@ class CameraStreamActivity : AppCompatActivity() {
             === SYSTEM PING MONITOR ===
             [Parallel Processing]
             Cam Decode : $cam ms
+            WebSocket  : $ws ms
             ToF Total  : $tofTotal ms
             ---------------------------
             ► MAX BOTTLENECK : $maxBottleneck ms
@@ -1052,19 +1072,19 @@ class CameraStreamActivity : AppCompatActivity() {
         if (!::binding.isInitialized) return
         val isToolbarVisible = binding.toolbar.visibility == View.VISIBLE
         val imuParams = binding.layoutImu.layoutParams as? FrameLayout.LayoutParams ?: return
-        val badgeParams = binding.badgeSwipeContainer.layoutParams as? FrameLayout.LayoutParams ?: return
+        val latencyParams = binding.layoutLatencyMonitor.layoutParams as? FrameLayout.LayoutParams ?: return
 
         if (isToolbarVisible) {
             val actionBarHeight = getActionBarHeight()
             imuParams.topMargin = currentTopInset + actionBarHeight + 8.dpToPx()
-            badgeParams.topMargin = currentTopInset + actionBarHeight + 12.dpToPx()
+            latencyParams.topMargin = currentTopInset + actionBarHeight + 8.dpToPx()
         } else {
             imuParams.topMargin = currentTopInset + 8.dpToPx()
-            badgeParams.topMargin = currentTopInset + 12.dpToPx()
+            latencyParams.topMargin = currentTopInset + 8.dpToPx()
         }
 
         binding.layoutImu.layoutParams = imuParams
-        binding.badgeSwipeContainer.layoutParams = badgeParams
+        binding.layoutLatencyMonitor.layoutParams = latencyParams
     }
 
     private fun getActionBarHeight(): Int {
