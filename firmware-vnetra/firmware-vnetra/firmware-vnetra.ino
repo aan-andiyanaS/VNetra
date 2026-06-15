@@ -151,6 +151,12 @@ static constexpr uint32_t WS_PING_INTERVAL  = 10000;   // ms — heartbeat setia
 static constexpr size_t   WS_BUF_MAX        = 130*1024;
 static constexpr uint32_t HEAP_GUARD_BYTES  = 30000;
 
+// Dynamic QoS & Frame Dropping
+static constexpr unsigned long TARGET_FRAME_MS = 100;     // Target 10 FPS
+static constexpr float         MOTION_THRESHOLD = 1.5f;   // Threshold pergerakan IMU (rad/s)
+static constexpr uint8_t       QUALITY_STILL    = 12;     // Kualitas saat diam (tajam)
+static constexpr uint8_t       QUALITY_MOTION   = 30;     // Kualitas saat bergerak (buram)
+
 // Mode hemat daya: jika tidak ada client selama X ms, skip capture frame
 // Kamera tetap init (reinit mahal), hanya frame tidak dikirim
 static constexpr uint32_t POWER_SAVE_TIMEOUT = 30000;  // 30 detik tanpa client → hemat daya
@@ -161,6 +167,10 @@ typedef struct {
     size_t len;
 } WsMessage_t;
 QueueHandle_t wsQueue = NULL;
+
+volatile bool is_moving_fast = false;
+unsigned long last_frame_time = 0;
+volatile unsigned long last_motion_time = 0;
 
 volatile uint32_t stat_frames_cam = 0;
 volatile uint32_t stat_frames_imu = 0;
@@ -425,6 +435,12 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 
 // ======== CAPTURE & SEND via WebSocket ========
 void captureAndSend() {
+    // 3A: Frame Dropping (FPS Limiter)
+    if (millis() - last_frame_time < TARGET_FRAME_MS) {
+        return;
+    }
+    last_frame_time = millis();
+
     // Skip jika kamera dinonaktifkan sementara
     if (!isCameraActive) return;
     // Skip jika tidak ada client atau dalam mode hemat daya
@@ -433,6 +449,18 @@ void captureAndSend() {
     if (esp_get_free_heap_size() < HEAP_GUARD_BYTES) {
         Serial.printf("[MEM] Heap kritis (%u B) — frame dilewati\n", esp_get_free_heap_size());
         return;
+    }
+
+    // 3B: Dynamic JPEG Quality (Motion-Aware QoS)
+    static uint8_t current_sensor_quality = 0;
+    uint8_t target_quality = is_moving_fast ? QUALITY_MOTION : QUALITY_STILL;
+    if (current_sensor_quality != target_quality) {
+        esp_camera_sensor_t* s = esp_camera_sensor_get();
+        if (s) {
+            s->set_quality(s, target_quality);
+            current_sensor_quality = target_quality;
+            Serial.printf("[CAM] Dynamic Quality changed to %d (moving: %s)\n", target_quality, is_moving_fast ? "YES" : "NO");
+        }
     }
 
     camera_fb_t* fb = esp_camera_fb_get();
@@ -813,6 +841,15 @@ void IMU_Task(void *pvParameters) {
     float ay = a.acceleration.y - accel_bias[1];
     float az = a.acceleration.z - accel_bias[2];
     float wx = g.gyro.x;         float wy = g.gyro.y;         float wz = g.gyro.z;
+
+    // Hitung magnitudo pergerakan dari gyroscope raw (Dynamic QoS)
+    float gyro_mag = sqrtf(wx*wx + wy*wy + wz*wz);
+    if (gyro_mag > MOTION_THRESHOLD) {
+        last_motion_time = current_ts_esp;
+        is_moving_fast = true;
+    } else if (current_ts_esp - last_motion_time > 500) {
+        is_moving_fast = false;
+    }
 
     float wx_corr = wx - x_ekf(4); float wy_corr = wy - x_ekf(5); float wz_corr = wz - x_ekf(6);
     float qw = x_ekf(0), qx = x_ekf(1), qy = x_ekf(2), qz = x_ekf(3);
