@@ -109,6 +109,14 @@ BLA::Matrix<3, 3> R;
 TaskHandle_t EKF_TaskHandle;
 TaskHandle_t TOF_TaskHandle;
 
+// ======== EKF CONVERGENCE TRACKING (Formula A.EKF.5) ========
+// ekf_frame_count: jumlah paket IMU WebSocket yang sudah dikirim (~20Hz)
+// Konvergensi dianggap setelah EKF_WARMUP_FRAMES paket = 5 detik
+// (100 paket × 50ms/paket = 5000ms, sesuai N_warmup spesifikasi)
+static volatile uint32_t ekf_frame_count = 0;
+static const uint32_t    EKF_WARMUP_FRAMES = 100;  // 100 × 50ms = 5 detik
+static const float       DEG2RAD_F = 0.01745329252f;  // π/180, lebih portabel dari M_PI
+
 // ======== TOF RESOLUTION MODE ========
 // Resolusi aktif VL53L5CX: 8 (mode 8x8, 64 cell) atau 4 (mode 4x4, 16 cell)
 // Diubah via WebSocket command: SET_TOF_MODE:4 / SET_TOF_MODE:8
@@ -130,7 +138,7 @@ volatile bool     tofModeChangePending = false; // Flag: perlu restart ranging
 // ======== WebSocket FRAME PROTOCOL ========
 // Tipe frame — extensible untuk sensor masa depan
 #define FRAME_TYPE_JPEG  0x01  // Kamera JPEG
-#define FRAME_TYPE_IMU   0x02  // IMU/EKF (MPU6050) — aktif, 6 float × 4B = 24B payload
+#define FRAME_TYPE_IMU   0x02  // IMU/EKF (MPU6050) — aktif, 9 float × 4B = 36B payload (v2)
 #define FRAME_TYPE_HBEAT 0x03  // Heartbeat / keepalive
 #define FRAME_TYPE_TOF   0x04  // ToF sensor (VL53L5CX) — aktif, 64 int16_t × 2B = 128B payload
 #define FRAME_TYPE_CTRL  0x05  // Control / config command
@@ -865,20 +873,53 @@ void IMU_Task(void *pvParameters) {
 
     last_ts_esp = current_ts_esp;
 
-    // Rate-limit WebSocket send: EKF tetap 200Hz, tapi kirim ke WS hanya ~20Hz (setiap 10 iterasi)
-    // Mengurangi tekanan mutex dan bandwidth tanpa mengorbankan akurasi EKF
+    // ── A.EKF.5: Pra-komputasi v_head_base (BARU v8.1) ─────────────────────
+    // Formula: v_head_base = k_damp × |ω_x^corr| × cos(θ) × π/180  [rad/s]
+    // Dikirim ke Mobile untuk digunakan Formula G.1b: v_head^(i) = v_head_base × d_obj^(i)
+    // k_damp: faktor redaman saat pengguna menoleh tajam (|ωx| > 5°/s)
+    const float OMEGA_X_LIM_DEG = 5.0f;  // °/s — dari Konstanta Sistem
+    float k_damp     = (fabsf(wx_corr_deg) > OMEGA_X_LIM_DEG) ? 0.5f : 1.0f;
+    float v_head_base = k_damp
+                      * (fabsf(wx_corr_deg) * DEG2RAD_F)   // |ω_x^corr| °/s → rad/s
+                      * cosf(theta * DEG2RAD_F);            // kompensasi pitch
+
+    // ── Rate-limit WebSocket send: EKF 200Hz → kirim ~20Hz (setiap 10 iterasi) ─
     static uint8_t imu_send_tick = 0;
     if (wsClientConnected && !powerSaveMode && (++imu_send_tick >= 10)) {
       imu_send_tick = 0;
-      uint8_t* imu_buf = (uint8_t*)malloc(33);
+      ekf_frame_count++;  // Hitung paket IMU dikirim untuk guard is_converged
+
+      // ── A.EKF.5: is_converged — OR antara frame counter dan norma Frobenius P ─
+      // Norma Frobenius ||P||_F: cukup bandingkan kuadratnya dengan ε_conv² = 0.01
+      // untuk menghindari sqrt() yang relatif mahal di dalam loop 20Hz ini.
+      float p_frob_sq = 0.0f;
+      for (int _i = 0; _i < 7; _i++)
+          for (int _j = 0; _j < 7; _j++)
+              p_frob_sq += P(_i, _j) * P(_i, _j);
+      bool p_ok  = (p_frob_sq < 0.01f);                    // ||P||_F < 0.10
+      bool frm_ok = (ekf_frame_count >= EKF_WARMUP_FRAMES); // frame counter >= 100
+      float is_converged = (p_ok || frm_ok) ? 1.0f : 0.0f;
+
+      // ── Payload v2: 9 float × 4B = 36B → total frame = 9B header + 36B = 45B ─
+      // Urutan field sesuai Formula A.6:
+      // [0]=θ(°)  [1]=φ(°)  [2]=ωx_corr(°/s)  [3]=ωy_corr(°/s)  [4]=ωz_corr(°/s)
+      // [5]=‖a_lin‖(m/s²)  [6]=ts_esp_ms(ms)  [7]=v_head_base(rad/s)  [8]=is_converged
+      uint8_t* imu_buf = (uint8_t*)malloc(45);
       if (imu_buf) {
         uint64_t ts_us = esp_timer_get_time();
         imu_buf[0] = FRAME_TYPE_IMU;
         memcpy(imu_buf + 1, &ts_us, 8);
-        float payload[6] = {theta, phi, wx_corr_deg, wy_corr_deg, wz_corr_deg, a_lin_mag};
-        memcpy(imu_buf + 9, payload, 24);
+        float payload[9] = {
+            theta,         phi,                              // [0] [1]
+            wx_corr_deg,   wy_corr_deg,   wz_corr_deg,      // [2] [3] [4]
+            a_lin_mag,                                       // [5]
+            (float)millis(),                                 // [6] ts_esp_ms
+            v_head_base,                                     // [7]
+            is_converged                                     // [8]
+        };
+        memcpy(imu_buf + 9, payload, 36);
 
-        WsMessage_t msg = {imu_buf, 33};
+        WsMessage_t msg = {imu_buf, 45};
         if (xQueueSend(wsQueue, &msg, 0) != pdTRUE) {
             free(imu_buf); // Cegah memory leak jika queue penuh
         } else {

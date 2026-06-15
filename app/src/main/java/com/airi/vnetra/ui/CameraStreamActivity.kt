@@ -27,7 +27,11 @@ import androidx.core.view.GestureDetectorCompat
 import androidx.lifecycle.lifecycleScope
 import com.airi.vnetra.databinding.ActivityCameraStreamBinding
 import com.airi.vnetra.service.CameraStreamService
+import com.airi.vnetra.util.FormulaE
+import com.airi.vnetra.util.FormulaH
+import com.airi.vnetra.util.FormulaUtils
 import com.airi.vnetra.util.SessionManager
+import com.airi.vnetra.util.TerrainDetector
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -93,6 +97,21 @@ class CameraStreamActivity : AppCompatActivity() {
     // Mode ToF aktif: 4 atau 8 (4x4 atau 8x8)
     // Di-load dari SharedPreferences agar persisten antar sesi
     private var currentTofMode: Int = 8
+
+    // ── State sensor terbaru — diakses oleh Formula E, G, J (P1.5) ────────
+    // @Volatile: ditulis dari Dispatchers.Default, dibaca dari coroutine lain.
+    // Tidak perlu synchronized karena assignment reference bersifat atomic di JVM.
+    @Volatile private var latestImuData: FloatArray? = null  // 9 field: [θ,φ,ωx,ωy,ωz,a,ts,vBase,conv]
+    @Volatile private var latestTofData: IntArray?   = null  // 16 atau 64 nilai (mm), -1 = invalid
+
+    // ── Formula H — One-shot alert + TTS Engine (P3.3) ────────────────
+    private lateinit var formulaH: FormulaH
+
+    // ── Formula J — Terrain Detector (P6) ───────────────────────
+    private val terrainDetector = TerrainDetector()
+    private var lastTerrainAlertTime  = 0L
+    // Cooldown: cegah terrain alert flood (min. 3 detik antar peringatan, kecuali HIGH yang selalu langsung)
+    private val TERRAIN_ALERT_COOLDOWN_MS = 3000L
 
     // Temporal holdover: tahan nilai terakhir yang valid selama N frame sebelum tampil "—".
     // Ini mencegah cell terluar (yang memiliki SNR lebih rendah) flicker antara angka dan "—"
@@ -211,6 +230,11 @@ class CameraStreamActivity : AppCompatActivity() {
 
         requestNotificationPermission()
         requestBatteryOptimizationBypass()
+
+        // P3.3: Inisialisasi FormulaH + TTS Engine
+        // Dipanggil di onCreate agar TTS punya cukup waktu init sebelum sensor aktif
+        formulaH = FormulaH(this)
+        formulaH.initTts()
     }
 
     override fun onStart() {
@@ -242,6 +266,8 @@ class CameraStreamActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // P3.3: Bebaskan resource TTS — mencegah leak AudioTrack di background
+        if (::formulaH.isInitialized) formulaH.shutdown()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
@@ -456,11 +482,19 @@ class CameraStreamActivity : AppCompatActivity() {
             try {
                 svc.imuFlow.collect { imuData ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
+                    // P1.6: Simpan state IMU terbaru untuk Formula E, G, J
+                    latestImuData = imuData
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring && imuData.size >= 6) {
                             binding.tvImuPitch.text = "Pitch: %.1f°".format(imuData[0])
                             binding.tvImuRoll.text  = "Roll: %.1f°".format(imuData[1])
-                            binding.tvImuAccel.text = "Accel: %.2f m/s²".format(imuData[5])
+                            // Tampilkan status EKF: "warming up" selama 5 detik pertama
+                            val converged = imuData.getOrElse(8) { 0f } > 0.5f
+                            if (converged) {
+                                binding.tvImuAccel.text = "Accel: %.2f m/s²".format(imuData[5])
+                            } else {
+                                binding.tvImuAccel.text = "EKF: warming up..."
+                            }
                         }
                     }
                 }
@@ -475,6 +509,8 @@ class CameraStreamActivity : AppCompatActivity() {
             try {
                 svc.tofFlow.collect { tofData ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
+                    // P1.7: Simpan state ToF terbaru untuk Formula E dan J
+                    latestTofData = tofData
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring
                             && ::tofViews.isInitialized) {
@@ -544,10 +580,89 @@ class CameraStreamActivity : AppCompatActivity() {
                                 }
                             }
                         }
-                    }
-                }
+                    }   // end withContext(Dispatchers.Main)
+                     // Formula E+H+J berjalan di Dispatchers.Default (scope collect)
+
+
+
+                    // ── Formula E + H: One-shot alert objek di depan (tanpa YOLO) ───
+                    // Berjalan di Dispatchers.Default, TIDAK di Main thread.
+                    // Tahap 1: gunakan kolom tengah (3 dan 4) sebagai proxy "objek di depan".
+                    // Tahap 2 (YOLO): ganti dengan loop per detection, trackingId = YOLO ID.
+                    if (::formulaH.isInitialized) {
+                        val imuSnap  = latestImuData
+                        val thetaDeg = imuSnap?.getOrElse(0) { 0f } ?: 0f
+
+                        // Kolom "tepat depan" bergantung resolusi:
+                        // 8×8 → kolom 3 & 4 (tengah 0..7)
+                        // 4×4 → kolom 1 & 2 (tengah 0..3)
+                        for (col in FormulaUtils.centerColumns(currentTofMode)) {
+                            val dObj = FormulaE.calculate(
+                                tofData    = tofData,
+                                j          = col,
+                                thetaDeg   = thetaDeg,
+                                resolution = currentTofMode
+                            )
+                            formulaH.process(
+                                trackingId    = col,   // proxy ID = indeks kolom
+                                dObj          = dObj,
+                                clockDirection = 12    // kolom tengah = selalu JAM 12
+                            )
+                        }
+
+                        // Formula J: Terrain Detection — process() menangani 8×8 dan 4×4
+                        // Guard hanya untuk array size yang benar: 64 (8×8) atau 16 (4×4)
+                        val expectedSize = currentTofMode * currentTofMode
+                        if (tofData.size == expectedSize) {
+                            val terrainResult = terrainDetector.process(
+                                tofData   = tofData,
+                                thetaDeg  = thetaDeg
+                            )
+
+                            if (terrainResult.alertLevel != TerrainDetector.AlertLevel.NONE) {
+                                val nowMs    = System.currentTimeMillis()
+                                val isHigh   = terrainResult.alertLevel == TerrainDetector.AlertLevel.HIGH
+                                val cooldown = (nowMs - lastTerrainAlertTime) > TERRAIN_ALERT_COOLDOWN_MS
+
+                                // HIGH selalu dibunyikan; MED/INFO hanya jika sudah lewat cooldown
+                                if (isHigh || cooldown) {
+                                    lastTerrainAlertTime = nowMs
+
+                                    val hCm      = (terrainResult.hEst / 10).toInt()
+                                    val dirText  = when (terrainResult.direction) {
+                                        11 -> "kiri depan"
+                                         1 -> "kanan depan"
+                                        else -> "depan"
+                                    }
+                                    val typeText = when (terrainResult.type) {
+                                        TerrainDetector.TerrainType.STAIR_DOWN -> "tangga turun"
+                                        TerrainDetector.TerrainType.STAIR_UP   -> "tangga naik"
+                                        TerrainDetector.TerrainType.HOLE       -> "lubang"
+                                        TerrainDetector.TerrainType.RAMP       -> "landai"
+                                        else -> ""
+                                    }
+
+                                    val msg = when (terrainResult.alertLevel) {
+                                        TerrainDetector.AlertLevel.HIGH ->
+                                            "Awas! $typeText, sekitar $hCm sentimeter, $dirText!"
+                                        TerrainDetector.AlertLevel.MED  ->
+                                            "Perhatian, $typeText, $hCm sentimeter, $dirText"
+                                        TerrainDetector.AlertLevel.INFO ->
+                                            "Landai $dirText"
+                                        else -> ""
+                                    }
+
+                                    if (msg.isNotEmpty()) {
+                                        if (isHigh) formulaH.speak(msg)
+                                        else formulaH.speakAdd(msg)
+                                    }
+                                }
+                            }
+                        }
+                    } // end if (formulaH.isInitialized)
+                } // end collect { tofData ->
             } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e  // re-throw cancellation
+                throw e  // re-throw agar coroutine cancellation bisa propagate (jangan diswallow!)
             } catch (e: Exception) {
                 android.util.Log.e("CameraStreamActivity", "TOF collect error", e)
             }
@@ -683,6 +798,12 @@ class CameraStreamActivity : AppCompatActivity() {
      */
     private fun clearStaleSensorDisplay() {
         if (isDestroyed || isFinishing) return
+        // P3.3 + P6.3: Reset state sensor dan formula saat disconnect
+        if (::formulaH.isInitialized) {
+            formulaH.stopSpeaking()    // hentikan TTS yang mungkin sedang berjalan
+            formulaH.resetAllFlags()   // siap diperingatkan lagi saat reconnect
+        }
+        lastTerrainAlertTime = 0L      // reset cooldown terrain
         runOnUiThread {
             runCatching {
                 binding.tvImuPitch.text = "Pitch: —"

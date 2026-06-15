@@ -283,14 +283,30 @@ class CameraStreamService : Service() {
                                     when (type) {
                                         FRAME_TYPE_JPEG -> _frameFlow.emit(payload)
                                         FRAME_TYPE_IMU  -> {
-                                            if (payload.size >= 24) {
-                                                val floats = FloatArray(6)
-                                                java.nio.ByteBuffer.wrap(payload)
-                                                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                                    .asFloatBuffer().get(floats)
-                                                _imuFlow.emit(floats)
-                                            }
-                                        }
+                            // Payload v2: 9 float × 4B = 36B (firmware baru)
+                            // [0]=θ  [1]=φ  [2]=ωx_corr  [3]=ωy_corr  [4]=ωz_corr
+                            // [5]=‖a_lin‖  [6]=ts_esp_ms  [7]=v_head_base  [8]=is_converged
+                            when {
+                                payload.size >= 36 -> {
+                                    // Firmware baru: 9 field penuh
+                                    val floats = FloatArray(9)
+                                    java.nio.ByteBuffer.wrap(payload)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                        .asFloatBuffer().get(floats)
+                                    _imuFlow.emit(floats)
+                                }
+                                payload.size >= 24 -> {
+                                    // Backward-compat: firmware lama 6 field
+                                    // Field 6-8 diisi 0f → is_converged=0 → G tidak aktif
+                                    val floats = FloatArray(9)
+                                    java.nio.ByteBuffer.wrap(payload, 0, 24)
+                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                        .asFloatBuffer().get(floats, 0, 6)
+                                    _imuFlow.emit(floats)
+                                }
+                                // payload < 24B: frame corrupt, abaikan
+                            }
+                        }
                                         FRAME_TYPE_TOF  -> {
                                             // Format baru: [0]=resolusi, [1..]= distance_mm, [1+distSize..]= target_status
                                             if (payload.size >= 2) {
