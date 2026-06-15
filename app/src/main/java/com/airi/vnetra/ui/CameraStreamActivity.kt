@@ -591,7 +591,12 @@ class CameraStreamActivity : AppCompatActivity() {
                     // Tahap 2 (YOLO): ganti dengan loop per detection, trackingId = YOLO ID.
                     if (::formulaH.isInitialized) {
                         val imuSnap  = latestImuData
-                        val thetaDeg = imuSnap?.getOrElse(0) { 0f } ?: 0f
+                        val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
+                        
+                        // Kompensasi sudut kemiringan fisik ToF (20 derajat ke bawah)
+                        // Karena MPU6050 tetap lurus (0 derajat), tetapi ToF menunduk 20 derajat,
+                        // kita kurangi 20 derajat dari raw pitch agar formula memahami orientasi aktual ToF.
+                        val thetaDeg = rawTheta - 20f
 
                         // Kolom "tepat depan" bergantung resolusi:
                         // 8×8 → kolom 3 & 4 (tengah 0..7)

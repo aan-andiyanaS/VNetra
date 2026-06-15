@@ -45,7 +45,7 @@ class TerrainDetector {
         const val C_HIGH       = 0.80f  // —   — confidence untuk force HIGH alert
         const val C_MID        = 0.60f  // —   — confidence untuk MED alert
         const val D_MAX        = 4000f  // mm  — sentinel "tidak terdeteksi"
-        const val ALPHA_MOUNT  = 15f    // °   — sudut mounting sensor ke bawah dari horizontal
+        const val ALPHA_MOUNT  = 20f    // °   — sudut mounting sensor ke bawah dari horizontal
 
         // Jumlah frame historis untuk komponen confidence temporal
         const val HISTORY_SIZE = 3
