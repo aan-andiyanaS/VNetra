@@ -1038,10 +1038,12 @@ void TOF_Task(void *pvParameters) {
         //
         // Default aman: 4x4=15Hz, 8x8=10Hz, integration time minimal (auto)
         myImager.setRangingFrequency(newRes == 4 ? 15 : 10);
-        // Integration time: nilai asli yang sudah terbukti stabil.
-        // 4x4=30ms (pada 15Hz: 30ms << 66ms period, aman)
-        // 8x8=50ms (pada 10Hz: 50ms << 100ms period, aman)
-        myImager.setIntegrationTime(newRes == 4 ? 30 : 50);
+        // Integration time: nilai yang lebih rendah (misal 20/30) dapat mencegah over-saturasi SPAD di bawah sinar matahari (Outdoor).
+        // Default aman: 4x4=30ms, 8x8=50ms. Dioptimalkan untuk outdoor: 4x4=20ms, 8x8=30ms.
+        myImager.setIntegrationTime(newRes == 4 ? 20 : 30);
+        // Ubah urutan target ke STRONGEST untuk mengabaikan ghost object akibat noise cahaya matahari
+        myImager.setTargetOrder(SF_VL53L5CX_TARGET_ORDER::STRONGEST);
+        
         Wire.setClock(400000);           // Kembalikan ke fast I2C
         myImager.startRanging();
         xSemaphoreGive(i2c_mutex);
@@ -1119,7 +1121,29 @@ void TOF_Task(void *pvParameters) {
           AsyncUDPMessage tof_msg(totalSize);
           tof_msg.write(tof_buf, totalSize);
           udpSensor.sendTo(tof_msg, activeClientIp, UDP_TARGET_PORT);
-          stat_frames_tof++; // Counter untuk log statistik
+        }
+      }
+
+      if (gotData) {
+        // Auto-Switch logic: hitung rata-rata ambient noise (cahaya luar ruangan)
+        uint32_t ambient_sum = 0;
+        uint16_t active_cells = tofResolution * tofResolution;
+        for (uint16_t ci = 0; ci < active_cells; ci++) {
+          ambient_sum += measurementData.ambient_per_spad[ci];
+        }
+        float ambient_avg = (float)ambient_sum / active_cells;
+
+        const float THRESHOLD_HIGH = 120.0f; // Batas atas (terik matahari) -> 4x4
+        const float THRESHOLD_LOW = 50.0f;   // Batas bawah (indoor/teduh) -> 8x8
+
+        if (ambient_avg > THRESHOLD_HIGH && tofResolution == 8) {
+          tofResolution = 4;
+          tofModeChangePending = true;
+          Serial.printf("[TOF] Auto-Switch: Ambient tinggi (%.2f kcps/spad) -> Pindah ke 4x4\n", ambient_avg);
+        } else if (ambient_avg < THRESHOLD_LOW && tofResolution == 4) {
+          tofResolution = 8;
+          tofModeChangePending = true;
+          Serial.printf("[TOF] Auto-Switch: Ambient rendah (%.2f kcps/spad) -> Pindah ke 8x8\n", ambient_avg);
         }
       }
     }
@@ -1208,10 +1232,11 @@ void TOF_InitTask(void* pvParams) {
             // Kembali ke nilai default yang STABIL (tidak memblok I2C mutex).
             // Lihat komentar di mode change handler untuk penjelasan lengkap.
             myImager.setRangingFrequency(tofResolution == 4 ? 15 : 10);
-            // Integration time: nilai asli yang sudah terbukti stabil.
-            // 4x4=30ms (pada 15Hz: 30ms << 66ms period, aman)
-            // 8x8=50ms (pada 10Hz: 50ms << 100ms period, aman)
-            myImager.setIntegrationTime(tofResolution == 4 ? 30 : 50);
+            // Integration time: diturunkan agar lebih tahan terhadap saturasi inframerah dari sinar matahari.
+            // Dioptimalkan untuk outdoor: 4x4=20ms, 8x8=30ms.
+            myImager.setIntegrationTime(tofResolution == 4 ? 20 : 30);
+            // Ubah urutan target ke STRONGEST untuk mengabaikan ghost object akibat noise cahaya matahari
+            myImager.setTargetOrder(SF_VL53L5CX_TARGET_ORDER::STRONGEST);
 
             myImager.startRanging();
             Serial.printf("[TOF] Init: %dx%d, Freq=%dHz, IntTime=%dms\n",

@@ -564,6 +564,13 @@ class CameraStreamActivity : AppCompatActivity() {
                             && ::tofViews.isInitialized) {
 
                             if (tofData.size != tofViews.size) {
+                                val detectedMode = if (tofData.size == 16) 4 else 8
+                                if (currentTofMode != detectedMode) {
+                                    currentTofMode = detectedMode
+                                    saveTofMode(detectedMode)
+                                    rebuildTofGrid(detectedMode)
+                                    updateTofModeButtons(detectedMode)
+                                }
                                 smoothedTofData = null // Reset smoothing array jika resolusi berubah
                                 return@withContext
                             }

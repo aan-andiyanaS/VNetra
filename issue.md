@@ -1,25 +1,52 @@
-# Perbaikan Lanjutan: Dual-Path Architecture (TCP & UDP) dan Application-Level Flow Control (Anti-Bufferbloat)
+# Plan Implementasi: Auto-Switch Resolusi VL53L5CX Berdasarkan Ambient Light
 
-## Deskripsi Masalah Sebelumnya
-Setelah kita mengimplementasikan fitur pemantauan *ping* secara *real-time* (Issue #28), kita menemukan bahwa lalu lintas data gabungan antara *video stream* (resolusi tinggi) dan data sensor IMU & ToF (frekuensi tinggi) melalui satu jalur *WebSocket* menyebabkan *bottleneck*. Ketergantungan *Camera Task* terhadap `i2c_mutex` (yang digunakan sensor) menyebabkan *frame rate* menjadi lambat, tidak stabil, serta menyumbat aliran antrean data (lag). 
+**Tujuan:** Membuat sensor ToF otomatis berpindah dari mode 8x8 ke 4x4 saat berada di luar ruangan (cahaya matahari terik) untuk mencegah saturasi SPAD, dan otomatis kembali ke 8x8 saat masuk ke dalam ruangan.
 
-## Solusi Utama yang Diimplementasikan
+## Analisis Alur Kerja (Workflow) Saat Ini
+1. **ESP32:** Pergantian mode saat ini dikendalikan oleh variabel `tofModeChangePending`. Saat aktif, sensor menghentikan proses *ranging*, mengkonfigurasi resolusi/frekuensi baru, lalu memulai *ranging* lagi. Transisi ini sangat mulus (*seamless*) dan **tidak memerlukan restart ESP32**.
+2. **Android App:** HP menerima array 1D berisi jarak. Jika jumlah elemennya 64, ia merender grid 8x8. Jika 16, ia merender 4x4. UI saat ini hanya berubah ukuran ketika user memencet tombol `SET_TOF_MODE`. Jika paket ukuran 16 tiba tapi UI masih mode 8x8, HP akan menolak (*drop*) frame tersebut karena ukuran elemen visual tidak cocok dengan data.
 
-### 1. Dual-Path Architecture: Memisahkan Jalur Data Sensor dan Video
-Untuk mengatasi *bottleneck* I2C dan TCP:
-- **Pemisahan Protokol**: Data Video (kamera) tetap dipertahankan pada **TCP (WebSocket)** karena membutuhkan transmisi tanpa cacat (*lossless*). Sebaliknya, aliran data sensor yang berfrekuensi tinggi (IMU & ToF) dipindahkan ke protokol **UDP**, yang *connectionless* dan super cepat.
-- **Kemandirian Task**: Karena sensor memiliki jalurnya sendiri, *Camera Task* tidak lagi harus tertahan oleh `i2c_mutex`. Hasilnya, kamera dapat memproduksi dan mentransmisikan *frame* hingga 50 FPS (tergantung limitasi *delay* `TARGET_FRAME_MS`).
-- **Android App Fix**: Di sisi aplikasi Android (`CameraStreamService.kt`), *DatagramSocket* digunakan untuk menangkap data UDP. Sebuah *bug* kritis berupa ukuran *buffer* paket yang menyusut akibat `DatagramPacket` ditangani secara tuntas dengan mereset panjang paket (`packet.length = buffer.size`) di setiap perulangan penerimaan.
+## 1. Rencana Modifikasi ESP32 Firmware (`firmware-vnetra.ino`)
+Agar ESP32 otomatis berubah tanpa menunggu HP, kita akan mengekstrak data gangguan cahaya (*noise* ambient) bawaan dari sensor.
 
-### 2. Application-Level Flow Control (ACK:CAM) & Frame Dropping Cerdas
-Dampak tak terduga dari pemisahan jalur adalah *Camera Task* menjadi terlalu cepat (memproduksi frame tanpa batas). Ini membuat antrean *AsyncTCP* pada ESP32 seketika penuh dengan 32 pesan (maksimum buffer), menghasilkan **Bufferbloat** yang memicu *ping* membengkak menjadi > 3000ms dan data UDP lenyap karena *bandwidth* sinyal Wi-Fi dimonopoli oleh proses antrean ulang TCP.
+**Langkah-langkah Eksekusi (High-Level):**
+1. Sensor menghasilkan parameter `measurementData.ambient_per_spad[64]` yang berisi tingkat foton cahaya sekitar (dalam *kcps/spad*).
+2. Di dalam perulangan `TOF_Task`, setiap kali berhasil `getRangingData`, lakukan *looping* untuk menghitung nilai rata-rata dari seluruh zona aktif `ambient_per_spad`.
+3. Terapkan logika **Hysteresis** (dua nilai ambang batas) untuk mencegah *bouncing* (mode berkedip terus-menerus saat cahaya sedang di batas tanggung):
+   - `THRESHOLD_HIGH` (misal 100 kcps/spad): Batas untuk mengaktifkan 4x4 (Matahari).
+   - `THRESHOLD_LOW` (misal 40 kcps/spad): Batas untuk kembali ke 8x8 (Dalam ruangan).
+   *(Catatan: Junior Developer perlu melakukan print/serial monitor nilai rata-rata ini di bawah terik matahari dan di kamar gelap untuk menentukan angka pasti THRESHOLD ini).*
+4. Eksekusi trigger jika syarat terpenuhi:
+   - Jika rata-rata ambient > `THRESHOLD_HIGH` dan mode sekarang 8x8: 
+     Set `tofResolution = 4` dan `tofModeChangePending = true`.
+   - Jika rata-rata ambient < `THRESHOLD_LOW` dan mode sekarang 4x4: 
+     Set `tofResolution = 8` dan `tofModeChangePending = true`.
+5. *Voila!* Kode lama di bawahnya akan secara otomatis menangkap `tofModeChangePending`, me-reset konfigurasi I2C secara aman tanpa me-restart ESP32.
 
-Untuk memberantas *Bufferbloat*, mekanisme kendali aliran ketat diterapkan:
-- **Feedback (ACK:CAM) dari Android**: Setiap kali aplikasi Android berhasil mengurai (*parse*) *frame* JPEG dan menampilkannya, aplikasi akan merespon dengan mengirim *text frame* `"ACK:CAM"` kembali ke ESP32.
-- **Limitasi Antrean (Max 4 Frames)**: ESP32 akan menghitung jumlah *frame* yang sudah meluncur tetapi belum di-ACK (`unacked_frames`). Jika `unacked_frames >= 4` (sekitar ~400ms in-flight buffer), kamera akan melakukan *Frame Dropping*.
-- **Silent & Non-Blocking Frame Drop**: Ketika limit antrean tercapai, hasil tangkapan gambar dibuang tanpa membekukan CPU. Ini menjaga FPS agar selalu seirama dengan kemampuan aktual jaringan tanpa menjebol *buffer*.
-- **Bug Fix 3 Detik Awal (Event Connect)**: Inisialisasi awal variabel penghitung `last_ack_time = millis();` dipindahkan secara akurat ke *event* `WS_EVT_CONNECT`. Hal ini mencegah *bug* di mana antrean membeludak ke batas 32-frame di 3 detik pertama koneksi sebelum Flow Control dapat bereaksi.
-- **Graceful Fallback**: Sebagai pengaman jika HP Android putus koneksi sementara waktu, jaringan sangat terganggu, atau pengguna belum meng-*update* aplikasi Android, terdapat batas tunggu toleransi 3 detik. Jika 3 detik berlalu tanpa ACK, antrean akan di-reset (kembali ke *behaviour* bawaan), sehingga menghindari kamera terhenti secara permanen.
+## 2. Rencana Modifikasi Android App (`CameraStreamActivity.kt`)
+HP harus bisa bereaksi mandiri terhadap perubahan ukuran data tiba-tiba yang dikirimkan oleh ESP32, dan langsung memperbarui tampilan Grid.
 
-## Kesimpulan
-Perubahan infrastruktur jaringan secara komprehensif ini secara signifikan meringankan *bandwidth* protokol TCP, menekan latensi (*ping*) kembali di bawah ~400ms, mengembalikan fungsionalitas paket UDP sensor yang sempat hilang, dan menghasilkan pengalaman rekaman video langsung (streaming) yang bebas "patah-patah".
+**Langkah-langkah Eksekusi (High-Level):**
+1. Pergi ke blok fungsi `startCollectingSensors()` di dalam _coroutine_ `tofCollectJob`.
+2. Temukan baris validasi pencegah _crash_ ini: 
+   ```kotlin
+   if (tofData.size != tofViews.size) { ... }
+   ```
+3. Modifikasi blok tersebut. Daripada sekadar me-return (mengabaikan data), tambahkan fungsi untuk langsung membangun ulang (rebuild) grid secara dinamis berdasarkan `tofData.size`:
+   ```kotlin
+   if (tofData.size != tofViews.size) {
+       // Deteksi mode dari panjang paket
+       val detectedMode = if (tofData.size == 16) 4 else 8
+       
+       // Update UI dan konfigurasi secara otomatis!
+       if (currentTofMode != detectedMode) {
+           currentTofMode = detectedMode
+           saveTofMode(detectedMode)           // Simpan preferensi HP
+           rebuildTofGrid(detectedMode)        // Gambar ulang Grid UI
+           updateTofModeButtons(detectedMode)  // Pindahkan indikator biru pada tombol
+       }
+       
+       smoothedTofData = null // Reset filter EMA smoothing
+       return@withContext
+   }
+   ```
