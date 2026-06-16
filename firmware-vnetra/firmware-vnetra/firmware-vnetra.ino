@@ -336,7 +336,6 @@ bool initCamera() {
     cfg.pin_reset    = RESET_GPIO_NUM;
     cfg.xclk_freq_hz = 24000000;        // 24MHz: max stable clock, readout lebih cepat
     cfg.frame_size   = FRAMESIZE_VGA;   // 640x480 (VGA / 4:3): balance kualitas vs latensi
-                                        // Ganti ke FRAMESIZE_QVGA (320x240) jika masih lag
     cfg.pixel_format = PIXFORMAT_JPEG;
     cfg.jpeg_quality = JPEG_QUALITY;
 
