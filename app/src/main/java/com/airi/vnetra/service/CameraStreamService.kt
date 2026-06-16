@@ -312,7 +312,10 @@ class CameraStreamService : Service() {
 
                                 serviceScope.launch {
                                     when (type) {
-                                        FRAME_TYPE_JPEG -> _frameFlow.emit(payload)
+                                        FRAME_TYPE_JPEG -> {
+                                            _frameFlow.emit(payload)
+                                            runCatching { activeWebSocket?.send("ACK:CAM") }
+                                        }
                                         FRAME_TYPE_IMU  -> {
                             // Payload v2: 9 float × 4B = 36B (firmware baru)
                             // [0]=θ  [1]=φ  [2]=ωx_corr  [3]=ωy_corr  [4]=ωz_corr
@@ -439,6 +442,7 @@ class CameraStreamService : Service() {
 
             try {
                 while (isActive && !stopped) {
+                    packet.length = buffer.size
                     socket.receive(packet)
                     if (stopped) break
 

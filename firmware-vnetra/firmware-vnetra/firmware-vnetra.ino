@@ -169,6 +169,8 @@ typedef struct {
 } WsMessage_t;
 QueueHandle_t wsQueue = NULL;
 
+volatile int unacked_frames = 0;
+uint32_t last_ack_time = 0;
 volatile bool is_moving_fast = false;
 unsigned long last_frame_time = 0;
 volatile unsigned long last_motion_time = 0;
@@ -383,10 +385,12 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             udpClientReady = true;
             wsClientConnected = true;
             hadClientBefore   = true;
+            last_ack_time     = millis();
+            unacked_frames    = 0;
             // Keluar dari power save mode saat client baru connect
             if (powerSaveMode) {
                 powerSaveMode = false;
-                Serial.println("[PWR] Client terhubung — keluar dari mode hemat daya");
+                Serial.println("[PWR] Client terhubung - keluar dari mode hemat daya");
                 ledGreen();
             }
             break;
@@ -396,6 +400,7 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             wsClientConnected = (ws.count() > 0);
             if (!wsClientConnected) {
                 udpClientReady = false;
+                unacked_frames = 0; // reset
             }
             if (!wsClientConnected && hadClientBefore) {
                 // Semua client disconnect — catat waktu untuk timer power save
@@ -425,17 +430,20 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                 if (cmd.startsWith("PING:")) {
                     String pongReply = "PONG:" + cmd.substring(5);
                     client->text(pongReply);
+                } else if (cmd == "ACK:CAM") {
+                    last_ack_time = millis();
+                    if (unacked_frames > 0) unacked_frames--;
                 } else if (cmd == "SET_TOF_MODE:4") {
                     if (tofResolution != 4) {
                         tofResolution = 4;
                         tofModeChangePending = true;
-                        Serial.println("[TOF] Mode change requested → 4x4");
+                        Serial.println("[TOF] Mode change requested -> 4x4");
                     }
                 } else if (cmd == "SET_TOF_MODE:8") {
                     if (tofResolution != 8) {
                         tofResolution = 8;
                         tofModeChangePending = true;
-                        Serial.println("[TOF] Mode change requested → 8x8");
+                        Serial.println("[TOF] Mode change requested -> 8x8");
                     }
                 }
             }
@@ -447,7 +455,24 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 
 // ======== CAPTURE & SEND via WebSocket ========
 void captureAndSend() {
-    // 3A: Frame Dropping (FPS Limiter)
+    // 3A: Frame Dropping cerdas dengan Fallback
+    // last_ack_time diupdate di WS_EVT_DATA setiap menerima ACK:CAM
+    extern uint32_t last_ack_time; 
+    
+    if (millis() - last_ack_time > 3000) {
+        // Fallback: Jika tidak ada ACK selama 3 detik, asumsi Android menggunakan app versi lama
+        // atau koneksi lag parah. Reset unacked_frames agar video tidak mati total (kembali ke perilaku awal).
+        unacked_frames = 0;
+    } else if (unacked_frames >= 4) {
+        // Flow control ketat: max 4 frame in-flight (~400ms buffer)
+        // Jika penuh, DROP frame seketika tanpa delay (agar tidak patah-patah).
+        // Jangan di-return di sini karena kita butuh ngecek heap & memori buffer di bawah
+        // Tapi untuk performa, return di sini paling hemat CPU. Pastikan fb & jpg_buf belum dialokasi!
+        Serial.println("[CAM] Buffer penuh (max 4). Frame didrop.");
+        return; 
+    }
+
+    // FPS Limiter
     if (millis() - last_frame_time < TARGET_FRAME_MS) {
         return;
     }
@@ -516,12 +541,16 @@ void captureAndSend() {
     // KRITIS: ws.binaryAll() dipanggil dari loop() DAN dari IMU_Task/TOF_Task
     // ESPAsyncWebServer TIDAK thread-safe — gunakan mutex untuk cegah korupsi
     if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        unacked_frames++; // Tandai frame in-flight
         for (auto& client : ws.getClients()) {
-            if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+            if (client.status() == WS_CONNECTED) {
+                // Jangan check queueIsFull lagi, kita sudah limit max 2 frame in-flight di atas
                 client.binary(g_wsBuf, total);
             }
         }
         xSemaphoreGive(ws_mutex);
+    } else {
+        Serial.println("[CAM] Gagal take ws_mutex, frame didrop.");
     }
 }
 
@@ -530,6 +559,9 @@ void startCameraServer() {
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
     server.begin();
+    if(udpSensor.listen(8081)) {
+        Serial.println("[UDP] Sensor Server listening on port 8081");
+    }
     Serial.printf("[WS] Server ready — ws://%s/ws\n", deviceIP.c_str());
 }
 
@@ -971,7 +1003,9 @@ void IMU_Task(void *pvParameters) {
       };
       memcpy(imu_buf + 9, payload, 36);
 
-      udpSensor.sendTo(imu_buf, 45, activeClientIp, UDP_TARGET_PORT);
+      AsyncUDPMessage imu_msg(45);
+      imu_msg.write(imu_buf, 45);
+      udpSensor.sendTo(imu_msg, activeClientIp, UDP_TARGET_PORT);
       stat_frames_imu++; // Counter untuk log statistik
     }
 
@@ -1082,7 +1116,9 @@ void TOF_Task(void *pvParameters) {
           memcpy(tof_buf + 10, filtered_dist, distSize);
           memcpy(tof_buf + 10 + distSize, measurementData.target_status, statSize);
 
-          udpSensor.sendTo(tof_buf, totalSize, activeClientIp, UDP_TARGET_PORT);
+          AsyncUDPMessage tof_msg(totalSize);
+          tof_msg.write(tof_buf, totalSize);
+          udpSensor.sendTo(tof_msg, activeClientIp, UDP_TARGET_PORT);
           stat_frames_tof++; // Counter untuk log statistik
         }
       }
@@ -1345,8 +1381,8 @@ void setup() {
     ws_mutex  = xSemaphoreCreateMutex();
     wsQueue   = xQueueCreate(20, sizeof(WsMessage_t));
 
-    // Initialize UDP Sensor Server
-    udpSensor.listen(8081);
+    // Initialize UDP Sensor Server (ditunda hingga WiFi connected)
+    // udpSensor.listen(8081);
 
     // ── [FAST BOOT] Cek credentials & mulai WiFi di background SEBELUM sensor init ──
     // WiFi connect (terutama BSSID fast-path) bisa ~1 detik;

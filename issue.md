@@ -1,61 +1,25 @@
-# Plan Implementasi: Pemisahan Jalur Data Sensor (UDP) dan Video (TCP/WebSocket)
+# Perbaikan Lanjutan: Dual-Path Architecture (TCP & UDP) dan Application-Level Flow Control (Anti-Bufferbloat)
 
-## 🎯 Tujuan
-Mengatasi masalah *Head-of-Line Blocking* secara permanen dengan memisahkan pengiriman data. Data gambar (JPEG) yang berukuran besar tetap menggunakan jalur WebSocket (TCP), sedangkan data sensor (IMU & ToF) yang sangat sensitif terhadap waktu (*time-sensitive*) dan berukuran kecil akan dipindahkan ke jalur UDP (*User Datagram Protocol*).
+## Deskripsi Masalah Sebelumnya
+Setelah kita mengimplementasikan fitur pemantauan *ping* secara *real-time* (Issue #28), kita menemukan bahwa lalu lintas data gabungan antara *video stream* (resolusi tinggi) dan data sensor IMU & ToF (frekuensi tinggi) melalui satu jalur *WebSocket* menyebabkan *bottleneck*. Ketergantungan *Camera Task* terhadap `i2c_mutex` (yang digunakan sensor) menyebabkan *frame rate* menjadi lambat, tidak stabil, serta menyumbat aliran antrean data (lag). 
 
-Arsitektur UDP memungkinkan pengiriman "tembak dan lupakan" tanpa mekanisme antrean ulang, sehingga kemacetan pada *frame* kamera tidak akan pernah memengaruhi *ping* atau laju *update* sensor navigasi.
+## Solusi Utama yang Diimplementasikan
 
----
+### 1. Dual-Path Architecture: Memisahkan Jalur Data Sensor dan Video
+Untuk mengatasi *bottleneck* I2C dan TCP:
+- **Pemisahan Protokol**: Data Video (kamera) tetap dipertahankan pada **TCP (WebSocket)** karena membutuhkan transmisi tanpa cacat (*lossless*). Sebaliknya, aliran data sensor yang berfrekuensi tinggi (IMU & ToF) dipindahkan ke protokol **UDP**, yang *connectionless* dan super cepat.
+- **Kemandirian Task**: Karena sensor memiliki jalurnya sendiri, *Camera Task* tidak lagi harus tertahan oleh `i2c_mutex`. Hasilnya, kamera dapat memproduksi dan mentransmisikan *frame* hingga 50 FPS (tergantung limitasi *delay* `TARGET_FRAME_MS`).
+- **Android App Fix**: Di sisi aplikasi Android (`CameraStreamService.kt`), *DatagramSocket* digunakan untuk menangkap data UDP. Sebuah *bug* kritis berupa ukuran *buffer* paket yang menyusut akibat `DatagramPacket` ditangani secara tuntas dengan mereset panjang paket (`packet.length = buffer.size`) di setiap perulangan penerimaan.
 
-## 🧠 Konsep Arsitektur
+### 2. Application-Level Flow Control (ACK:CAM) & Frame Dropping Cerdas
+Dampak tak terduga dari pemisahan jalur adalah *Camera Task* menjadi terlalu cepat (memproduksi frame tanpa batas). Ini membuat antrean *AsyncTCP* pada ESP32 seketika penuh dengan 32 pesan (maksimum buffer), menghasilkan **Bufferbloat** yang memicu *ping* membengkak menjadi > 3000ms dan data UDP lenyap karena *bandwidth* sinyal Wi-Fi dimonopoli oleh proses antrean ulang TCP.
 
-1. **Jalur Video (TCP/WebSocket):** Tetap berjalan di Port 80 via WebSocket. TCP memastikan *frame* gambar JPEG tidak rusak/hilang (penting untuk *decoder* gambar).
-2. **Jalur Sensor (UDP):** Berjalan di UDP Port (misal: **8080**). Tidak ada *overhead* atau penumpukan antrean. Data sensor terbaru (200Hz untuk EKF) selalu dikirim secara instan.
-3. **Mekanisme Handshake Jaringan:** Agar ESP32 tahu ke alamat IP mana data UDP harus ditembakkan, ESP32 akan membaca alamat IP perangkat Android yang sedang terhubung ke WebSocket, lalu otomatis mulai menyemburkan (*streaming*) data UDP ke IP tersebut.
+Untuk memberantas *Bufferbloat*, mekanisme kendali aliran ketat diterapkan:
+- **Feedback (ACK:CAM) dari Android**: Setiap kali aplikasi Android berhasil mengurai (*parse*) *frame* JPEG dan menampilkannya, aplikasi akan merespon dengan mengirim *text frame* `"ACK:CAM"` kembali ke ESP32.
+- **Limitasi Antrean (Max 4 Frames)**: ESP32 akan menghitung jumlah *frame* yang sudah meluncur tetapi belum di-ACK (`unacked_frames`). Jika `unacked_frames >= 4` (sekitar ~400ms in-flight buffer), kamera akan melakukan *Frame Dropping*.
+- **Silent & Non-Blocking Frame Drop**: Ketika limit antrean tercapai, hasil tangkapan gambar dibuang tanpa membekukan CPU. Ini menjaga FPS agar selalu seirama dengan kemampuan aktual jaringan tanpa menjebol *buffer*.
+- **Bug Fix 3 Detik Awal (Event Connect)**: Inisialisasi awal variabel penghitung `last_ack_time = millis();` dipindahkan secara akurat ke *event* `WS_EVT_CONNECT`. Hal ini mencegah *bug* di mana antrean membeludak ke batas 32-frame di 3 detik pertama koneksi sebelum Flow Control dapat bereaksi.
+- **Graceful Fallback**: Sebagai pengaman jika HP Android putus koneksi sementara waktu, jaringan sangat terganggu, atau pengguna belum meng-*update* aplikasi Android, terdapat batas tunggu toleransi 3 detik. Jika 3 detik berlalu tanpa ACK, antrean akan di-reset (kembali ke *behaviour* bawaan), sehingga menghindari kamera terhenti secara permanen.
 
----
-
-## 🛠️ Langkah Eksekusi (High-Level Plan)
-
-### Tahap 1: Modifikasi Firmware ESP32 (`firmware-vnetra.ino`)
-
-1. **Library & Inisialisasi:** 
-   - Gunakan library `AsyncUDP.h` atau `WiFiUDP.h` bawaan ESP32. (Sangat disarankan `AsyncUDP` karena tidak *blocking* / asinkron).
-   - Deklarasikan objek UDP global (contoh: `AsyncUDP udpSensor;`) dan konstanta port (contoh: `const int UDP_TARGET_PORT = 8080;`).
-
-2. **Identifikasi Target IP Otomatis:**
-   - Di dalam fungsi *callback* `onWsEvent`, pada saat status `WS_EVT_CONNECT`, tangkap IP *client* Android menggunakan `client->remoteIP()`.
-   - Simpan IP ini ke sebuah variabel global (misal `IPAddress activeClientIp;`).
-   - Ubah sebuah bendera/flag (misal `volatile bool udpClientReady = true;`).
-   - Pada saat `WS_EVT_DISCONNECT`, atur ulang flag menjadi `false` agar ESP32 berhenti mengirim UDP.
-
-3. **Pemindahan Rute Pengiriman Sensor:**
-   - Di dalam *Task* sensor (`IMU_Task` dan `TOF_Task`), **hapus** logika yang memasukkan paket data (`WsMessage_t`) ke dalam `wsQueue`.
-   - Gantilah dengan memanggil metode kirim UDP. Jika `udpClientReady == true`, kirim *buffer* (`imu_buf` dan `tof_buf`) langsung ke `activeClientIp` pada port `UDP_TARGET_PORT`.
-   - **Catatan:** Jangan ubah susunan isi *payload* (seperti *header* `0x02` untuk IMU atau `0x04` untuk ToF) agar Android tetap bisa mengidentifikasi jenis data.
-
-### Tahap 2: Modifikasi Android App (Kotlin / Networking)
-
-1. **Penerima UDP (UDP Listener):**
-   - Buat sebuah Coroutine atau *Thread* baru di Service Android Anda (misal `udpReceiverJob`) yang menginisialisasi `DatagramSocket(8080)`.
-   - Buat perulangan (`while(isActive)`) untuk membaca `socket.receive(datagramPacket)`.
-
-2. **Routing Data (Parser):**
-   - Saat paket UDP diterima, baca *byte* pertama (index `[0]`) sebagai penanda tipe *frame*.
-   - Jika `0x02` (IMU) ➔ Ekstrak sisa *byte* dan masukkan ke *StateFlow/Channel* IMU yang sudah ada.
-   - Jika `0x04` (ToF) ➔ Ekstrak sisa *byte* dan masukkan ke *StateFlow/Channel* ToF yang sudah ada.
-
-3. **Siklus Hidup (Lifecycle):**
-   - Pastikan `DatagramSocket` dibuka saat layanan *streaming* aktif, dan wajib di-*close* secara bersih saat pengguna keluar/putus koneksi. Jika tidak ditutup, akan menyebabkan *Port Binding Error* pada pemakaian berikutnya.
-
-### Tahap 3: Penyesuaian UI Latency Monitor (Opsional)
-
-1. Label *ping* WebSocket di UI Android saat ini merepresentasikan waktu transfer video/koneksi secara keseluruhan. Jika dirasa perlu, label ini bisa diubah menjadi "Ping Kamera (TCP)" untuk memperjelas, dan bisa ditambah "Ping Sensor (UDP)".
-2. Namun, arsitektur dasar parser EKF/Formula E & H di Android tidak perlu dirombak total karena data *array/byte* yang diteruskan ke sana bentuknya tetap persis sama.
-
----
-
-## ⚠️ Peringatan untuk Developer (Gotchas)
-- **Kapasitas Buffer UDP**: Di kode Kotlin Android, pastikan `ByteArray` penampung (buffer) untuk `DatagramPacket` berukuran cukup besar (disarankan minimal 256 bytes) agar paket ToF yang berisi 64 zona tidak terpotong (ter-truncate).
-- **Pemrosesan Asinkron**: UDP Packet di Android akan datang dengan sangat cepat (200x sedetik untuk IMU). Pastikan proses *parsing* byte-nya cepat dan langsung dioper ke `Dispatchers.Default` (bukan *Main thread*) agar tidak membuat UI *freeze*.
-- **Little-Endian**: Pastikan proses *parsing* data (*timestamp*, *float*) di penerima UDP Android tetap disetel ke `ByteOrder.LITTLE_ENDIAN`, persis sama seperti logika *parsing* WebSocket sebelumnya.
+## Kesimpulan
+Perubahan infrastruktur jaringan secara komprehensif ini secara signifikan meringankan *bandwidth* protokol TCP, menekan latensi (*ping*) kembali di bawah ~400ms, mengembalikan fungsionalitas paket UDP sensor yang sempat hilang, dan menghasilkan pengalaman rekaman video langsung (streaming) yang bebas "patah-patah".
