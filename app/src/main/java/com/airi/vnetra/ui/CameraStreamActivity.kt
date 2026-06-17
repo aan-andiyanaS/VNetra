@@ -36,6 +36,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.airi.vnetra.model.YoloDetector
+import com.airi.vnetra.model.ModelStatus
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.core.view.ViewCompat
@@ -140,6 +142,10 @@ class CameraStreamActivity : AppCompatActivity() {
 
     // Guard: cegah double-execute akhiriProses
     private var isAkhiring = false
+
+    // AI Detector
+    private var yoloDetector: YoloDetector? = null
+    private var isInferencing = false
 
     private val exitReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -246,6 +252,10 @@ class CameraStreamActivity : AppCompatActivity() {
         // Dipanggil di onCreate agar TTS punya cukup waktu init sebelum sensor aktif
         formulaH = FormulaH(this)
         formulaH.initTts()
+
+        // Init YOLO Detector
+        yoloDetector = YoloDetector(this)
+        updateAiIndicator()
     }
 
     override fun onStart() {
@@ -280,6 +290,7 @@ class CameraStreamActivity : AppCompatActivity() {
         // P3.3: Bebaskan resource TTS — mencegah leak AudioTrack di background
         if (::formulaH.isInitialized) formulaH.shutdown()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        yoloDetector?.close()
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -472,6 +483,25 @@ class CameraStreamActivity : AppCompatActivity() {
                         if (!isDestroyed && !isFinishing && !isAkhiring) {
                             binding.ivCameraFrame.setImageBitmap(bitmap)
                             updateFpsCounter(jpegBytes.size)
+
+                            // AI Inference
+                            if (!isInferencing && yoloDetector?.modelStatus != ModelStatus.NONE) {
+                                isInferencing = true
+                                val detector = yoloDetector
+                                if (detector != null) {
+                                    lifecycleScope.launch(Dispatchers.Default) {
+                                        val results = detector.detect(bitmap)
+                                        withContext(Dispatchers.Main) {
+                                            if (!isDestroyed && !isFinishing && !isAkhiring) {
+                                                binding.boundingBoxOverlay.setResults(results, bitmap.width.toFloat(), bitmap.height.toFloat())
+                                            }
+                                            isInferencing = false
+                                        }
+                                    }
+                                } else {
+                                    isInferencing = false
+                                }
+                            }
                         }
                     }
                 }
@@ -785,6 +815,23 @@ class CameraStreamActivity : AppCompatActivity() {
             binding.btnAkhiriBadge.visibility   = View.GONE
             binding.tvConnectedBadge.text       = "● Menerima data dari ESP32-S3  ‹ geser"
             binding.tvConnectedBadge.visibility = View.VISIBLE
+        }
+    }
+
+    private fun updateAiIndicator() {
+        val statusText = when (yoloDetector?.modelStatus) {
+            ModelStatus.NONE -> "Model: NONE"
+            ModelStatus.FP16 -> "Model: FP16"
+            ModelStatus.INT8 -> "Model: INT8"
+            ModelStatus.FULL -> "Model: FULL"
+            null -> "Model: NONE"
+        }
+        
+        binding.tvAiModelStatus.text = statusText
+        if (yoloDetector?.modelStatus == ModelStatus.NONE || yoloDetector == null) {
+            binding.tvAiModelStatus.setTextColor(android.graphics.Color.parseColor("#FF5252"))
+        } else {
+            binding.tvAiModelStatus.setTextColor(android.graphics.Color.parseColor("#4CAF50"))
         }
     }
 

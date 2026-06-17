@@ -36,6 +36,16 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintEnd_toEndOf="parent" />
 
+        <!-- Overlay Bounding Box YOLO -->
+        <com.airi.vnetra.ui.BoundingBoxOverlay
+            android:id="@+id/boundingBoxOverlay"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            app:layout_constraintTop_toTopOf="@id/ivCameraFrame"
+            app:layout_constraintBottom_toBottomOf="@id/ivCameraFrame"
+            app:layout_constraintStart_toStartOf="@id/ivCameraFrame"
+            app:layout_constraintEnd_toEndOf="@id/ivCameraFrame" />
+
         <!-- ToF 8x8 Grid Overlay (1:1 ratio, FOV scaled to 69%, shifted up by 1 row programmatically) -->
         <GridLayout
             android:id="@+id/gridTof"
@@ -123,6 +133,24 @@
                 android:textStyle="bold" />
 
         </LinearLayout>
+
+        <!-- Teks Indikator Model AI -->
+        <TextView
+            android:id="@+id/tvAiModelStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Model: NONE"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:textStyle="bold"
+            android:background="#80000000"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:layout_margin="8dp"
+            app:layout_constraintTop_toBottomOf="@id/clockDirectionIndicator"
+            app:layout_constraintStart_toStartOf="parent" />
 
     </androidx.constraintlayout.widget.ConstraintLayout>
 

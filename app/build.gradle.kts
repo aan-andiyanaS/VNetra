@@ -36,6 +36,9 @@ android {
     buildFeatures {
         viewBinding = true
     }
+    androidResources {
+        noCompress.add("tflite")
+    }
 }
 
 dependencies {
@@ -54,6 +57,11 @@ dependencies {
 
     // OkHttp — WebSocket client untuk live camera stream dari ESP32
     implementation(libs.squareup.okhttp)
+
+    // TensorFlow Lite
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-api:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
 
     // Test
     testImplementation(libs.junit)
