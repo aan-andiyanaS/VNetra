@@ -100,7 +100,7 @@ results = model.train(
 **✅ STATUS: SELESAI & SIAP EKSEKUSI**
 
 File notebook telah dirancang secara *end-to-end* (Auto-Pilot) dan mencakup seluruh fitur tingkat lanjut:
-1. **Integrasi 24 Kelas:** Merakit **9 dataset custom dari Roboflow** (klasifikasi tangga naik/turun) yang diselaraskan secara otomatis.
+1. **Integrasi 25 Kelas:** Merakit **10 dataset custom dari Roboflow** (klasifikasi undakan trotoar / *curb*, dan tangga naik/turun) yang diselaraskan secara otomatis.
 2. **Anti-Catastrophic Forgetting:** Menerapkan pustaka `fiftyone` untuk menarik proporsi **3.000 subset gambar COCO-2017** agar model tetap tajam dalam mengenali pejalan kaki dan kendaraan, menghindari fenomena kelupaan dataset (*Catastrophic Forgetting*).
 3. **Augmentasi Khusus Lensa Wearable (OV2640):** Menyematkan hiperparameter tingkat lanjut (`blur=0.1`, `degrees=15.0`, `mosaic=1.0`, manipulasi variasi cahaya `hsv`) pada blok `model.train()` untuk mengimbangi *motion blur*, guncangan langkah kaki, dan fluktuasi kecerahan luar ruangan.
 4. **Presisi Resolusi & Kuantisasi:** *Training* berjalan persis pada resolusi native kamera (`imgsz=640`), dan berhasil diekspor menjadi dua bobot turunan TFLite:
