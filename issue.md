@@ -7,8 +7,9 @@ Bagian ini merangkum rencana langkah demi langkah untuk mempersiapkan environmen
 1. **Buat Environment Python:** Sangat disarankan menggunakan Python 3.9 atau 3.10.
 2. **Instalasi Library Inti:**
    - ultralytics (untuk YOLO11)
-   - oboflow (untuk integrasi dataset otomatis)
-   - pycocotools, opencv-python, 	orch, 	orchvision.
+   - 
+roboflow (untuk integrasi dataset otomatis)
+   - pycocotools, opencv-python, torch, torchvision.
 3. **Struktur Direktori Proyek:**
    `	ext
    vnetra-yolo-training/
@@ -25,7 +26,7 @@ Model ini akan mengenali kombinasi dari dataset COCO dan class kustom yang diran
 - **COCO Subset (14 Class):** person, icycle, car, motorcycle, us, 	ruck, 	rain, ire hydrant, stop sign, parking meter, ench, chair, potted plant, dog, cat.
 - **Custom Classes (10 Class):** pothole, open_drain, puddle, speed_bump, pole, hanging_branch, low_banner, 	actile_paving, stairs_up, stairs_down.
 
-Total: **24 class**. Pastikan urutan class_id dicatat secara ketat di dalam file data.yaml.
+Total: **23 class**. Pastikan urutan class_id dicatat secara ketat di dalam file data.yaml.
 
 ### Tahap 3: Pengumpulan & Penggabungan Dataset
 Karena kita menggunakan dua sumber data (COCO & Kustom), notebook harus mencakup tahapan *Dataset Merging*:
@@ -60,8 +61,8 @@ train: train/images
 val: val/images
 test: test/images
 
-nc: 24
-names: ['person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'train', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'chair', 'potted plant', 'pothole', 'open_drain', 'puddle', 'speed_bump', 'pole', 'hanging_branch', 'low_banner', 'tactile_paving', 'stairs_up', 'stairs_down']
+nc: 23
+names: ['person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'train', 'stop sign', 'bench', 'chair', 'potted plant', 'dog', 'cat', 'pothole', 'open_drain', 'puddle', 'speed_bump', 'pole', 'hanging_branch', 'tactile_paving', 'stairs_up', 'stairs_down', 'curb']
 `
 
 ### Tahap 5: Proses Pelatihan Baseline (Training)
@@ -106,3 +107,4 @@ File notebook telah dirancang secara *end-to-end* (Auto-Pilot) dan mencakup selu
 4. **Presisi Resolusi & Kuantisasi:** *Training* berjalan persis pada resolusi native kamera (`imgsz=640`), dan berhasil diekspor menjadi dua bobot turunan TFLite:
    - **FP16:** Sangat presisi, dioptimalkan untuk performa Android GPU Delegate.
    - **INT8:** Sangat ringan, terkalibrasi khusus untuk akselerator Android NNAPI / NPU.
+5. **Visualisasi Laporan Skripsi:** Menyediakan blok kode Matplotlib otomatis di akhir sel untuk memplot grafik *Loss*, Metrik Akurasi (*mAP*), dan *Normalized Confusion Matrix* sesaat setelah proses *training* selesai.
