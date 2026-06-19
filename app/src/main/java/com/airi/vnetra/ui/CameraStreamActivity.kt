@@ -490,12 +490,30 @@ class CameraStreamActivity : AppCompatActivity() {
                                 val detector = yoloDetector
                                 if (detector != null) {
                                     lifecycleScope.launch(Dispatchers.Default) {
-                                        val results = detector.detect(bitmap)
-                                        withContext(Dispatchers.Main) {
-                                            if (!isDestroyed && !isFinishing && !isAkhiring) {
-                                                binding.boundingBoxOverlay.setResults(results, bitmap.width.toFloat(), bitmap.height.toFloat())
+                                        try {
+                                            // 1. Lakukan proses deteksi di background
+                                            val results = detector.detect(bitmap)
+                                            
+                                            // 2. Jika berhasil, update UI di Main Thread
+                                            withContext(Dispatchers.Main) {
+                                                if (!isDestroyed && !isFinishing && !isAkhiring) {
+                                                    binding.boundingBoxOverlay.setResults(results, bitmap.width.toFloat(), bitmap.height.toFloat())
+                                                }
                                             }
-                                            isInferencing = false
+                                        } catch (e: Exception) {
+                                            // Tangkap error jika terjadi agar tidak membatalkan seluruh coroutine parent
+                                            // jika bukan CancellationException
+                                            if (e !is kotlinx.coroutines.CancellationException) {
+                                                android.util.Log.e("CameraStreamActivity", "Error during AI inference", e)
+                                            } else {
+                                                throw e
+                                            }
+                                        } finally {
+                                            // 3. Pastikan flag selalu direset apapun yang terjadi
+                                            // Gunakan NonCancellable agar flag tetap di-reset meskipun parent job di-cancel
+                                            withContext(Dispatchers.Main + kotlinx.coroutines.NonCancellable) {
+                                                isInferencing = false
+                                            }
                                         }
                                     }
                                 } else {

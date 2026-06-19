@@ -1,29 +1,89 @@
-### Arsitektur Integrasi Model TFLite di Android (Dynamic & Fallback Mode)
-Bagian ini merancang bagaimana aplikasi seluler Android VNetra menangani file TFLite (FP16/INT8) secara cerdas dan kokoh (robust).
+# Plan Perbaikan Bug: Potensi Deadlock Inference AI
 
-1. **Model Placeholder & Fallback System (Bypass Inference)**
-   - Jika file `best_fp16.tflite` maupun `best_int8.tflite` tidak ditemukan di dalam folder `app/src/main/assets/`, aplikasi Android **tidak boleh *crash***.
-   - Aplikasi akan otomatis beralih ke mode **INFERENCE_BYPASS_MODE**. Dalam mode ini, siaran video dari ESP32 Cam di halaman utama (*Camera Page*) tetap berjalan mulus, namun *frame* tersebut sekadar ditampilkan ke layar tanpa dilewatkan ke proses deteksi AI YOLO.
+**Berdasarkan Laporan**: report.md (Poin 2)
+**Tingkat Keparahan**: Tinggi
+**Lokasi File**: `app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt`
 
+## 1. Latar Belakang Masalah
+Pada fungsi `startCollectingFrames()`, aplikasi menggunakan *flag* `isInferencing` untuk mencegah eksekusi prediksi AI yang menumpuk. *Flag* ini di-set `true` sebelum proses deteksi dimulai, dan di-set `false` setelah proses deteksi dan update UI selesai. 
 
-2. **Prioritas & Pemilihan Model Fleksibel**
-   - Saat aplikasi pertama kali terbuka (*startup*), kelas *Object Detector* akan memindai folder `assets/`.
-   - **Skenario A:** Jika HANYA `best_fp16.tflite` yang ada, model ini akan dimuat menggunakan *GPU Delegate*.
-   - **Skenario B:** Jika HANYA `best_int8.tflite` yang ada, model ini akan dimuat menggunakan *NNAPI / XNNPACK Delegate*.
-   - **Skenario C:** Jika KEDUA model disisipkan, aplikasi akan memilih **FP16** sebagai prioritas utama (karena kestabilan GPU mayoritas HP Android lebih bisa diandalkan daripada NNAPI).
-3. **Indikator Visual Deteksi AI di Halaman Kamera (Camera Page)**
-   - Tepat di atas siaran langsung kamera ESP32 pada UI *Camera Page*, akan ada sebuah teks sederhana yang menginformasikan status model:
-     - **"NONE"** -> Jika folder assets kosong (tidak ada model yang dipasang, kamera hanya me-*render* video murni dari ESP32 tanpa kotak deteksi).
-     - **"FP16"** -> Jika HANYA model `best_fp16.tflite` yang terpasang di aplikasi.
-     - **"INT8"** -> Jika HANYA model `best_int8.tflite` yang terpasang di aplikasi.
-     - **"FULL"** -> Jika KEDUA model (FP16 dan INT8) terpasang di dalam aplikasi (walaupun yang dieksekusi secara aktif adalah FP16).
-4. **Alur Kode (Kotlin)**
-   - Inisialisasi TensorFlow Lite `Interpreter` wajib dibungkus dalam blok `try-catch`.
-   - Jika `Exception` terjadi (model rusak atau hilang), lemparkan sebuah pesan `Callback` ke antarmuka pengguna agar memicu pergantian warna teks indikator di *Camera Page* ke warna merah.
-5. **Pemilihan Hardware Accelerator (NPU / GPU / CPU) & Model (FP16/INT8) Dinamis/Manual**
-   - Mendukung pemilihan *DelegateMode* (AUTO, NPU, GPU, CPU) dan *ModelPreference* (AUTO, FP16, INT8) yang bisa ditentukan secara fleksibel melalui konstruktor `YoloDetector`.
-   - **Pemilihan Model Manual:** Jika *ModelPreference* disetel ke `FP16` atau `INT8`, sistem akan memaksa menggunakan model tersebut (selama file modelnya ada). Fitur ini sangat berguna jika pengguna ingin memaksa menjalankan FP16 di atas CPU.
-   - Jika *DelegateMode.AUTO* (atau secara manual memilih NPU):
-     - **NPU (NNAPI):** Akan digunakan HANYA jika *Smartphone* memenuhi batas minimal *Android 8.1 (API 27)*. Jika API di bawah 27, aplikasi tidak akan memaksa NPU melainkan *fallback* ke opsi yang disupport (GPU / CPU).
-   - **GPU Blokir Mode:** Jika model yang dipilih secara sistem atau paksa oleh user adalah `INT8`, maka sistem **melarang** menggunakan GPU karena kurang efisien. Akan dilakukan *fallback* ke NPU atau CPU.
-   - **CPU:** Akan digunakan sebagai pertahanan terakhir (*last resort fallback*) dengan dukungan *multi-threading* jika fitur lain tidak disupport perangkat secara fisik/sistem.
+Masalah terjadi karena pemanggilan `detector.detect(bitmap)` maupun pembaruan UI di dalamnya tidak dibungkus dengan perlindungan `try...finally`. Apabila terjadi *Exception* (seperti *memory leak* sementara atau kerusakan pada *bitmap*), proses *coroutine* tersebut akan terhenti seketika dan melompat keluar tanpa pernah mengeksekusi baris `isInferencing = false`. Akibatnya, status inference akan tertahan di nilai `true` untuk selamanya (Deadlock), menyebabkan fitur deteksi AI mati total meskipun *streaming* kamera tetap berjalan.
+
+## 2. Tujuan Perbaikan
+Memastikan bahwa status *flag* `isInferencing` selalu dikembalikan menjadi `false` tidak peduli apakah proses deteksi YOLO berhasil diselesaikan dengan baik ataupun mengalami error/gagal di tengah jalan. Hal ini mencegah matinya fungsi asisten AI secara permanen dan memastikan keamanan pengguna saat terjadi gangguan memori sementara.
+
+## 3. Langkah Implementasi secara Detail
+
+### 3.1. Lokasi Kode yang Akan Diubah
+Buka file: `app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt`
+Cari blok kode yang bertanggung jawab atas **AI Inference** di dalam fungsi `startCollectingFrames()` (berada di sekitar baris 487-504).
+
+### 3.2. Referensi Kode Saat Ini (Sebelum Diperbaiki)
+```kotlin
+// AI Inference
+if (!isInferencing && yoloDetector?.modelStatus != ModelStatus.NONE) {
+    isInferencing = true
+    val detector = yoloDetector
+    if (detector != null) {
+        lifecycleScope.launch(Dispatchers.Default) {
+            val results = detector.detect(bitmap)
+            withContext(Dispatchers.Main) {
+                if (!isDestroyed && !isFinishing && !isAkhiring) {
+                    binding.boundingBoxOverlay.setResults(results, bitmap.width.toFloat(), bitmap.height.toFloat())
+                }
+                isInferencing = false // <--- TITIK RAWAN DEADLOCK JIKA ADA EXCEPTION SEBELUM BARIS INI
+            }
+        }
+    } else {
+        isInferencing = false
+    }
+}
+```
+
+### 3.3. Kode Solusi (Setelah Diperbaiki)
+Ubah blok kode di atas dengan menambahkan struktur `try...catch...finally`. Pastikan pengaturan `isInferencing = false` diletakkan **di dalam blok `finally`**. 
+
+Berikut adalah bentuk kode implementasi yang disarankan dan aman terhadap coroutine:
+
+```kotlin
+// AI Inference
+if (!isInferencing && yoloDetector?.modelStatus != ModelStatus.NONE) {
+    isInferencing = true
+    val detector = yoloDetector
+    if (detector != null) {
+        lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                // 1. Lakukan proses deteksi di background
+                val results = detector.detect(bitmap)
+                
+                // 2. Jika berhasil, update UI di Main Thread
+                withContext(Dispatchers.Main) {
+                    if (!isDestroyed && !isFinishing && !isAkhiring) {
+                        binding.boundingBoxOverlay.setResults(results, bitmap.width.toFloat(), bitmap.height.toFloat())
+                    }
+                }
+            } catch (e: Exception) {
+                // Tangkap error jika terjadi agar tidak membatalkan seluruh coroutine parent
+                // jika bukan CancellationException
+                if (e !is kotlinx.coroutines.CancellationException) {
+                    android.util.Log.e("CameraStreamActivity", "Error during AI inference", e)
+                } else {
+                    throw e
+                }
+            } finally {
+                // 3. Pastikan flag selalu direset apapun yang terjadi
+                // Gunakan NonCancellable agar flag tetap di-reset meskipun parent job di-cancel
+                withContext(Dispatchers.Main + kotlinx.coroutines.NonCancellable) {
+                    isInferencing = false
+                }
+            }
+        }
+    } else {
+        isInferencing = false
+    }
+}
+```
+
+## 4. Catatan Penting
+- **Penggunaan `NonCancellable`:** Karena proses *reset* nilai `isInferencing = false` ditempatkan di dalam blok `finally` yang memanggil *suspend function* (`withContext`), kita diwajibkan menyisipkan `NonCancellable` pada context-nya. Hal ini mencegah *Exception* ketika mencoba me-reset state pada coroutine yang sedang di-*cancel* (misalnya ketika Activity di-destroy).
+- Plan ini dirancang secara detail agar eksekusi perbaikan *(copy-paste)* kode tidak menyebabkan kemunculan *bug* baru akibat *coroutine lifecycle*.
