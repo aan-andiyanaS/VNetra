@@ -26,7 +26,7 @@ Laporan ini merangkum hasil pemeriksaan komprehensif terhadap seluruh struktur p
 * **Dampak jika tidak diperbaiki**: Jika terjadi satu saja error sekejap saat prediksi, `isInferencing` akan selamanya bernilai `true`. Akibatnya, **kamera akan tetap berjalan lancar menampilkan jalanan, tetapi kotak hijau (Bounding Box) pendeteksian dan suara AI akan mati/berhenti total** sampai tunanetra me-_restart_ aplikasi secara manual. Ini sangat berbahaya jika terjadi di tengah jalan raya.
 
 ## 3. [Sedang] Bahaya Alokasi Ulang Memori PSRAM (Heap Fragmentation)
-* **Status**: 🔴 Perlu diperbaiki/diwaspadai.
+* **Status**: 🟢 **Sudah diperbaiki** (Pre-alokasi statis permanen diterapkan).
 * **Lokasi**: `firmware-vnetra.ino` (Fungsi `captureAndSend()`)
 * **Penjelasan**: ESP32 memiliki memori (RAM) yang sangat terbatas. Di baris 519, terdapat logika dinamis di mana jika ukuran file gambar (JPEG) mendadak lebih besar dari memori buffer sementara (`g_wsBuf`), sistem akan menghapus memori lama (`heap_caps_free`) dan meminta blok memori baru yang lebih besar (`heap_caps_malloc`).
 * **Dampak jika tidak diperbaiki**: Mekanisme meminta-hapus-minta-hapus memori secara terus menerus (puluhan kali per detik) akan menyebabkan **Heap Fragmentation** (memori berlubang-lubang seperti keju Swiss). Jika perangkat VNetra digunakan selama lebih dari 1 jam tanpa henti, memori tidak akan bisa menemukan blok kosong yang berurutan. ESP32 akan kehabisan memori (_Out of Memory_), gagal mengirim gambar, dan akhirnya akan mengalami **Kernel Panic / Restart otomatis**. Disarankan untuk langsung mengalokasikan ukuran absolut (misal 150KB) sejak ESP32 menyala, tanpa pernah membebaskannya.
@@ -47,3 +47,4 @@ Laporan ini merangkum hasil pemeriksaan komprehensif terhadap seluruh struktur p
 **Kesimpulan**: 
 * Masalah poin ke-1 (Shape Mismatch) yang dapat membuat aplikasi _Force Close_ seketika **sudah diselesaikan**.
 * Masalah poin ke-2 (AI Macet / Deadlock Inference) **sudah diperbaiki** menggunakan pengaman `try...catch...finally` dan `NonCancellable` coroutine context untuk memastikan stabilitas sistem asisten tunanetra.
+* Masalah poin ke-3 (Fragmentasi Heap PSRAM) **sudah diperbaiki** dengan menerapkan pre-alokasi buffer statis absolut untuk performa optimal dan stabilitas jangka panjang.

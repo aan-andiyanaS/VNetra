@@ -516,18 +516,32 @@ void captureAndSend() {
     const size_t   total = FRAME_HEADER_SZ + jpg_len;
     const uint64_t ts_us = esp_timer_get_time();
 
-    if (!g_wsBuf || total > g_wsBufSize) {
-        if (g_wsBuf) heap_caps_free(g_wsBuf);
+    // Pre-alokasi permanen satu kali eksekusi
+    if (!g_wsBuf) {
+        // Alokasikan memori konstan secara absolut
+        g_wsBufSize = WS_BUF_MAX; 
         g_wsBuf = (uint8_t*)heap_caps_malloc(
-            total + 8192, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
+            g_wsBufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
         );
-        if (!g_wsBuf) g_wsBuf = (uint8_t*)malloc(total + 4096);
-        g_wsBufSize = g_wsBuf ? total + 8192 : 0;
+        // Fallback jika PSRAM gagal, gunakan SRAM internal walau kecil kemungkinannya
+        if (!g_wsBuf) g_wsBuf = (uint8_t*)malloc(g_wsBufSize);
+        
         if (!g_wsBuf) {
+            Serial.println("[MEM] GAGAL mengalokasikan buffer statis!");
+            g_wsBufSize = 0;
             if (fb)             esp_camera_fb_return(fb);
             else if (converted) free(jpg_buf);
             return;
         }
+        Serial.printf("[MEM] Buffer WebSocket Statis Dialokasikan: %u Bytes\n", g_wsBufSize);
+    }
+
+    // Jika secara langka ada frame anomali yang lebih besar dari wadah (misal >130KB), buang frame tersebut (Drop)
+    if (total > g_wsBufSize) {
+        Serial.printf("[CAM] Frame terlalu besar (%u bytes) melebihi buffer statis (%u bytes). Frame didrop.\n", total, g_wsBufSize);
+        if (fb)             esp_camera_fb_return(fb);
+        else if (converted) free(jpg_buf);
+        return;
     }
 
     g_wsBuf[0] = FRAME_TYPE_JPEG;
