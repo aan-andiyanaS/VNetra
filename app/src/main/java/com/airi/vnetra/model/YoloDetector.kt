@@ -43,16 +43,17 @@ class YoloDetector(
         private const val MODEL_FP16 = "best_fp16.tflite"
         private const val MODEL_INT8 = "best_int8.tflite"
         private const val INPUT_SIZE = 640
-        private const val NUM_CLASSES = 23
+        private const val NUM_CLASSES = 30
         private const val OUTPUT_BOXES = 8400
         private const val CONFIDENCE_THRESHOLD = 0.35f
         private const val IOU_THRESHOLD = 0.45f
 
         val CLASSES = arrayOf(
             "person", "bicycle", "car", "motorcycle", "bus", "truck", "train", "stop sign", 
-            "bench", "chair", "potted plant", "dog", "cat", "pothole", "open_drain", 
-            "puddle", "speed_bump", "pole", "hanging_branch", "tactile_paving", 
-            "stairs_up", "stairs_down", "curb"
+            "bench", "chair", "potted plant", "dog", "cat", "pothole", "open_drain", "puddle", 
+            "speed_bump", "pole", "hanging_branch", "tactile_paving_straight", "tactile_paving_turn", 
+            "tactile_paving_3way", "tactile_paving_4way", "tactile_paving_stop", "stairs_up", 
+            "stairs_down", "curb", "crosswalk", "tree", "fence"
         )
     }
 
@@ -62,7 +63,7 @@ class YoloDetector(
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     
-    // Output tensor shape: [1, 27, 8400] (23 classes + 4 bbox coords)
+    // Output tensor shape: [1, 34, 8400] (30 classes + 4 bbox coords)
     // For INT8, it might be quantized, but usually TFLite converts it back to float if we don't use quantized inputs
     // Wait, we need to check if the export is fully integer or float input/output. YOLO export usually keeps float I/O even for int8.
     private val outputBuffer = Array(1) { Array(4 + NUM_CLASSES) { FloatArray(OUTPUT_BOXES) } }
