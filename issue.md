@@ -1,19 +1,18 @@
-# Pemisahan Pipeline Training & Kuantisasi TPU, Optimasi Dataset, dan Sinkronisasi Aplikasi Android
+# Perbaikan Bug Fatal & Optimasi Stabilitas Notebook (YOLO11n)
 
-Dokumen ini merangkum seluruh modifikasi arsitektur dan pembersihan kode yang terjadi pada proyek **VNetra** sejak titik *commit* `a5766d88f79148161f27e25190d2e5b84ab64737`.
+Dokumen ini merangkum seluruh perbaikan bug kritis yang dilakukan pada proyek **VNetra** yang diselesaikan pada titik *commit* `0439ccc8c11677d22ab2bc472b4dca7a2174ffdf`. Fokus pembaruan kali ini adalah memastikan *pipeline* berjalan 100% mulus dari awal hingga akhir (*Save & Run All*) di platform Kaggle maupun Colab tanpa interupsi manual.
 
-## 1. Pemecahan Arsitektur Hybrid (Kaggle & Colab TPU)
-*   **Kaggle (Mesin Latih GPU):** Notebook `train_vnetra_yolo11n_kaggle.ipynb` kini sepenuhnya didedikasikan untuk *training* menggunakan 2x T4 GPU. Seluruh beban kerja INT8 dan sel komparasi `model.val()` telah dihapus total.
-*   **Colab (Mesin Kuantisasi Khusus):** Telah ditambahkan notebook baru `quantize_vnetra_int8_colab.ipynb` yang bertugas me-*load* bobot dari Google Drive, mengekspor `.pt` menjadi `FP16` dan `INT8` (memanfaatkan mesin TPU host-CPU raksasa), dan menghasilkan otomatis 3 Grafik Batang Profesional (Akurasi, ms, MB) yang siap digunakan untuk Laporan Skripsi.
-*   **Colab Training:** Ditambahkan versi turunan `train_vnetra_yolo11n_colab.ipynb` dengan konfigurasi parameter memori yang disesuaikan untuk Colab standar.
+## 1. Perbaikan Kritis Lingkungan (Environment C-Extension Crash)
+*   **Akar Masalah:** Terjadi *error* mematikan `ImportError: The _imaging extension was built for another version of Pillow` pada sel pertama. Ini disebabkan Kaggle/Colab telah menanamkan ekstensi modul C `_imaging` ke dalam memori secara permanen, yang berbenturan dengan instalasi versi `Pillow` yang baru.
+*   **Solusi:** Menulis ulang logika instalasi dependensi (pip install) dengan **sistem penguncian dinamis**. Notebook kini akan secara otomatis mendeteksi versi Pillow bawaan sistem (contoh: 11.3.0), dan memaksa *pip* untuk menahan agar versi tersebut tidak diganti (`Pillow=={pil_ver}`). Hal ini 100% meniadakan *crash* karena modul Python dan modul C tetap selaras.
 
-## 2. Optimasi Mesin Pelatih (Kaggle Notebook)
-*   **Penghapusan Kelas Speed Bump:** Kelas `speed_bump` secara resmi dicabut karena dinilai kurang relevan dengan rintangan navigasi tunanetra. Semua sel yang terkait (API *download*, kode *merge dataset*) telah dilenyapkan.
-*   **Penyeimbang Kelas (*Dataset Limiting*):** Menyuntikkan parameter pencekik `max_samples=2500` ke dalam modul logika fungsi `merge_dataset` untuk mencegah data "Pohon" (Tree) mendominasi distribusi kelas.
-*   **Batas Waktu Kaggle (*Graceful Stop*):** Parameter rahasia `time=11.0` telah dilekatkan ke pemanggilan `model.train()`. Hal ini menjamin bahwa pelatih akan dipaksa berhenti (*safe commit*) 1 jam lebih awal sebelum batas 12-Jam mesin gratisan Kaggle me-reset semua progres *training* semalaman Anda.
-*   **Paket ZIP Skripsi:** Menambahkan sebuah sel baru paling bawah khusus untuk Kaggle. Ia akan membungkus seluruh luaran file latihan (Grafik Tensorboard, Confusion Matrix, kurva, dan `best.pt`) ke dalam `vnetra_training_results.zip` tanpa menyertakan dataset bergigabyte, mengizinkan Anda *download* dalam hitungan detik.
+## 2. Resolusi Jaringan Pengunduhan Dataset (COCO WebSessionError)
+*   **Akar Masalah:** Saat mengunduh 3000 gambar subset COCO, server `images.cocodataset.org` menolak koneksi secara massal (*ConnectionResetError* atau *WebSessionError*) akibat terlalu banyak antrean unduhan serentak dari alamat IP yang sama.
+*   **Solusi:**
+    1.  Menurunkan beban paralel ke *server* COCO dengan mengaktifkan parameter pencekik `num_workers=2`.
+    2.  Menanamkan sistem **Auto-Resume & Retry** (Maksimal 5x coba). Jika terjadi pemutusan koneksi di tengah jalan (misal: gagal pada gambar ke 1150), notebook akan menunggu 5 detik, lalu secara otomatis melanjutkan sisa unduhan tanpa memulai dari nol dan tanpa menghentikan *Run All*.
 
-## 3. Sinkronisasi Aplikasi Android
-*   **File Modifikasi:** `app/src/main/java/com/airi/vnetra/model/YoloDetector.kt`
-*   Menurunkan jumlah konstanta patokan `NUM_CLASSES` dari 30 menjadi 29.
-*   Menghapus elemen `"speed_bump"` dari dalam daftar panjang *array* string kelas deteksi untuk mensinkronkan model TFLite terbaru yang dihasilkan dengan sistem deteksi internal aplikasi.
+## 3. Penyapuan Kesalahan Logika Penulisan (Sequential Thinking)
+Berdasarkan hasil pemindaian *Sequential Thinking* terhadap seluruh isi notebook, dua *bug* logika murni telah ditemukan dan diperbaiki:
+*   **Penghapusan IndentationError:** Sebuah variabel kosong `copied_count = 0` yang menjorok (indentasi) secara ilegal di luar blok perulangan pada logika *dataset merging* telah diperbaiki posisinya untuk menghindari kegagalan eksekusi (*syntax error*).
+*   **Penghapusan NameError:** Pada sel laporan akhir distribusi Dataset (sesaat sebelum *training* dimulai), rumus pembagian persentase menggunakan nama variabel yang salah cetak (`total_lembar`). Variabel tersebut telah disinkronkan kembali menjadi `total_images`, sehingga laporan distribusi akan tercetak dengan sempurna tanpa memicu *crash* di menit-menit kritis.
