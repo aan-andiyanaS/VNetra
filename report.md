@@ -11,7 +11,7 @@ Laporan ini merangkum hasil pemeriksaan komprehensif terhadap seluruh struktur p
 * **Dampak jika tidak diperbaiki**: Saat Android memuat file `.tflite` Anda dan mencoba menjalankan prediksi (_inference_) pada frame gambar pertama, TensorFlow Lite akan langsung memberikan _Exception_ `IllegalArgumentException: Cannot copy between a TensorFlowLite tensor with shape [1, 34, 8400] and a Java Buffer with shape [1, 33, 8400]`. **Aplikasi akan langsung _Force Close_ (Keluar sendiri) setiap kali ESP32 terkoneksi.**
 
 ## 2. [Tinggi] Potensi *Deadlock Inference* AI (AI Berhenti Mendadak)
-* **Status**: 🔴 Perlu diperbaiki.
+* **Status**: 🟢 **Sudah diperbaiki** di `CameraStreamActivity.kt`.
 * **Lokasi**: `app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt` (Baris ~488)
 * **Penjelasan**: Anda menggunakan variabel _flag_ `isInferencing` untuk mencegah penumpukan frame agar HP tidak _lag_. Logikanya adalah:
   ```kotlin
@@ -45,5 +45,5 @@ Laporan ini merangkum hasil pemeriksaan komprehensif terhadap seluruh struktur p
 
 ---
 **Kesimpulan**: 
-* Masalah poin ke-1 (Shape Mismatch) yang dapat membuat aplikasi _Force Close_ seketika **sudah saya selesaikan**.
-* Masalah poin ke-2 (AI Macet) adalah prioritas utama untuk diselesaikan saat ini karena membahayakan keselamatan pengguna di jalan jika sistem pendeteksian mati tiba-tiba tanpa pemberitahuan.
+* Masalah poin ke-1 (Shape Mismatch) yang dapat membuat aplikasi _Force Close_ seketika **sudah diselesaikan**.
+* Masalah poin ke-2 (AI Macet / Deadlock Inference) **sudah diperbaiki** menggunakan pengaman `try...catch...finally` dan `NonCancellable` coroutine context untuk memastikan stabilitas sistem asisten tunanetra.
