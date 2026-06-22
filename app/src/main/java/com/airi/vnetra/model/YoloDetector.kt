@@ -43,17 +43,17 @@ class YoloDetector(
         private const val MODEL_FP16 = "best_fp16.tflite"
         private const val MODEL_INT8 = "best_int8.tflite"
         private const val INPUT_SIZE = 640
-        private const val NUM_CLASSES = 29
+        private const val NUM_CLASSES = 23
         private const val OUTPUT_BOXES = 8400
         private const val CONFIDENCE_THRESHOLD = 0.35f
         private const val IOU_THRESHOLD = 0.45f
 
         val CLASSES = arrayOf(
-            "person", "bicycle", "car", "motorcycle", "bus", "truck", "train", "stop sign", 
-            "bench", "chair", "potted plant", "dog", "cat", "pothole", "open_drain", "puddle", 
-            "pole", "hanging_branch", "tactile_paving_straight", "tactile_paving_turn", 
-            "tactile_paving_3way", "tactile_paving_4way", "tactile_paving_stop", "stairs_up", 
-            "stairs_down", "curb", "crosswalk", "tree", "fence"
+            "person", "bicycle", "car", "motorcycle", "bus", "truck", "train", 
+            "bench", "pothole", "open_drain", "puddle", "pole", 
+            "hanging_branch", "tactile_paving_straight", "tactile_paving_turn", 
+            "tactile_paving_3way", "tactile_paving_4way", "tactile_paving_stop", 
+            "stairs_up", "stairs_down", "crosswalk", "tree", "fence"
         )
     }
 
