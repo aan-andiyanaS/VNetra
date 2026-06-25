@@ -1,45 +1,27 @@
-# Laporan Perbaikan Bug: GPU Native Crash & Transposed TFLite Output Shape
+# Issue / Changelog: Penyesuaian Dataset & Ekstrem Data Augmentation
 
-## 1. Deskripsi Masalah
+## Ringkasan Perubahan
+Modifikasi ini bertujuan untuk memfokuskan model pada objek yang paling esensial dengan **menghapus 3 kelas yang dirasa kurang diperlukan**, serta menambahkan **simulasi cuaca dan pencahayaan ekstrem** agar model YOLO lebih tangguh *(robust)* terhadap kualitas kamera ESP32 yang buruk (terutama di malam hari dan kondisi sangat silau).
 
-Terdapat dua masalah utama yang menyebabkan aplikasi mengalami *force close* atau gagal menampilkan *bounding box* setelah memasukkan model TFLite baru (YOLOv8/11):
+## Rincian Perubahan (Sejak Commit Terakhir)
 
-1. **`NoClassDefFoundError` pada `GpuDelegate` (Force Close):**
-   Aplikasi mengalami *crash* dan langsung tertutup dengan pesan error `java.lang.NoClassDefFoundError: Failed resolution of: Lorg/tensorflow/lite/gpu/GpuDelegateFactory$Options`. Hal ini disebabkan oleh absennya library `tensorflow-lite-gpu-api` pada file `build.gradle.kts`. Pada versi 2.9.0 ke atas, Google memisahkan implementasi GPU menjadi dua *dependency* terpisah.
+### 1. Sinkronisasi Model & Pengurangan Class (`YoloDetector.kt`)
+- **Penyesuaian `NUM_CLASSES`**: Diturunkan dari **21** menjadi **18** untuk menyesuaikan arsitektur model YOLO terbaru.
+- **Pembersihan `CLASSES`**: Menghapus kelas `"open_drain"`, `"puddle"`, dan `"fence"` dari dalam struktur *array* deteksi karena difilter keluar dari *notebook training*.
 
-2. **Output Shape Model Transposed (Silent Failure):**
-   Model TFLite yang diekspor menggunakan Ultralytics versi terbaru (YOLOv8/11) memiliki bentuk tensor output `[1, 8400, 25]` (*transposed*), sedangkan kode bawaan `YoloDetector.kt` secara statis mengharapkan format `[1, 25, 8400]`. Hal ini membuat TFLite melemparkan `IllegalArgumentException` yang tertangkap oleh `catch`, sehingga aplikasi tidak *crash* tetapi tidak menampilkan hasil deteksi sama sekali.
+### 2. Penyesuaian Notebook Training (`train_vnetra_yolo11n_colab.ipynb` & `Kaggle`)
+- **Penyaringan Dataset (*Dataset Filtering*)**: 
+  - Mengubah susunan `master_classes` dengan menghapus string `"open_drain"`, `"puddle"`, dan `"fence"`.
+  - Me-nonaktifkan (*commenting-out*) *cell block* yang bertugas memproses dan melakukan *merging* untuk dataset drain, puddle, dan fence agar tidak terjadi error atau *mismatch* ukuran tensor pada *data.yaml*.
+- **Peningkatan *Data Augmentation* Ekstrem**:
+  - `hsv_v` *(Value / Kecerahan)*: Ditingkatkan secara signifikan ke **0.8 (80%)**. Hal ini memaksa YOLO untuk secara mandiri menyimulasikan gambar dalam dua kondisi ekstrem: sangat gelap gulita (seperti malam tanpa lampu) dan sangat putih silau *(overexposed)*.
+  - `hsv_s` *(Saturation / Saturasi)*: Ditingkatkan ke **0.9 (90%)**. Menyimulasikan gambar yang kehilangan warna aslinya (*washed-out* noise khas ESP32 saat malam) hingga warna yang terlalu mencolok.
+- **Integrasi Penuh *Albumentations***: 
+  - Menyisipkan instalasi `!pip install -q albumentations` pada blok kode instalasi pertama. Hal ini dilakukan agar *library* Ultralytics YOLOv11 yang sedang berjalan dapat mengaktifkan sistem transformasi berbasis *Albumentations* secara otomatis untuk memaksimalkan efek *blur*, *gray*, dan koreksi cahaya lanjut selama pelatihan berjalan.
 
-## 2. Tindakan Perbaikan
+### 3. Konfigurasi Sistem Internal Android (`AndroidManifest.xml`)
+- Menambahkan baris konfigurasi `android:extractNativeLibs="true"` pada level `<application>`. Perubahan internal ini berfungsi untuk memastikan *native library* dari TensorFlow Lite (`libtensorflowlite_jni.so`) diekstrak ke sistem Android dengan benar tanpa terkena kompresi *(Uncompressed Native Libs)* yang sering kali memicu `NoClassDefFoundError` atau kendala GPU saat inisiasi model di HP modern.
 
-- **Menambahkan Dependency GPU API:**
-  Menambahkan `implementation("org.tensorflow:tensorflow-lite-gpu-api:2.14.0")` ke `app/build.gradle.kts` agar *GpuDelegate* dapat diinisialisasi dengan sempurna dan dapat memanfaatkan akselerasi GPU secara penuh.
-
-- **Dynamic Output Shape Parsing di `YoloDetector.kt`:**
-  Memodifikasi kode parsing di `YoloDetector.kt` agar mendeteksi secara otomatis *shape* output dari model TFLite:
-  - Jika output berbentuk `[1, 8400, 25]`, kode akan menggunakan array dua dimensi terbalik (`outputBufferTransposed`).
-  - Jika output berbentuk `[1, 25, 8400]`, kode tetap menggunakan array standar.
-  Perbaikan ini memastikan aplikasi kompatibel secara *backward* dengan berbagai varian model hasil ekspor dari YOLOv8 maupun YOLOv11.
-
-- **Peningkatan Keamanan Eksekusi (Error Handling):**
-  Mengganti semua penangkapan *exception* dari `catch (e: Exception)` menjadi `catch (e: Throwable)` pada inisialisasi TFLite. Hal ini bertujuan agar *Runtime Error* level mesin (seperti *LinkageError* atau memori habis) dapat diantisipasi dan otomatis kembali menggunakan CPU, sehingga tidak mematikan paksa aplikasi secara mendadak.
-
-## 3. Laporan Tambahan (Patch Lanjutan)
-
-### 3.1. Bounding Box Tidak Muncul (Aspect Ratio & Scaling)
-- **Masalah:** Gambar dari kamera dikompres paksa (*squashing*) menjadi ukuran 640x640, yang merusak aspek rasio asli gambar dan menyebabkan model kebingungan (akurasi deteksi merosot drastis hingga 0 Bounding Box ditemukan). Selain itu, penerjemahan lokasi koordinat hasil AI dari 640x640 kembali ke layar utama salah.
-- **Tindakan:** Mengimplementasikan teknik **Letterboxing** (menambahkan *padding* garis hitam) tanpa mengubah aspek rasio kamera asli (4:3) di dalam fungsi `convertBitmapToByteBuffer`. Logika `postprocessBoxes` juga dikalibrasi ulang (`padX`, `padY`, `scale`) untuk menghapus *padding* secara otomatis dan mengonversi koordinatnya tepat di atas objek pada layar ponsel.
-
-### 3.2. Kegagalan Total GPU Delegate (TFLite 2.16.1 Bug)
-- **Masalah:** Meskipun library `gpu-api` sebelumnya ditambahkan, versi TensorFlow Lite **2.16.1** (Standalone) diketahui bermasalah dan tetap melemparkan `NoClassDefFoundError` pada `GpuDelegateFactory$Options`. Hal ini menyebabkan aplikasi selalu melakukan *fallback* ke CPU secara diam-diam. Selain itu, terdapat redundansi inisialisasi pada blok mode `AUTO` yang menyebabkan *compiler error* di Kotlin.
-- **Tindakan:** Melakukan *downgrade* versi `tensorflow-lite` dan `tensorflow-lite-gpu` secara serentak ke versi yang terbukti stabil, yaitu **2.14.0**. Membersihkan blok logika `DelegateMode.AUTO` agar tidak melakukan inisialisasi ganda, serta memperbaiki struktur `when` *expression* agar *exhaustive* mematuhi aturan ketat Kotlin.
-
-### 3.3. Penyesuaian Confidence Threshold
-- **Masalah:** Ambang batas *confidence* sebelumnya terlalu tinggi (50%) untuk model kustom yang baru dilatih, sehingga tidak ada deteksi yang lewat. 
-- **Tindakan:** Mengkalibrasi ulang `CONFIDENCE_THRESHOLD` ke angka standar industri untuk model kustom, yaitu **0.30f (30%)**.
-
-## 4. Hasil Validasi Akhir
-
-- *Build* dan sinkronisasi Gradle (versi 2.14.0) sukses terinstal ke perangkat S20 Ultra dan Galaxy A16.
-- Aplikasi berhasil mengeksekusi TFLite menggunakan **GPU Delegate 100%** tanpa *fallback* ke CPU.
-- Bounding box berhasil muncul dengan presisi lokasi yang sangat akurat di atas objek berkat perbaikan *Letterboxing*.
+---
+**Tindakan Selanjutnya**:
+Jalankan *Run All* pada Notebook Kaggle/Colab untuk mulai melatih arsitektur YOLO 18-class dengan setelan augmentasi cuaca ekstrem tersebut. Saat selesai, pindahkan `best.tflite` ke folder `assets` di Android.
