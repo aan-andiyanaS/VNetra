@@ -1,65 +1,94 @@
-# Rangkuman Perubahan (Uncommitted Changes vs Commit 5e90c21)
+# Dokumentasi Pembaruan Sistem: Sinkronisasi Deteksi, Manajemen Eksperimen, dan Keamanan Training
 
-Dokumen ini merangkum seluruh perubahan dan penambahan baru yang terjadi pada *working directory* sejak *commit* terakhir `5e90c21c0da659c417c75789c538d21cda86e81c`.
+Berikut adalah laporan mendetail mengenai pembaruan dan optimasi yang telah diimplementasikan pada arsitektur sistem terbaru. Dokumentasi ini berfokus pada penyelesaian isu sinkronisasi kelas Android, pencegahan kegagalan sesi training, dan perbaikan struktur manajemen eksperimen, lengkap dengan cuplikan kode (*code snippets*) operasional.
 
-## 1. Reduksi Kelas Objek (29 Kelas ➡️ 23 Kelas)
-Sistem sekarang disederhanakan untuk lebih fokus pada objek rintangan kritis tunanetra.
-*   **Kelas yang dihapus:** `stop sign`, `chair`, `potted plant`, `dog`, `cat`, dan `curb`.
-*   **Penambahan Dataset Eksternal:** Menambahkan 3 sumber dataset baru untuk kelas `bench` secara eksplisit (`dataset_bench1` hingga `dataset_bench3`).
-*   **Aplikasi Android (`YoloDetector.kt`):**
-    ```kotlin
-    // Perubahan pada konstanta jumlah kelas dan array CLASSES
-    private const val NUM_CLASSES = 23
-    val CLASSES = arrayOf(
-        "person", "bicycle", "car", "motorcycle", "bus", "truck", "train", 
-        "bench", "pothole", "open_drain", "puddle", "pole", ... // total 23
-    )
-    ```
+---
 
-## 2. Penyempurnaan Proporsi Dataset (Hybrid Rebalancing)
-Skrip di Kaggle dan Colab (`train_vnetra_yolo11n_*.ipynb`) telah dirombak untuk distribusi dataset yang lebih adil dan mencegah model menghafal data.
-*   **Distribusi Validasi & Test yang Seimbang:** Logika lama hanya meminjam data dari *Train* ke *Valid*. Kini algoritma memastikan *Valid* dan *Test* mendapatkan jatah data yang berimbang (Target 50 gambar per kelas).
-*   **Fallback Dinamis (15%):** Jika total gambar di suatu kelas kurang dari 250, algoritma akan mengambil 15% dari total gambar alih-alih memaksa 50 gambar.
-*   **Strict Capping (Pengembalian Kelebihan):** Jika gambar di *Valid/Test* terlalu banyak, kelebihannya akan didorong kembali ke folder *Train*.
-*   **Evaluasi Eksplisit pada Test Set:** Pengujian model kini menargetkan *split test* secara spesifik.
-    ```python
-    # Evaluasi akurasi diarahkan ke test set
-    val_pt = model.val(data=f"{master_dir}/data.yaml", split='test')
-    ```
+## 1. Perbaikan Bug Sinkronisasi Kelas di Android (`YoloDetector.kt`)
+**Masalah:** Susunan kelas di Android tidak sinkron dengan model Python (misal: ID `0` di Python adalah `person`, tapi di Android ditulis `pothole`).
+**Solusi:** Menyusun ulang variabel `val CLASSES` agar urutan *array* persis 100% mengikuti `master_classes` dari proses *training*.
+**File yang diubah:** `app/src/main/java/com/airi/vnetra/model/YoloDetector.kt`
 
-## 3. Peningkatan Parameter Pelatihan (Training Enhancements)
-Terdapat optimasi signifikan pada hyperparameter pelatihan YOLO11n agar lebih tahan terhadap goyangan kamera dan tidak melupakan dataset COCO.
-*   **Pencegahan COCO Amnesia:** Menambahkan parameter `freeze=5` untuk membekukan 5 *layer* pertama (backbone) agar model tidak mengalami *catastrophic forgetting*.
-*   **Augmentasi Kamera OV2640:**
-    *   `fliplr=0.0`: Dimatikan (Flip Horizontal = 0) agar kamera tidak keliru dalam mengartikan rambu ubin taktil belok kanan/kiri.
-    *   `scale=0.3`: Dikurangi agar mensimulasikan objek pada sudut pandang kamera *wearable* di dada.
-    *   `erasing=0.3`: Mensimulasikan benda yang tertutup benda lain (oklusi) atau *motion blur*.
-*   **Optimalisasi Hardware:** Penambahan parameter `workers=4` (Colab) / `workers=8` (Kaggle), dan peningkatan jumlah *batch* (hingga `100` di Kaggle) agar pemakaian GPU T4 ganda lebih maksimal.
-*   **Keamanan Eksekusi:** Penambahan `exist_ok=True` (menimpa folder lama) dan `save_period=10` (auto-save *checkpoint* model tiap 10 epoch).
+```kotlin
+// [SEBELUMNYA] Urutan acak-acakan yang menyebabkan salah deteksi:
+val CLASSES = arrayOf(
+    "pothole", "tactile_paving_straight", "tactile_paving_turn", ...
+)
 
-## 4. Validasi Kuantisasi & Visualisasi (Benchmarking Skripsi)
-Pada bagian akhir *notebook* Colab/Kaggle dan skrip kuantisasi, ditambahkan dua tahapan khusus untuk keperluan analisis laporan skripsi:
-*   **Evaluasi Kuantisasi:** Komparasi langsung mAP@50 antara Model Original FP32 (`.pt`) dan Model TFLite Kuantisasi (`.tflite` FP16/INT8) menggunakan Test Set.
-*   **Visualisasi (Predict):** Pengambilan 1 gambar acak dari Test Set untuk memplotkan hasil prediksi model asli bersanding dengan hasil prediksi model FP16 secara bersebelahan (*side-by-side* memakai *matplotlib*).
+// [SESUDAHNYA] Urutan disinkronisasi 100% dengan master_classes Python:
+val CLASSES = arrayOf(
+    "person", "bicycle", "car", "motorcycle", "train", "bench", "pothole", 
+    "open_drain", "puddle", "pole", "hanging_branch", "tactile_paving_straight", 
+    "tactile_paving_turn", "tactile_paving_3way", "tactile_paving_4way", 
+    "tactile_paving_stop", "stairs_up", "stairs_down", "crosswalk", "tree", "fence"
+)
+```
+*(Catatan Tambahan: Folder `app/src/main/assets/` juga dibuat untuk menampung model `best_fp16.tflite` agar otomatis dibaca aplikasi).*
 
-## 5. Penyesuaian Path Penyimpanan Hasil
-Direktori keluaran (output runs) YOLO disesuaikan ke standar Ultralytics terbaru:
+---
+
+## 2. Peningkatan Keamanan Waktu Training (Rem Darurat)
+**Masalah:** Server Kaggle/Colab sering *timeout* (mati paksa) sehingga merusak file `last.pt` dan membatalkan pembuatan grafik hasil evaluasi.
+**Solusi:** Menambahkan mekanisme "Rem Darurat" (*Callback*) yang menghitung mundur waktu aktif server.
+**File yang diubah:** `notebooks/train_vnetra_yolo11n_kaggle.ipynb` & `notebooks/train_vnetra_yolo11n_colab.ipynb`
+
 ```python
-# Sebelum
-shutil.copy('vnetra_training/yolo11n_custom/weights/best.pt', ...)
+# [DITAMBAHKAN] Kode pengaman di sel training:
+import time
 
-# Sesudah
-shutil.copy('runs/detect/vnetra_training/yolo11n_custom/weights/best.pt', ...)
+def alarm_kuota(trainer):
+    # Jika waktu aktif sudah melebihi 1,5 jam (5400 detik) atau 11 jam (Kaggle)
+    if time.time() - trainer.train_time_start > 5400:  
+        print("🚨 ALARM: Sisa kuota hampir habis! Menyimpan progress...")
+        trainer.stop = True # Memaksa YOLO berhenti secara elegan (graceful exit)
+
+# Mendaftarkan penjaga waktu ke sistem YOLO
+model.add_callback("on_train_epoch_end", alarm_kuota)
 ```
 
-## 6. Penambahan Dokumen Saran Pengembangan Baru (`saran.md`)
-Sebuah dokumen baru bernama `saran.md` telah ditambahkan ke dalam repositori (berstatus *untracked file*). Dokumen ini berisi cetak biru gagasan masa depan untuk menyempurnakan VNetra, yang meliputi:
-*   **Segmentasi Semantik (Semantic Segmentation):** Rencana transisi menggunakan `yolo11n-seg.pt` untuk mendeteksi kontur trotoar secara asimetris.
-*   **Estimasi Kedalaman (Depth Estimation):** Potensi integrasi *Depth Anything V2 Small* untuk mengukur jarak lubang atau halangan.
-*   **Multi-Task Pipeline:** Menjalankan dua inferensi (YOLO deteksi dan segmentasi) secara paralel bergantian di GPU Mobile dalam *budget* <100ms.
-*   **Perbaikan Dataset & Model:** Arahan untuk memperbanyak data kelas sulit (seperti `bench` dan `truck`) serta ide untuk beralih ke YOLO11s atau melatih dengan metode Quantization-Aware Training (QAT).
-*   **Pengembangan Perangkat Keras:** Usulan penggunaan kamera OV5640 30FPS, Raspberry Pi, atau integrasi sensor ultrasonik independen.
-*   **Kontekstualisasi Lokal:** Rekomendasi untuk mendirikan *dataset* spesifik lingkungan jalanan Indonesia beserta kolaborasi uji lapangan bersama tunanetra.
+---
 
-## 7. Pembaruan Konfigurasi Minor
-*   **IDE Configuration:** Terdapat modifikasi minor otomatis pada berkas konfigurasi Android Studio (`.idea/misc.xml`) berupa penghapusan deklarasi header XML standar, yang tidak memengaruhi logika aplikasi secara keseluruhan.
+## 3. Penambahan Fitur Resume Training Otomatis
+**Masalah:** Me-*resume* *training* menggunakan skrip utama terkadang merusak sistem pembacaan *epoch* jika dibarengi dengan penggunaan argumen `time=...`.
+**Solusi:** Memisahkan skrip khusus murni untuk me-*resume* sesi dari `last.pt`.
+**File baru:** `notebooks/resume_vnetra_yolo11n_kaggle.ipynb` & `notebooks/resume_vnetra_yolo11n_colab.ipynb`
+
+```python
+# [DIBUAT BARU] Mekanisme utama di dalam notebook resume:
+model_path = f'{model_dir}/yolo11n_custom/weights/last.pt'
+
+# 1. Muat checkpoint terakhir
+model = YOLO(model_path)
+
+# 2. Pasang kembali alarm rem darurat untuk sesi lanjutan
+model.add_callback("on_train_epoch_end", alarm_kuota)
+
+# 3. Lanjutkan training tanpa merusak target epochs asli
+results = model.train(resume=True)
+```
+
+---
+
+## 4. Manajemen Direktori Eksperimen Terpusat
+**Masalah:** Skrip lama menyimpan file sembarangan di *root* Google Drive (`/content/drive/MyDrive/`), menyebabkan penumpukan jika ada beberapa eksperimen.
+**Solusi:** Menambahkan variabel kontrol terpusat (`EXPERIMENT_ID`) untuk me-*routing* otomatis semua file.
+**File yang diubah:** `notebooks/quantize_vnetra_int8_colab.ipynb`
+
+```python
+# [DITAMBAHKAN] Manajemen folder terpusat di awal notebook:
+EXPERIMENT_ID = 1
+
+DRIVE_BASE_DIR = f'/content/drive/MyDrive/YOLO/eksperimen_{EXPERIMENT_ID}'
+INPUT_DIR = f'{DRIVE_BASE_DIR}/input'
+OUTPUT_DIR = f'{DRIVE_BASE_DIR}/output'
+
+os.makedirs(INPUT_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Contoh implementasinya untuk ekspor TFLite:
+# int8_drive_path = f'{OUTPUT_DIR}/best_int8.tflite'
+```
+
+---
+**Catatan untuk Commit:**
+Pastikan seluruh file _untracked_ di folder `notebooks/` (terutama seri `resume`) dan folder `assets/` ikut di-_stage_ (`git add .`) sebelum melakukan _commit_ agar mekanisme _safe-resume_ dan folder arsitektur tersimpan di Git.
