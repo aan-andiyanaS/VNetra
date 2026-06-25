@@ -45,7 +45,7 @@ class YoloDetector(
         private const val INPUT_SIZE = 640
         private const val NUM_CLASSES = 21
         private const val OUTPUT_BOXES = 8400
-        private const val CONFIDENCE_THRESHOLD = 0.35f
+        private const val CONFIDENCE_THRESHOLD = 0.30f
         private const val IOU_THRESHOLD = 0.45f
 
         val CLASSES = arrayOf(
@@ -64,6 +64,12 @@ class YoloDetector(
     
     private var isTransposedOutput = false
     private var outputBufferTransposed: Array<Array<FloatArray>>? = null
+    private var outputBufferStandard: Array<Array<FloatArray>>? = null
+    
+    // Default fallback, but will be dynamically updated based on the model's actual shape
+    private var dynamicNumClasses = NUM_CLASSES
+    private var dynamicOutputBoxes = OUTPUT_BOXES
+    
     private val outputBuffer = Array(1) { Array(4 + NUM_CLASSES) { FloatArray(OUTPUT_BOXES) } }
     private val inputBuffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4).apply {
         order(ByteOrder.nativeOrder())
@@ -97,10 +103,8 @@ class YoloDetector(
             
             // 1. Logika awal mode AUTO untuk Hardware
             if (targetDelegate == DelegateMode.AUTO) {
-                // AUTO: Prioritaskan NPU(INT8) > GPU(FP16) > CPU(INT8/FP16)
-                targetDelegate = if (supportNpu && hasInt8) DelegateMode.NPU
-                else if (supportGpu && hasFp16) DelegateMode.GPU
-                else DelegateMode.CPU
+                targetDelegate = if (supportGpu) DelegateMode.GPU else DelegateMode.CPU
+                Log.i(TAG, "Mode AUTO dideteksi, mengevaluasi dukungan GPU: ${if (supportGpu) "Didukung" else "Tidak Didukung"}")
             }
 
             // 2. Pemilihan Model (Mempertimbangkan preferensi manual pengguna)
@@ -157,9 +161,12 @@ class YoloDetector(
                         options.setNumThreads(4)
                     }
                 }
-                DelegateMode.CPU, DelegateMode.AUTO -> {
-                    options.setNumThreads(4)
+                DelegateMode.CPU -> {
                     Log.i(TAG, "Menggunakan CPU Delegate (4 threads) dengan model $finalModelName.")
+                    options.setNumThreads(4)
+                }
+                DelegateMode.AUTO -> {
+                    // Sudah di-handle di atas (diubah ke GPU atau CPU). Tidak akan pernah tereksekusi di sini.
                 }
             }
 
@@ -167,17 +174,32 @@ class YoloDetector(
             interpreter = Interpreter(modelBuffer, options)
             Log.i(TAG, "Loaded model $finalModelName successfully.")
 
-            // Check output shape to adapt dynamically
+            val inputTensor = interpreter?.getInputTensor(0)
+            Log.i(TAG, "Input Tensor: DataType=${inputTensor?.dataType()}, Shape=${inputTensor?.shape()?.contentToString()}")
+            
             val outputTensor = interpreter?.getOutputTensor(0)
             val shape = outputTensor?.shape()
+            Log.i(TAG, "Output Tensor: DataType=${outputTensor?.dataType()}, Shape=${shape?.contentToString()}")
+            
             if (shape != null && shape.size == 3) {
-                if (shape[1] == OUTPUT_BOXES && shape[2] == 4 + NUM_CLASSES) {
+                // shape could be [1, boxes, num_classes+4] OR [1, num_classes+4, boxes]
+                // We know output boxes is usually large (e.g. 8400). Number of classes+4 is small (e.g. 25, 84).
+                if (shape[1] > shape[2]) {
+                    // Transposed: [1, 8400, classes+4]
+                    dynamicOutputBoxes = shape[1]
+                    val coordsAndClasses = shape[2]
+                    dynamicNumClasses = coordsAndClasses - 4
                     isTransposedOutput = true
-                    outputBufferTransposed = Array(1) { Array(OUTPUT_BOXES) { FloatArray(4 + NUM_CLASSES) } }
-                    Log.i(TAG, "Model uses transposed output shape: [1, $OUTPUT_BOXES, ${4 + NUM_CLASSES}]")
+                    outputBufferTransposed = Array(1) { Array(dynamicOutputBoxes) { FloatArray(coordsAndClasses) } }
+                    Log.i(TAG, "Model uses transposed output shape: [1, $dynamicOutputBoxes, $coordsAndClasses] ($dynamicNumClasses classes)")
                 } else {
+                    // Standard: [1, classes+4, 8400]
+                    dynamicOutputBoxes = shape[2]
+                    val coordsAndClasses = shape[1]
+                    dynamicNumClasses = coordsAndClasses - 4
                     isTransposedOutput = false
-                    Log.i(TAG, "Model uses standard output shape: [1, ${4 + NUM_CLASSES}, $OUTPUT_BOXES]")
+                    outputBufferStandard = Array(1) { Array(coordsAndClasses) { FloatArray(dynamicOutputBoxes) } }
+                    Log.i(TAG, "Model uses standard output shape: [1, $coordsAndClasses, $dynamicOutputBoxes] ($dynamicNumClasses classes)")
                 }
             }
 
@@ -216,6 +238,8 @@ class YoloDetector(
         try {
             if (isTransposedOutput && outputBufferTransposed != null) {
                 interpreter?.run(inputBuffer, outputBufferTransposed!!)
+            } else if (!isTransposedOutput && outputBufferStandard != null) {
+                interpreter?.run(inputBuffer, outputBufferStandard!!)
             } else {
                 interpreter?.run(inputBuffer, outputBuffer)
             }
@@ -225,38 +249,66 @@ class YoloDetector(
         }
 
         // 3. Postprocess (Extract Boxes & NMS)
-        return postprocessBoxes(bitmap.width, bitmap.height)
+        val results = postprocessBoxes(bitmap.width, bitmap.height)
+        Log.i(TAG, "YOLO Detection completed. Found ${results.size} bounding boxes.")
+        if (results.isNotEmpty()) {
+            val topConf = results.maxOf { it.confidence }
+            Log.i(TAG, "Top confidence: $topConf, Class: ${results.maxByOrNull { it.confidence }?.className}")
+        }
+        return results
     }
 
     private fun convertBitmapToByteBuffer(bitmap: Bitmap) {
         inputBuffer.rewind()
-        val intValues = IntArray(INPUT_SIZE * INPUT_SIZE)
-        bitmap.getPixels(intValues, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-
-        var pixel = 0
-        for (i in 0 until INPUT_SIZE) {
-            for (j in 0 until INPUT_SIZE) {
-                val valPixel = intValues[pixel++]
-                // Normalize 0..255 to 0.0..1.0
-                inputBuffer.putFloat(((valPixel shr 16) and 0xFF) / 255.0f)
-                inputBuffer.putFloat(((valPixel shr 8) and 0xFF) / 255.0f)
-                inputBuffer.putFloat((valPixel and 0xFF) / 255.0f)
+        
+        // Use Letterbox padding to preserve aspect ratio
+        val scale = Math.min(INPUT_SIZE.toFloat() / bitmap.width, INPUT_SIZE.toFloat() / bitmap.height)
+        val newWidth = (bitmap.width * scale).toInt()
+        val newHeight = (bitmap.height * scale).toInt()
+        
+        val resizedBitmap = Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
+        val intValues = IntArray(newWidth * newHeight)
+        resizedBitmap.getPixels(intValues, 0, newWidth, 0, 0, newWidth, newHeight)
+        
+        val padX = (INPUT_SIZE - newWidth) / 2
+        val padY = (INPUT_SIZE - newHeight) / 2
+        
+        for (y in 0 until INPUT_SIZE) {
+            for (x in 0 until INPUT_SIZE) {
+                if (x >= padX && x < padX + newWidth && y >= padY && y < padY + newHeight) {
+                    val pixelX = x - padX
+                    val pixelY = y - padY
+                    val valPixel = intValues[pixelY * newWidth + pixelX]
+                    // Normalize 0..255 to 0.0..1.0
+                    inputBuffer.putFloat(((valPixel shr 16) and 0xFF) / 255.0f)
+                    inputBuffer.putFloat(((valPixel shr 8) and 0xFF) / 255.0f)
+                    inputBuffer.putFloat((valPixel and 0xFF) / 255.0f)
+                } else {
+                    // Padding color (114 = gray)
+                    inputBuffer.putFloat(114f / 255.0f)
+                    inputBuffer.putFloat(114f / 255.0f)
+                    inputBuffer.putFloat(114f / 255.0f)
+                }
             }
         }
     }
 
     private fun postprocessBoxes(originalWidth: Int, originalHeight: Int): List<DetectionResult> {
         val results = mutableListOf<DetectionResult>()
-        val scaleX = originalWidth.toFloat() / INPUT_SIZE
+        val scale = Math.min(INPUT_SIZE.toFloat() / originalWidth, INPUT_SIZE.toFloat() / originalHeight)
+        val padX = (INPUT_SIZE - originalWidth * scale) / 2f
+        val padY = (INPUT_SIZE - originalHeight * scale) / 2f
         val scaleY = originalHeight.toFloat() / INPUT_SIZE
 
         if (isTransposedOutput && outputBufferTransposed != null) {
             val output = outputBufferTransposed!![0]
-            for (i in 0 until OUTPUT_BOXES) {
+            var highestFrameConf = 0f
+            
+            for (i in 0 until dynamicOutputBoxes) {
                 var maxClassConf = 0f
                 var classId = -1
 
-                for (c in 0 until NUM_CLASSES) {
+                for (c in 0 until dynamicNumClasses) {
                     val conf = output[i][4 + c]
                     if (conf > maxClassConf) {
                         maxClassConf = conf
@@ -270,10 +322,15 @@ class YoloDetector(
                     val w = output[i][2]
                     val h = output[i][3]
 
-                    val left = (cx - w / 2) * scaleX
-                    val top = (cy - h / 2) * scaleY
-                    val right = (cx + w / 2) * scaleX
-                    val bottom = (cy + h / 2) * scaleY
+                    val cxAbsolute = if (cx < 2.0f) cx * INPUT_SIZE else cx
+                    val cyAbsolute = if (cy < 2.0f) cy * INPUT_SIZE else cy
+                    val wAbsolute = if (w < 2.0f) w * INPUT_SIZE else w
+                    val hAbsolute = if (h < 2.0f) h * INPUT_SIZE else h
+
+                    val left = (cxAbsolute - wAbsolute / 2 - padX) / scale
+                    val top = (cyAbsolute - hAbsolute / 2 - padY) / scale
+                    val right = (cxAbsolute + wAbsolute / 2 - padX) / scale
+                    val bottom = (cyAbsolute + hAbsolute / 2 - padY) / scale
 
                     val rect = RectF(
                         left.coerceAtLeast(0f),
@@ -282,17 +339,24 @@ class YoloDetector(
                         bottom.coerceAtMost(originalHeight.toFloat())
                     )
 
-                    results.add(DetectionResult(classId, CLASSES[classId], maxClassConf, rect))
+                    val className = if (classId in CLASSES.indices) CLASSES[classId] else "obj_$classId"
+                    results.add(DetectionResult(classId, className, maxClassConf, rect))
+                }
+                
+                if (maxClassConf > highestFrameConf) {
+                    highestFrameConf = maxClassConf
                 }
             }
+            Log.d(TAG, "[Transposed] Frame diproses. Confidence tertinggi di frame ini: $highestFrameConf")
         } else {
-            val output = outputBuffer[0]
+            val output = if (outputBufferStandard != null) outputBufferStandard!![0] else outputBuffer[0]
+            var highestFrameConf = 0f
             
-            for (i in 0 until OUTPUT_BOXES) {
+            for (i in 0 until dynamicOutputBoxes) {
                 var maxClassConf = 0f
                 var classId = -1
 
-                for (c in 0 until NUM_CLASSES) {
+                for (c in 0 until dynamicNumClasses) {
                     val conf = output[4 + c][i]
                     if (conf > maxClassConf) {
                         maxClassConf = conf
@@ -306,10 +370,23 @@ class YoloDetector(
                     val w = output[2][i]
                     val h = output[3][i]
 
-                    val left = (cx - w / 2) * scaleX
-                    val top = (cy - h / 2) * scaleY
-                    val right = (cx + w / 2) * scaleX
-                    val bottom = (cy + h / 2) * scaleY
+                    // Log the first confident box's raw coordinates
+                    if (results.size == 0) {
+                        Log.i(TAG, "Raw Box: cx=$cx, cy=$cy, w=$w, h=$h (classId=$classId, conf=$maxClassConf)")
+                    }
+
+                    // Convert from Letterbox coords back to original image coords
+                    // If coordinates are normalized (0..1), multiply them by INPUT_SIZE first!
+                    // Let's dynamically handle normalized vs absolute
+                    val cxAbsolute = if (cx < 2.0f) cx * INPUT_SIZE else cx
+                    val cyAbsolute = if (cy < 2.0f) cy * INPUT_SIZE else cy
+                    val wAbsolute = if (w < 2.0f) w * INPUT_SIZE else w
+                    val hAbsolute = if (h < 2.0f) h * INPUT_SIZE else h
+
+                    val left = (cxAbsolute - wAbsolute / 2 - padX) / scale
+                    val top = (cyAbsolute - hAbsolute / 2 - padY) / scale
+                    val right = (cxAbsolute + wAbsolute / 2 - padX) / scale
+                    val bottom = (cyAbsolute + hAbsolute / 2 - padY) / scale
 
                     val rect = RectF(
                         left.coerceAtLeast(0f),
@@ -318,7 +395,8 @@ class YoloDetector(
                         bottom.coerceAtMost(originalHeight.toFloat())
                     )
 
-                    results.add(DetectionResult(classId, CLASSES[classId], maxClassConf, rect))
+                    val className = if (classId in CLASSES.indices) CLASSES[classId] else "obj_$classId"
+                    results.add(DetectionResult(classId, className, maxClassConf, rect))
                 }
             }
         }
