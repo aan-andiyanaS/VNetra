@@ -1,94 +1,31 @@
-# Dokumentasi Pembaruan Sistem: Sinkronisasi Deteksi, Manajemen Eksperimen, dan Keamanan Training
+# Laporan Perbaikan Bug: GPU Native Crash & Transposed TFLite Output Shape
 
-Berikut adalah laporan mendetail mengenai pembaruan dan optimasi yang telah diimplementasikan pada arsitektur sistem terbaru. Dokumentasi ini berfokus pada penyelesaian isu sinkronisasi kelas Android, pencegahan kegagalan sesi training, dan perbaikan struktur manajemen eksperimen, lengkap dengan cuplikan kode (*code snippets*) operasional.
+## 1. Deskripsi Masalah
 
----
+Terdapat dua masalah utama yang menyebabkan aplikasi mengalami *force close* atau gagal menampilkan *bounding box* setelah memasukkan model TFLite baru (YOLOv8/11):
 
-## 1. Perbaikan Bug Sinkronisasi Kelas di Android (`YoloDetector.kt`)
-**Masalah:** Susunan kelas di Android tidak sinkron dengan model Python (misal: ID `0` di Python adalah `person`, tapi di Android ditulis `pothole`).
-**Solusi:** Menyusun ulang variabel `val CLASSES` agar urutan *array* persis 100% mengikuti `master_classes` dari proses *training*.
-**File yang diubah:** `app/src/main/java/com/airi/vnetra/model/YoloDetector.kt`
+1. **`NoClassDefFoundError` pada `GpuDelegate` (Force Close):**
+   Aplikasi mengalami *crash* dan langsung tertutup dengan pesan error `java.lang.NoClassDefFoundError: Failed resolution of: Lorg/tensorflow/lite/gpu/GpuDelegateFactory$Options`. Hal ini disebabkan oleh absennya library `tensorflow-lite-gpu-api` pada file `build.gradle.kts`. Pada versi 2.9.0 ke atas, Google memisahkan implementasi GPU menjadi dua *dependency* terpisah.
 
-```kotlin
-// [SEBELUMNYA] Urutan acak-acakan yang menyebabkan salah deteksi:
-val CLASSES = arrayOf(
-    "pothole", "tactile_paving_straight", "tactile_paving_turn", ...
-)
+2. **Output Shape Model Transposed (Silent Failure):**
+   Model TFLite yang diekspor menggunakan Ultralytics versi terbaru (YOLOv8/11) memiliki bentuk tensor output `[1, 8400, 25]` (*transposed*), sedangkan kode bawaan `YoloDetector.kt` secara statis mengharapkan format `[1, 25, 8400]`. Hal ini membuat TFLite melemparkan `IllegalArgumentException` yang tertangkap oleh `catch`, sehingga aplikasi tidak *crash* tetapi tidak menampilkan hasil deteksi sama sekali.
 
-// [SESUDAHNYA] Urutan disinkronisasi 100% dengan master_classes Python:
-val CLASSES = arrayOf(
-    "person", "bicycle", "car", "motorcycle", "train", "bench", "pothole", 
-    "open_drain", "puddle", "pole", "hanging_branch", "tactile_paving_straight", 
-    "tactile_paving_turn", "tactile_paving_3way", "tactile_paving_4way", 
-    "tactile_paving_stop", "stairs_up", "stairs_down", "crosswalk", "tree", "fence"
-)
-```
-*(Catatan Tambahan: Folder `app/src/main/assets/` juga dibuat untuk menampung model `best_fp16.tflite` agar otomatis dibaca aplikasi).*
+## 2. Tindakan Perbaikan
 
----
+- **Menambahkan Dependency GPU API:**
+  Menambahkan `implementation("org.tensorflow:tensorflow-lite-gpu-api:2.14.0")` ke `app/build.gradle.kts` agar *GpuDelegate* dapat diinisialisasi dengan sempurna dan dapat memanfaatkan akselerasi GPU secara penuh.
 
-## 2. Peningkatan Keamanan Waktu Training (Rem Darurat)
-**Masalah:** Server Kaggle/Colab sering *timeout* (mati paksa) sehingga merusak file `last.pt` dan membatalkan pembuatan grafik hasil evaluasi.
-**Solusi:** Menambahkan mekanisme "Rem Darurat" (*Callback*) yang menghitung mundur waktu aktif server.
-**File yang diubah:** `notebooks/train_vnetra_yolo11n_kaggle.ipynb` & `notebooks/train_vnetra_yolo11n_colab.ipynb`
+- **Dynamic Output Shape Parsing di `YoloDetector.kt`:**
+  Memodifikasi kode parsing di `YoloDetector.kt` agar mendeteksi secara otomatis *shape* output dari model TFLite:
+  - Jika output berbentuk `[1, 8400, 25]`, kode akan menggunakan array dua dimensi terbalik (`outputBufferTransposed`).
+  - Jika output berbentuk `[1, 25, 8400]`, kode tetap menggunakan array standar.
+  Perbaikan ini memastikan aplikasi kompatibel secara *backward* dengan berbagai varian model hasil ekspor dari YOLOv8 maupun YOLOv11.
 
-```python
-# [DITAMBAHKAN] Kode pengaman di sel training:
-import time
+- **Peningkatan Keamanan Eksekusi (Error Handling):**
+  Mengganti semua penangkapan *exception* dari `catch (e: Exception)` menjadi `catch (e: Throwable)` pada inisialisasi TFLite. Hal ini bertujuan agar *Runtime Error* level mesin (seperti *LinkageError* atau memori habis) dapat diantisipasi dan otomatis kembali menggunakan CPU, sehingga tidak mematikan paksa aplikasi secara mendadak.
 
-def alarm_kuota(trainer):
-    # Jika waktu aktif sudah melebihi 1,5 jam (5400 detik) atau 11 jam (Kaggle)
-    if time.time() - trainer.train_time_start > 5400:  
-        print("🚨 ALARM: Sisa kuota hampir habis! Menyimpan progress...")
-        trainer.stop = True # Memaksa YOLO berhenti secara elegan (graceful exit)
+## 3. Hasil Validasi
 
-# Mendaftarkan penjaga waktu ke sistem YOLO
-model.add_callback("on_train_epoch_end", alarm_kuota)
-```
-
----
-
-## 3. Penambahan Fitur Resume Training Otomatis
-**Masalah:** Me-*resume* *training* menggunakan skrip utama terkadang merusak sistem pembacaan *epoch* jika dibarengi dengan penggunaan argumen `time=...`.
-**Solusi:** Memisahkan skrip khusus murni untuk me-*resume* sesi dari `last.pt`.
-**File baru:** `notebooks/resume_vnetra_yolo11n_kaggle.ipynb` & `notebooks/resume_vnetra_yolo11n_colab.ipynb`
-
-```python
-# [DIBUAT BARU] Mekanisme utama di dalam notebook resume:
-model_path = f'{model_dir}/yolo11n_custom/weights/last.pt'
-
-# 1. Muat checkpoint terakhir
-model = YOLO(model_path)
-
-# 2. Pasang kembali alarm rem darurat untuk sesi lanjutan
-model.add_callback("on_train_epoch_end", alarm_kuota)
-
-# 3. Lanjutkan training tanpa merusak target epochs asli
-results = model.train(resume=True)
-```
-
----
-
-## 4. Manajemen Direktori Eksperimen Terpusat
-**Masalah:** Skrip lama menyimpan file sembarangan di *root* Google Drive (`/content/drive/MyDrive/`), menyebabkan penumpukan jika ada beberapa eksperimen.
-**Solusi:** Menambahkan variabel kontrol terpusat (`EXPERIMENT_ID`) untuk me-*routing* otomatis semua file.
-**File yang diubah:** `notebooks/quantize_vnetra_int8_colab.ipynb`
-
-```python
-# [DITAMBAHKAN] Manajemen folder terpusat di awal notebook:
-EXPERIMENT_ID = 1
-
-DRIVE_BASE_DIR = f'/content/drive/MyDrive/YOLO/eksperimen_{EXPERIMENT_ID}'
-INPUT_DIR = f'{DRIVE_BASE_DIR}/input'
-OUTPUT_DIR = f'{DRIVE_BASE_DIR}/output'
-
-os.makedirs(INPUT_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Contoh implementasinya untuk ekspor TFLite:
-# int8_drive_path = f'{OUTPUT_DIR}/best_int8.tflite'
-```
-
----
-**Catatan untuk Commit:**
-Pastikan seluruh file _untracked_ di folder `notebooks/` (terutama seri `resume`) dan folder `assets/` ikut di-_stage_ (`git add .`) sebelum melakukan _commit_ agar mekanisme _safe-resume_ dan folder arsitektur tersimpan di Git.
+- *Build* dan sinkronisasi Gradle berhasil.
+- Aplikasi sudah tidak lagi mengalami *force close* saat mode `DelegateMode.AUTO` mengeksekusi `GpuDelegate`.
+- Pendeteksian objek sudah berjalan normal dengan NMS dan pembacaan *bounding box* yang mulus.

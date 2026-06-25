@@ -62,9 +62,8 @@ class YoloDetector(
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     
-    // Output tensor shape: [1, 34, 8400] (30 classes + 4 bbox coords)
-    // For INT8, it might be quantized, but usually TFLite converts it back to float if we don't use quantized inputs
-    // Wait, we need to check if the export is fully integer or float input/output. YOLO export usually keeps float I/O even for int8.
+    private var isTransposedOutput = false
+    private var outputBufferTransposed: Array<Array<FloatArray>>? = null
     private val outputBuffer = Array(1) { Array(4 + NUM_CLASSES) { FloatArray(OUTPUT_BOXES) } }
     private val inputBuffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4).apply {
         order(ByteOrder.nativeOrder())
@@ -149,9 +148,14 @@ class YoloDetector(
                     Log.i(TAG, "Menggunakan NPU (NNAPI) Delegate dengan model $finalModelName.")
                 }
                 DelegateMode.GPU -> {
-                    gpuDelegate = GpuDelegate()
-                    options.addDelegate(gpuDelegate)
-                    Log.i(TAG, "Menggunakan GPU Delegate dengan model $finalModelName.")
+                    try {
+                        gpuDelegate = GpuDelegate()
+                        options.addDelegate(gpuDelegate)
+                        Log.i(TAG, "Menggunakan GPU Delegate dengan model $finalModelName.")
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "Gagal inisialisasi GPU Delegate: ${e.message}. Fallback ke CPU.")
+                        options.setNumThreads(4)
+                    }
                 }
                 DelegateMode.CPU, DelegateMode.AUTO -> {
                     options.setNumThreads(4)
@@ -163,8 +167,22 @@ class YoloDetector(
             interpreter = Interpreter(modelBuffer, options)
             Log.i(TAG, "Loaded model $finalModelName successfully.")
 
-        } catch (e: Exception) {
-            Log.e(TAG, "Error initializing TFLite Interpreter: ${e.message}")
+            // Check output shape to adapt dynamically
+            val outputTensor = interpreter?.getOutputTensor(0)
+            val shape = outputTensor?.shape()
+            if (shape != null && shape.size == 3) {
+                if (shape[1] == OUTPUT_BOXES && shape[2] == 4 + NUM_CLASSES) {
+                    isTransposedOutput = true
+                    outputBufferTransposed = Array(1) { Array(OUTPUT_BOXES) { FloatArray(4 + NUM_CLASSES) } }
+                    Log.i(TAG, "Model uses transposed output shape: [1, $OUTPUT_BOXES, ${4 + NUM_CLASSES}]")
+                } else {
+                    isTransposedOutput = false
+                    Log.i(TAG, "Model uses standard output shape: [1, ${4 + NUM_CLASSES}, $OUTPUT_BOXES]")
+                }
+            }
+
+        } catch (e: Throwable) {
+            Log.e(TAG, "Error initializing TFLite Interpreter: ${e.message}", e)
             interpreter = null
             modelStatus = ModelStatus.NONE
         }
@@ -196,9 +214,13 @@ class YoloDetector(
 
         // 2. Inference
         try {
-            interpreter?.run(inputBuffer, outputBuffer)
-        } catch (e: Exception) {
-            Log.e(TAG, "Inference failed: ${e.message}")
+            if (isTransposedOutput && outputBufferTransposed != null) {
+                interpreter?.run(inputBuffer, outputBufferTransposed!!)
+            } else {
+                interpreter?.run(inputBuffer, outputBuffer)
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "Inference failed: ${e.message}", e)
             return emptyList()
         }
 
@@ -228,44 +250,76 @@ class YoloDetector(
         val scaleX = originalWidth.toFloat() / INPUT_SIZE
         val scaleY = originalHeight.toFloat() / INPUT_SIZE
 
-        // outputBuffer is [1][27][8400]
-        val output = outputBuffer[0]
-        
-        for (i in 0 until OUTPUT_BOXES) {
-            var maxClassConf = 0f
-            var classId = -1
+        if (isTransposedOutput && outputBufferTransposed != null) {
+            val output = outputBufferTransposed!![0]
+            for (i in 0 until OUTPUT_BOXES) {
+                var maxClassConf = 0f
+                var classId = -1
 
-            // Output format YOLOv8/11: 
-            // indices 0..3: cx, cy, w, h
-            // indices 4..26: class confidences
-            for (c in 0 until NUM_CLASSES) {
-                val conf = output[4 + c][i]
-                if (conf > maxClassConf) {
-                    maxClassConf = conf
-                    classId = c
+                for (c in 0 until NUM_CLASSES) {
+                    val conf = output[i][4 + c]
+                    if (conf > maxClassConf) {
+                        maxClassConf = conf
+                        classId = c
+                    }
+                }
+
+                if (maxClassConf > CONFIDENCE_THRESHOLD) {
+                    val cx = output[i][0]
+                    val cy = output[i][1]
+                    val w = output[i][2]
+                    val h = output[i][3]
+
+                    val left = (cx - w / 2) * scaleX
+                    val top = (cy - h / 2) * scaleY
+                    val right = (cx + w / 2) * scaleX
+                    val bottom = (cy + h / 2) * scaleY
+
+                    val rect = RectF(
+                        left.coerceAtLeast(0f),
+                        top.coerceAtLeast(0f),
+                        right.coerceAtMost(originalWidth.toFloat()),
+                        bottom.coerceAtMost(originalHeight.toFloat())
+                    )
+
+                    results.add(DetectionResult(classId, CLASSES[classId], maxClassConf, rect))
                 }
             }
+        } else {
+            val output = outputBuffer[0]
+            
+            for (i in 0 until OUTPUT_BOXES) {
+                var maxClassConf = 0f
+                var classId = -1
 
-            if (maxClassConf > CONFIDENCE_THRESHOLD) {
-                val cx = output[0][i]
-                val cy = output[1][i]
-                val w = output[2][i]
-                val h = output[3][i]
+                for (c in 0 until NUM_CLASSES) {
+                    val conf = output[4 + c][i]
+                    if (conf > maxClassConf) {
+                        maxClassConf = conf
+                        classId = c
+                    }
+                }
 
-                // Scale to original image
-                val left = (cx - w / 2) * scaleX
-                val top = (cy - h / 2) * scaleY
-                val right = (cx + w / 2) * scaleX
-                val bottom = (cy + h / 2) * scaleY
+                if (maxClassConf > CONFIDENCE_THRESHOLD) {
+                    val cx = output[0][i]
+                    val cy = output[1][i]
+                    val w = output[2][i]
+                    val h = output[3][i]
 
-                val rect = RectF(
-                    left.coerceAtLeast(0f),
-                    top.coerceAtLeast(0f),
-                    right.coerceAtMost(originalWidth.toFloat()),
-                    bottom.coerceAtMost(originalHeight.toFloat())
-                )
+                    val left = (cx - w / 2) * scaleX
+                    val top = (cy - h / 2) * scaleY
+                    val right = (cx + w / 2) * scaleX
+                    val bottom = (cy + h / 2) * scaleY
 
-                results.add(DetectionResult(classId, CLASSES[classId], maxClassConf, rect))
+                    val rect = RectF(
+                        left.coerceAtLeast(0f),
+                        top.coerceAtLeast(0f),
+                        right.coerceAtMost(originalWidth.toFloat()),
+                        bottom.coerceAtMost(originalHeight.toFloat())
+                    )
+
+                    results.add(DetectionResult(classId, CLASSES[classId], maxClassConf, rect))
+                }
             }
         }
 

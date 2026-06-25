@@ -253,7 +253,7 @@ class CameraStreamActivity : AppCompatActivity() {
         formulaH = FormulaH(this)
         formulaH.initTts()
 
-        // Init YOLO Detector
+        // Init YOLO Detector (Secara default akan mencoba GPU/NPU karena masalah library sudah diperbaiki)
         yoloDetector = YoloDetector(this)
         updateAiIndicator()
     }
