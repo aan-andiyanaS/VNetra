@@ -1,76 +1,76 @@
-# Technical Release Notes: YOLOv11 & ToF VL53L5CX Sensor Fusion (Phase 2)
+# Catatan Rilis Teknis: Fusi Sensor YOLOv11 & VL53L5CX ToF (Tahap 2)
 
-**Date:** June 26, 2026  
+**Tanggal:** 26 Juni 2026  
 **Status:** `RELEASED`  
-**Scope:** Transitioning from static obstacle avoidance (Phase 1) to dynamic, object-based spatial mapping (Phase 2).
+**Cakupan:** Transisi dari sistem penghindar rintangan statis (Tahap 1) ke pemetaan spasial dinamis berbasis objek (Tahap 2).
 
 ---
 
-## 1. Problem Statement & Context
-Previously, the VNetra system relied on a naive static obstacle monitoring pipeline (Phase 1). Obstacles were detected purely based on raw distance data from the center columns of the ToF sensor, triggering a generic "rintangan" (obstacle) Text-to-Speech (TTS) alert. Although the YOLOv11n object detector was running, its outputs were only rendered visually on the UI overlay and not integrated with the rangefinder pipeline.
+## 1. Latar Belakang & Masalah
+Sebelumnya, sistem VNetra bergantung pada alur monitoring rintangan statis yang sederhana (Tahap 1). Rintangan dideteksi murni dari data jarak raw dari kolom tengah sensor ToF, memicu peringatan Text-to-Speech (TTS) umum dengan kalimat "rintangan". Walaupun pendeteksi objek YOLOv11n sudah berjalan, output-nya baru sebatas di-render secara visual pada UI overlay dan belum terintegrasi dengan alur komputasi sensor jarak.
 
-To solve this, we implemented **Formula B (Centroid Bounding Box)** to map the semantic output of the computer vision model with the depth data of the ToF sensor. This enables the system to tell *what* the object is, *how far* it is, and *which direction* it lies in a single, unified pipeline.
+Untuk mengatasi ini, kami mengimplementasikan **Formula B (Centroid Bounding Box)** untuk memetakan output semantik dari model computer vision dengan data kedalaman sensor ToF. Hal ini memungkinkan sistem untuk menyebutkan *apa* objeknya, *berapa* jaraknya, dan *ke arah mana* posisinya dalam satu alur pipeline yang terpadu.
 
 ---
 
-## 2. Architecture & Implementation Details
+## 2. Detail Arsitektur & Implementasi
 
-All modifications were applied to [VNetra/app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt](app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt). The implementation details are outlined below:
+Seluruh modifikasi diterapkan pada berkas [VNetra/app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt](app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt). Detail implementasinya adalah sebagai berikut:
 
-### A. Cross-Thread Pipeline Sync
-Since the camera frame processing (`frameCollectJob`) and the ToF data collection (`tofCollectJob`) run on different threads and variable sample rates (~15Hz camera vs ~10Hz ToF), we established a thread-safe bridge:
-* Declared a `@Volatile private var latestDetections: List<DetectionResult>` state.
-* The camera pipeline publishes the latest inference results into this state immediately after the YOLO model finishes processing.
+### A. Sinkronisasi Alur Lintas-Thread (Cross-Thread Pipeline Sync)
+Karena pemrosesan frame kamera (`frameCollectJob`) dan pengumpulan data ToF (`tofCollectJob`) berjalan pada thread terpisah dengan sample rate yang berbeda (~15Hz kamera vs ~10Hz ToF), kami membangun jembatan thread-safe:
+* Mendeklarasikan state `@Volatile private var latestDetections: List<DetectionResult>`.
+* Pipeline kamera memublikasikan hasil inferensi terbaru ke dalam state ini segera setelah proses deteksi YOLO selesai.
 
-### B. Refactoring the ToF Processing Loop (`tofCollectJob`)
-Instead of reading static columns, the ToF thread now processes spatial coordinates dynamically:
-1. **Centroid Extraction (Formula B):** Calculates the horizontal center of each detected object:
+### B. Perombakan Loop Pemrosesan ToF (`tofCollectJob`)
+Alih-alih membaca kolom statis tengah, thread ToF sekarang memproses koordinat spasial secara dinamis:
+1. **Ekstraksi Centroid (Formula B):** Menghitung titik tengah horizontal dari setiap objek terdeteksi:
    $$x_c = \frac{x_{min} + x_{max}}{2}$$
-2. **FoV Filtering (Guard Condition):** Checks if the object's centroid falls inside the ToF active zone. If it's outside (ToF has a narrower horizontal FoV compared to the camera), it gets ignored immediately to prevent false depth calculations.
-3. **Auditory Clock Mapping (Formula C):** Converts the pixel centroid `x_c` into an auditory clock direction (e.g., 10, 11, 12, 1, 2 o'clock).
-4. **Column Binning (Formula D):** Maps the camera-space coordinate `x_c` to the corresponding ToF sensor column ($j \in [0..7]$).
-5. **Head-Tilt Compensation & Depth Extraction (Formula E):** Utilizes the head pitch angle ($\theta$) from the MPU6050 IMU to dynamically shift the ToF rows. This ensures the rangefinder is always looking forward relative to the horizon, not the ground, even when the user is looking down.
-6. **TTS Dispatcher (Formula H):** Feeds the semantically labeled object (`className`), calculated distance, and clock direction into the TTS engine.
+2. **Penyaringan FoV (Guard Condition):** Memastikan centroid objek berada dalam zona aktif ToF. Jika di luar (FoV ToF lebih sempit secara horizontal dibanding kamera), objek segera diabaikan untuk mencegah miskalkulasi jarak.
+3. **Pemetaan Arah Jam Spasial (Formula C):** Mengonversi koordinat titik tengah `x_c` menjadi arah jam pendengaran (misalnya jam 10, 11, 12, 1, 2).
+4. **Kolom Binning (Formula D):** Memetakan koordinat ruang gambar `x_c` ke kolom sensor ToF yang sesuai ($j \in [0..7]$).
+5. **Kompensasi Kemiringan Kepala & Ekstraksi Jarak (Formula E):** Memanfaatkan sudut pitch kepala ($\theta$) dari IMU MPU6050 untuk menggeser baris pembacaan ToF secara dinamis. Ini menjamin sensor jarak selalu memantau ke depan relatif terhadap cakrawala, bukan menghadap tanah, saat pengguna menunduk.
+6. **TTS Dispatcher (Formula H):** Mengirimkan data semantik objek (`className`), hasil perhitungan jarak, dan arah jam ke TTS engine.
 
-### C. Fallback Strategy (Failsafe)
-If YOLO fails to detect any objects (due to poor lighting, motion blur, or model limitations), the system automatically falls back to Phase 1 monitoring. This prevents the system from going silent in front of unknown barriers:
+### C. Strategi Cadangan (Fallback Strategy - Failsafe)
+Jika YOLO gagal mendeteksi objek (akibat minim cahaya, motion blur, atau batasan model), sistem otomatis beralih ke monitoring Tahap 1. Ini mencegah sistem membisu saat berada di depan rintangan tak dikenal:
 ```kotlin
 if (detections.isNotEmpty()) {
-    // Phase 2: Dynamic Semantics + Distance + Direction
+    // Tahap 2: Semantik Dinamis + Jarak + Arah
 } else {
-    // Phase 1 (Fallback): Static center ToF columns monitoring
-    // Alerts the user of a generic "rintangan" at 12 o'clock
+    // Tahap 1 (Fallback): Monitoring kolom tengah ToF secara statis
+    // Memperingatkan pengguna akan adanya "rintangan" umum di arah jam 12
 }
 ```
 
 ---
 
-## 3. Engineering Fixes & Optimization
+## 3. Perbaikan Teknis & Optimasi
 
-### ✅ [FIXED] MPU6050 Inverted Hardware Correction
-* **Issue:** The MPU6050 sensor was physically mounted upside down on the glasses (components facing downwards). This inverted the Z-axis vector, causing the EKF (Extended Kalman Filter) and Formula E pitch compensation to calculate offsets in the wrong direction.
-* **Resolution:** Instead of rebuilding the hardware, we refactored the firmware in [VNetra/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino](firmware-vnetra/firmware-vnetra/firmware-vnetra.ino). We introduced an `MPU_MOUNTING_INVERTED` flag and wrapped the sensor reads in a custom `getMpuEvent()` function. When activated, the firmware mathematically negates the Z-axis and X-axis (maintaining a Right-Handed coordinate system) before feeding the values into the EKF, resolving the issue transparently.
+### ✅ [FIXED] Koreksi Fisik Sensor MPU6050 Terbalik
+* **Masalah:** Sensor MPU6050 dipasang terbalik secara fisik pada kacamata (komponen menghadap ke tanah). Hal ini membalikkan vektor sumbu Z, sehingga perhitungan EKF (Extended Kalman Filter) dan kompensasi pitch Formula E menghasilkan offset arah yang salah.
+* **Solusi:** Alih-alih merombak sirkuit fisik, kami memodifikasi kode firmware pada [VNetra/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino](firmware-vnetra/firmware-vnetra/firmware-vnetra.ino). Kami menambahkan flag `MPU_MOUNTING_INVERTED` dan membungkus pembacaan sensor dalam fungsi kustom `getMpuEvent()`. Saat diaktifkan, firmware secara matematis membalikkan sumbu Z dan sumbu X (menjaga sistem koordinat kaidah tangan kanan / Right-Handed System) sebelum menyuplai nilainya ke EKF, menyelesaikan masalah ini secara transparan.
 
-### ✅ [FIXED] Resolution Resiliency (VGA vs. QVGA scaling)
-* **Issue:** The ESP32 firmware falls back to `FRAMESIZE_QVGA` (320x240) if PSRAM is disabled or missing (standard is `FRAMESIZE_VGA` 640x480). Because `FormulaUtils.kt` hardcodes mapping coordinates assuming a 640px camera width, a 320px frame would shift the right half of the screen into a permanent dead zone.
-* **Resolution:** Added a volatile `latestFrameWidth` tracker in the Android app. The raw centroid `xcRaw` is now scaled dynamically to the virtual 640px space before running mapping formulas:
+### ✅ [FIXED] Ketahanan Resolusi (Skala VGA vs. QVGA)
+* **Masalah:** Firmware ESP32 memiliki fallback ke resolusi `FRAMESIZE_QVGA` (320x240) jika PSRAM tidak terbaca (resolusi standar adalah `FRAMESIZE_VGA` 640x480). Karena `FormulaUtils.kt` menggunakan koordinat hardcoded asumsi lebar kamera 640px, frame 320px akan menggeser setengah layar kanan ke zona mati permanen.
+* **Solusi:** Menambahkan pelacak volatile `latestFrameWidth` pada aplikasi Android. Centroid mentah `xcRaw` sekarang dikalibrasi secara dinamis ke ruang koordinat virtual 640px sebelum dialirkan ke rumus pemetaan:
   $$x_c = x_{c\_raw} \times \frac{640}{W_{frame}}$$
-  This decouples the fusion algorithm from the camera hardware output resolution.
+  Hal ini memisahkan algoritma fusi dari dependensi resolusi fisik kamera.
 
-### ✅ [OPTIMIZED] TTS Natural Distance & Speed Tuning
-* **Distance Conversion:** Natively, the VL53L5CX measures depth in millimeters (mm). Hearing *"seribu seratus milimeter"* (1100 mm) is counterintuitive and slow to digest. The pipeline now converts values to centimeters by dividing the raw depth by 10 (`dObj / 10`), announcing a cleaner *"110 sentimeter"*.
-* **Speed Acceleration:** Increased the TTS speech rate from `1.05f` to **`1.3f`** in `TtsAlertManager.kt`. This 30% speedup makes the voice notifications noticeably more prompt and responsive during movement.
+### ✅ [OPTIMIZED] Penyesuaian Nada & Kecepatan TTS
+* **Konversi Jarak:** Secara native, VL53L5CX mengukur kedalaman dalam milimeter (mm). Mendengar ucapan *'seribu seratus milimeter'* (1100 mm) terasa kurang natural dan lambat dicerna. Pipeline sekarang mengonversinya ke centimeter dengan membagi nilai raw dengan 10 (`dObj / 10`), sehingga dibacakan sebagai *'110 sentimeter'* yang lebih efisien.
+* **Akselerasi Kecepatan:** Meningkatkan speech rate TTS dari `1.05f` menjadi **`1.3f`** pada `TtsAlertManager.kt`. Peningkatan tempo bicara 30% ini membuat penyampaian suara navigasi terasa jauh lebih tanggap dan responsif selama pengguna berjalan.
 
-### ✅ [REFACTOR] Functional Renaming (Removing "Formula" Confusion)
-* **Issue:** The generic "Formula" naming convention (`FormulaUtils`, `FormulaE`, `FormulaH`) introduced cognitive overhead and made it hard to grasp the underlying functional purpose of each helper file.
-* **Resolution:** Reorganized the file structure and internal class/object names to be semantic and self-documenting:
-  * `FormulaUtils.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt](app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt) (Centroid & clock/column mapping)
-  * `FormulaE.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt](app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt) (Row depth averaging with pitch offset)
-  * `FormulaH.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt](app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt) (One-shot alert flags & TTS engine wrapper)
-  All imports and calls inside `CameraStreamActivity.kt` were refactored accordingly, and the project build compiles successfully.
+### ✅ [REFACTOR] Pembenahan Nama Berkas Fungsional (Menghindari Kebingungan "Formula")
+* **Masalah:** Skema penamaan generik menggunakan istilah 'Formula' (`FormulaUtils`, `FormulaE`, `FormulaH`) memicu kebingungan struktural (*cognitive overhead*) dan menyulitkan pembacaan fungsi asli masing-masing file utilitas.
+* **Solusi:** Menyusun ulang struktur berkas dan penamaan kelas/objek internal agar lebih semantis dan self-documenting:
+  * `FormulaUtils.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt](app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt) (Fungsi centroid & pemetaan arah jam/kolom)
+  * `FormulaE.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt](app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt) (Rata-rata jarak baris dengan kompensasi pitch)
+  * `FormulaH.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt](app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt) (Manajemen flag one-shot & pembungkus TTS engine)
+  Seluruh deklarasi import dan pemanggilan objek di dalam `CameraStreamActivity.kt` disesuaikan, dan kompilasi proyek berhasil diselesaikan.
 
 ---
 
-## 4. Next Action Items
-- [ ] Conduct field tests with fast-moving targets to evaluate latency sync between YOLO detections and TTS output.
-- [ ] Calibrate the threshold value ($D_{W0}$) for TTS triggers under different walking speeds.
+## 4. Rencana Tindak Lanjut
+- [ ] Melakukan pengujian lapangan dengan objek bergerak cepat untuk mengevaluasi latensi sinkronisasi antara deteksi YOLO dan keluaran suara TTS.
+- [ ] Mengalibrasi nilai ambang batas ($D_{W0}$) untuk pemicu TTS pada berbagai variasi kecepatan jalan kaki pengguna.
