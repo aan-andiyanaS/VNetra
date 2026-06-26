@@ -32,14 +32,13 @@ Alih-alih membaca kolom statis tengah, thread ToF sekarang memproses koordinat s
 5. **Head Tilt Compensation & Depth Extraction (Kompensasi Kemiringan Kepala & Ekstraksi Jarak):** Memanfaatkan sudut pitch kepala ($\theta$) dari IMU MPU6050 untuk menggeser baris pembacaan ToF secara dinamis. Ini menjamin sensor jarak selalu memantau ke depan relatif terhadap cakrawala, bukan menghadap tanah, saat pengguna menunduk.
 6. **TTS Dispatcher (Penyalur Pesan Suara TTS):** Mengirimkan data semantik objek (`className`), hasil perhitungan jarak, dan arah jam ke TTS engine.
 
-### C. Strategi Cadangan (Fallback Strategy - Failsafe)
-Jika YOLO gagal mendeteksi objek (akibat minim cahaya, motion blur, atau batasan model), sistem otomatis beralih ke monitoring Tahap 1. Ini mencegah sistem membisu saat berada di depan rintangan tak dikenal:
+### C. Strategi Cadangan Tanpa YOLO (Fallback Strategy)
+Jika YOLO gagal mendeteksi objek (akibat minim cahaya atau batasan model), sistem akan memeriksa apakah ToF mendeteksi tembok di depannya secara dinamis. Peringatan suara hanya akan aktif jika hambatan tersebut terkonfirmasi berupa tembok datar luas, sedangkan rintangan kecil tak dikenal lainnya akan diabaikan (senyap):
 ```kotlin
-if (detections.isNotEmpty()) {
-    // Tahap 2: Semantik Dinamis + Jarak + Arah
+if (wallDetected) {
+    // Tembok terdeteksi di depan: Peringatkan "tembok" di arah jam 12
 } else {
-    // Tahap 1 (Fallback): Monitoring kolom tengah ToF secara statis
-    // Memperingatkan pengguna akan adanya "rintangan" umum di arah jam 12
+    // Senyap (tidak mengeluarkan suara rintangan statis)
 }
 ```
 

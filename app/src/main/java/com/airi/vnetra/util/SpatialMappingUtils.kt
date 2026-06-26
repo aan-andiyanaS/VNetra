@@ -43,6 +43,8 @@ object SpatialMappingUtils {
     const val W_CAM   = 640   // px — lebar gambar kamera OV2640 (VGA)
     const val H_CAM   = 480   // px — tinggi gambar kamera OV2640 (VGA)
 
+    const val WALL_TRACKING_ID = 999  // ID unik global untuk asisten TTS tembok
+
     // Fraksi grid ToF terhadap lebar kamera (dari XML: width_percent="0.69")
     const val TOF_GRID_FRAC = 0.69f  // gridTof.width / ivCameraFrame.width
 

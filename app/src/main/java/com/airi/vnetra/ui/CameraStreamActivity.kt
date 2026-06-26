@@ -732,29 +732,22 @@ class CameraStreamActivity : AppCompatActivity() {
                         }
 
                         // Jika tidak ada deteksi YOLO yang berada di dekat (< D_W0),
-                        // jalankan pengecekan fallback statis / tembok
+                        // cek apakah ToF mendeteksi tembok di depannya.
                         if (!hasCloseYoloThreat) {
                             val wallDetected = SpatialMappingUtils.isWall(tofData, currentTofMode)
-                            val label = if (wallDetected) "tembok" else "rintangan"
-
-                            for (col in SpatialMappingUtils.centerColumns(currentTofMode)) {
-                                val dObj = TofDepthEstimator.calculate(
-                                    tofData    = tofData,
-                                    j          = col,
-                                    thetaDeg   = thetaDeg,
-                                    resolution = currentTofMode
-                                )
+                            if (wallDetected) {
+                                val wallDistance = tofData.filter { it in 30..1500 }.average().toInt()
                                 ttsAlertManager.process(
-                                    trackingId     = col,   // proxy ID = indeks kolom
-                                    dObj           = dObj,
-                                    clockDirection = 12,    // kolom tengah = selalu JAM 12
-                                    objectLabel    = label
+                                    trackingId     = SpatialMappingUtils.WALL_TRACKING_ID,
+                                    dObj           = wallDistance,
+                                    clockDirection = 12,    // tembok selalu didepan
+                                    objectLabel    = "tembok"
                                 )
 
-                                if (dObj < TtsAlertManager.D_W0) {
+                                if (wallDistance < TtsAlertManager.D_W0) {
                                     closeThreatExists = true
                                 }
-                                if (dObj < TtsAlertManager.D_RESET) {
+                                if (wallDistance < TtsAlertManager.D_RESET) {
                                     allClear = false
                                 }
                             }
