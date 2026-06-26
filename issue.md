@@ -15,7 +15,7 @@ Untuk mengatasi ini, kami mengimplementasikan kalkulasi **Centroid Bounding Box*
 
 ## 2. Detail Arsitektur & Implementasi
 
-Seluruh modifikasi diterapkan pada berkas [VNetra/app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt](app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt). Detail implementasinya adalah sebagai berikut:
+Seluruh modifikasi diterapkan pada berkas [VNetra/app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt](https://github.com/aan-andiyanaS/VNetra/blob/yolo/app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt). Detail implementasinya adalah sebagai berikut:
 
 ### A. Sinkronisasi Alur Lintas-Thread (Cross-Thread Pipeline Sync)
 Karena pemrosesan frame kamera (`frameCollectJob`) dan pengumpulan data ToF (`tofCollectJob`) berjalan pada thread terpisah dengan sample rate yang berbeda (~15Hz kamera vs ~10Hz ToF), kami membangun jembatan thread-safe:
@@ -49,7 +49,7 @@ if (detections.isNotEmpty()) {
 
 ### ✅ [FIXED] Koreksi Fisik Sensor MPU6050 Terbalik
 * **Masalah:** Sensor MPU6050 dipasang terbalik secara fisik pada kacamata (komponen menghadap ke tanah). Hal ini membalikkan vektor sumbu Z, sehingga perhitungan EKF (Extended Kalman Filter) dan kompensasi pitch menghasilkan offset arah yang salah.
-* **Solusi:** Alih-alih merombak sirkuit fisik, kami memodifikasi kode firmware pada [VNetra/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino](firmware-vnetra/firmware-vnetra/firmware-vnetra.ino). Kami menambahkan flag `MPU_MOUNTING_INVERTED` dan membungkus pembacaan sensor dalam fungsi kustom `getMpuEvent()`. Saat diaktifkan, firmware secara matematis membalikkan sumbu Z dan sumbu X (menjaga sistem koordinat kaidah tangan kanan / Right-Handed System) sebelum menyuplai nilainya ke EKF, menyelesaikan masalah ini secara transparan.
+* **Solusi:** Alih-alih merombak sirkuit fisik, kami memodifikasi kode firmware pada [VNetra/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino](https://github.com/aan-andiyanaS/VNetra/blob/yolo/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino). Kami menambahkan flag `MPU_MOUNTING_INVERTED` dan membungkus pembacaan sensor dalam fungsi kustom `getMpuEvent()`. Saat diaktifkan, firmware secara matematis membalikkan sumbu Z dan sumbu X (menjaga sistem koordinat kaidah tangan kanan / Right-Handed System) sebelum menyuplai nilainya ke EKF, menyelesaikan masalah ini secara transparan.
 
 ### ✅ [FIXED] Ketahanan Resolusi (Skala VGA vs. QVGA)
 * **Masalah:** Firmware ESP32 memiliki fallback ke resolusi `FRAMESIZE_QVGA` (320x240) jika PSRAM tidak terbaca (resolusi standar adalah `FRAMESIZE_VGA` 640x480). Karena `FormulaUtils.kt` menggunakan koordinat hardcoded asumsi lebar kamera 640px, frame 320px akan menggeser setengah layar kanan ke zona mati permanen.
@@ -64,9 +64,9 @@ if (detections.isNotEmpty()) {
 ### ✅ [REFACTOR] Pembenahan Nama Berkas Fungsional (Menghindari Kebingungan "Formula")
 * **Masalah:** Skema penamaan generik menggunakan istilah 'Formula' (`FormulaUtils`, `FormulaE`, `FormulaH`) memicu kebingungan struktural (*cognitive overhead*) dan menyulitkan pembacaan fungsi asli masing-masing file utilitas.
 * **Solusi:** Menyusun ulang struktur berkas dan penamaan kelas/objek internal agar lebih semantis dan self-documenting:
-  * `FormulaUtils.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt](app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt) (Fungsi centroid & pemetaan arah jam/kolom)
-  * `FormulaE.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt](app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt) (Rata-rata jarak baris dengan kompensasi pitch)
-  * `FormulaH.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt](app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt) (Manajemen flag one-shot & pembungkus TTS engine)
+  * `FormulaUtils.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt](https://github.com/aan-andiyanaS/VNetra/blob/yolo/app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt) (Fungsi centroid & pemetaan arah jam/kolom)
+  * `FormulaE.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt](https://github.com/aan-andiyanaS/VNetra/blob/yolo/app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt) (Rata-rata jarak baris dengan kompensasi pitch)
+  * `FormulaH.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt](https://github.com/aan-andiyanaS/VNetra/blob/yolo/app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt) (Manajemen flag one-shot & pembungkus TTS engine)
   Seluruh deklarasi import dan pemanggilan objek di dalam `CameraStreamActivity.kt` disesuaikan, dan kompilasi proyek berhasil diselesaikan.
 
 ---
