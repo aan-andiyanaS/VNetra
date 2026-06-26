@@ -9,7 +9,7 @@
 ## 1. Latar Belakang & Masalah
 Sebelumnya, sistem VNetra bergantung pada alur monitoring rintangan statis yang sederhana (Tahap 1). Rintangan dideteksi murni dari data jarak raw dari kolom tengah sensor ToF, memicu peringatan Text-to-Speech (TTS) umum dengan kalimat "rintangan". Walaupun pendeteksi objek YOLOv11n sudah berjalan, output-nya baru sebatas di-render secara visual pada UI overlay dan belum terintegrasi dengan alur komputasi sensor jarak.
 
-Untuk mengatasi ini, kami mengimplementasikan **Formula B (Centroid Bounding Box)** untuk memetakan output semantik dari model computer vision dengan data kedalaman sensor ToF. Hal ini memungkinkan sistem untuk menyebutkan *apa* objeknya, *berapa* jaraknya, dan *ke arah mana* posisinya dalam satu alur pipeline yang terpadu.
+Untuk mengatasi ini, kami mengimplementasikan kalkulasi **Centroid Bounding Box** untuk memetakan output semantik dari model computer vision dengan data kedalaman sensor ToF. Hal ini memungkinkan sistem untuk menyebutkan *apa* objeknya, *berapa* jaraknya, dan *ke arah mana* posisinya dalam satu alur pipeline yang terpadu.
 
 ---
 
@@ -24,13 +24,13 @@ Karena pemrosesan frame kamera (`frameCollectJob`) dan pengumpulan data ToF (`to
 
 ### B. Perombakan Loop Pemrosesan ToF (`tofCollectJob`)
 Alih-alih membaca kolom statis tengah, thread ToF sekarang memproses koordinat spasial secara dinamis:
-1. **Ekstraksi Centroid (Formula B):** Menghitung titik tengah horizontal dari setiap objek terdeteksi:
+1. **Ekstraksi Centroid:** Menghitung titik tengah horizontal dari setiap objek terdeteksi:
    $$x_c = \frac{x_{min} + x_{max}}{2}$$
 2. **Penyaringan FoV (Guard Condition):** Memastikan centroid objek berada dalam zona aktif ToF. Jika di luar (FoV ToF lebih sempit secara horizontal dibanding kamera), objek segera diabaikan untuk mencegah miskalkulasi jarak.
-3. **Pemetaan Arah Jam Spasial (Formula C):** Mengonversi koordinat titik tengah `x_c` menjadi arah jam pendengaran (misalnya jam 10, 11, 12, 1, 2).
-4. **Kolom Binning (Formula D):** Memetakan koordinat ruang gambar `x_c` ke kolom sensor ToF yang sesuai ($j \in [0..7]$).
-5. **Kompensasi Kemiringan Kepala & Ekstraksi Jarak (Formula E):** Memanfaatkan sudut pitch kepala ($\theta$) dari IMU MPU6050 untuk menggeser baris pembacaan ToF secara dinamis. Ini menjamin sensor jarak selalu memantau ke depan relatif terhadap cakrawala, bukan menghadap tanah, saat pengguna menunduk.
-6. **TTS Dispatcher (Formula H):** Mengirimkan data semantik objek (`className`), hasil perhitungan jarak, dan arah jam ke TTS engine.
+3. **Pemetaan Arah Jam Spasial:** Mengonversi koordinat titik tengah `x_c` menjadi arah jam pendengaran (misalnya jam 10, 11, 12, 1, 2).
+4. **Kolom Binning:** Memetakan koordinat ruang gambar `x_c` ke kolom sensor ToF yang sesuai ($j \in [0..7]$).
+5. **Kompensasi Kemiringan Kepala & Ekstraksi Jarak:** Memanfaatkan sudut pitch kepala ($\theta$) dari IMU MPU6050 untuk menggeser baris pembacaan ToF secara dinamis. Ini menjamin sensor jarak selalu memantau ke depan relatif terhadap cakrawala, bukan menghadap tanah, saat pengguna menunduk.
+6. **TTS Dispatcher:** Mengirimkan data semantik objek (`className`), hasil perhitungan jarak, dan arah jam ke TTS engine.
 
 ### C. Strategi Cadangan (Fallback Strategy - Failsafe)
 Jika YOLO gagal mendeteksi objek (akibat minim cahaya, motion blur, atau batasan model), sistem otomatis beralih ke monitoring Tahap 1. Ini mencegah sistem membisu saat berada di depan rintangan tak dikenal:
@@ -48,7 +48,7 @@ if (detections.isNotEmpty()) {
 ## 3. Perbaikan Teknis & Optimasi
 
 ### ✅ [FIXED] Koreksi Fisik Sensor MPU6050 Terbalik
-* **Masalah:** Sensor MPU6050 dipasang terbalik secara fisik pada kacamata (komponen menghadap ke tanah). Hal ini membalikkan vektor sumbu Z, sehingga perhitungan EKF (Extended Kalman Filter) dan kompensasi pitch Formula E menghasilkan offset arah yang salah.
+* **Masalah:** Sensor MPU6050 dipasang terbalik secara fisik pada kacamata (komponen menghadap ke tanah). Hal ini membalikkan vektor sumbu Z, sehingga perhitungan EKF (Extended Kalman Filter) dan kompensasi pitch menghasilkan offset arah yang salah.
 * **Solusi:** Alih-alih merombak sirkuit fisik, kami memodifikasi kode firmware pada [VNetra/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino](firmware-vnetra/firmware-vnetra/firmware-vnetra.ino). Kami menambahkan flag `MPU_MOUNTING_INVERTED` dan membungkus pembacaan sensor dalam fungsi kustom `getMpuEvent()`. Saat diaktifkan, firmware secara matematis membalikkan sumbu Z dan sumbu X (menjaga sistem koordinat kaidah tangan kanan / Right-Handed System) sebelum menyuplai nilainya ke EKF, menyelesaikan masalah ini secara transparan.
 
 ### ✅ [FIXED] Ketahanan Resolusi (Skala VGA vs. QVGA)
