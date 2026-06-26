@@ -1,7 +1,7 @@
 package com.airi.vnetra.util
 
 /**
- * FormulaUtils — Utilitas pipeline Formula B, C, D (v9.4)
+ * SpatialMappingUtils — Utilitas pipeline fusi sensor YOLO & ToF (v9.4)
  *
  * Formula B: Centroid bounding box (sumbu X)
  *   x_c = (x_min + x_max) / 2
@@ -15,7 +15,7 @@ package com.airi.vnetra.util
  * Semua fungsi bersifat pure (tidak ada state internal).
  * Konstanta mengacu ke Konstanta Sistem formula-matematis-v9.4.md.
  */
-object FormulaUtils {
+object SpatialMappingUtils {
 
     // ── Konstanta Sistem — disesuaikan dengan layout activity_camera_stream.xml ──
     //

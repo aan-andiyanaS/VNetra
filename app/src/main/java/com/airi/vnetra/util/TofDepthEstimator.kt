@@ -3,7 +3,7 @@ package com.airi.vnetra.util
 import kotlin.math.roundToInt
 
 /**
- * FormulaE — Estimasi jarak objek dari sensor ToF (v9.4)
+ * TofDepthEstimator — Estimasi jarak objek dari sensor ToF (v9.4)
  *
  * Alur (per objek per frame):
  *   E.0  Filter sentinel: z ∈ [ε_noise, d_max] → valid; 0, -1, 65535 → invalid
@@ -18,7 +18,7 @@ import kotlin.math.roundToInt
  *
  * Referensi: formula-matematis-v9.4.md §E
  */
-object FormulaE {
+object TofDepthEstimator {
 
     // Konstanta Sistem
     const val D_MAX     = 4000   // mm — jangkauan maksimum sensor

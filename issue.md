@@ -1,61 +1,76 @@
-# Pembaruan Utama: Optimasi Pipeline Dataset & Tuning Model VNetra
+# Technical Release Notes: YOLOv11 & ToF VL53L5CX Sensor Fusion (Phase 2)
 
-Dokumen ini mencatat serangkaian pembaruan krusial pada pipeline proyek VNetra. Pembaruan ini difokuskan pada penyempurnaan komposisi kelas deteksi, modifikasi logika penggabungan (*merging*) dataset agar lebih presisi dan anti-bentrok, serta penyesuaian parameter augmentasi untuk mendongkrak akurasi model di dunia nyata.
-
-Semua perubahan ini telah diintegrasikan sepenuhnya ke dalam lingkungan *training* utama (`train_vnetra_yolo11n_colab.ipynb` dan `train_vnetra_yolo11n_kaggle.ipynb`).
+**Date:** June 26, 2026  
+**Status:** `RELEASED`  
+**Scope:** Transitioning from static obstacle avoidance (Phase 1) to dynamic, object-based spatial mapping (Phase 2).
 
 ---
 
-## 1. Modifikasi Logika Fungsi `merge_dataset`
-Fungsi `merge_dataset` dirombak agar mampu menangani pemotongan dataset (capping) yang lebih fleksibel. 
+## 1. Problem Statement & Context
+Previously, the VNetra system relied on a naive static obstacle monitoring pipeline (Phase 1). Obstacles were detected purely based on raw distance data from the center columns of the ToF sensor, triggering a generic "rintangan" (obstacle) Text-to-Speech (TTS) alert. Although the YOLOv11n object detector was running, its outputs were only rendered visually on the UI overlay and not integrated with the rangefinder pipeline.
 
-- **Penambahan Parameter Baru (`max_samples_per_class`)**:  
-  Sebelumnya, batas sampel hanya bisa diatur secara global (`max_instances_per_class_total`). Sekarang fungsi ini menerima *dictionary* yang memungkinkan pembatasan spesifik untuk masing-masing kelas.
-- **Pemisahan Konteks `instance_counter`**:  
-  Variabel penghitung sampel sekarang disalurkan dari luar fungsi. Hal ini mencegah bentrok (catastrophic overlap) ketika menggabungkan dua dataset COCO dari sumber yang berbeda (misalnya COCO dari FiftyOne dan COCO dari Roboflow).
-- **Pengembalian Variabel Kuota FiftyOne**:  
-  Variabel kuota kelas utama untuk dataset COCO bawaan (FiftyOne) dikembalikan ke angka aslinya:
-  ```python
-  person_cap = 12500 # <-- Variabel khusus kelas person
-  car_cap = 4000     # <-- Variabel khusus kelas car
-  ```
+To solve this, we implemented **Formula B (Centroid Bounding Box)** to map the semantic output of the computer vision model with the depth data of the ToF sensor. This enables the system to tell *what* the object is, *how far* it is, and *which direction* it lies in a single, unified pipeline.
 
-## 2. Integrasi Tambahan COCO dari Roboflow
-Sebuah blok baru ditambahkan khusus untuk menyerap dataset ekstra (COCO versi Roboflow) guna memperkaya variasi *instance* dari 3 kelas krusial, tanpa mengganggu batas dataset COCO FiftyOne.
+---
 
-- Target Kelas: `motorcycle`, `bicycle`, dan `bench`
-- Batasan *Strict Cap*: Masing-masing kelas ini dibatasi ketat agar hanya mengambil **maksimal 1.500 tambahan sampel**.
-- Cuplikan Implementasi:
-  ```python
-  coco_rf_counter = {} # Counter terpisah
-  coco_rf_mapping = {"motorcycle": "motorcycle", "bicycle": "bicycle", "bench": "bench"}
-  coco_rf_limits = {"motorcycle": 1500, "bicycle": 1500, "bench": 1500}
-  
-  merge_dataset(dataset_coco_rf.location, coco_rf_mapping, max_samples_per_class=coco_rf_limits, instance_counter=coco_rf_counter)
-  ```
+## 2. Architecture & Implementation Details
 
-## 3. Penghapusan Kelas `pothole` dan `train`
-Untuk meringankan beban deteksi dan lebih memfokuskan atensi model pada hal-hal yang esensial bagi tunanetra, dua buah kelas dihapus secara permanen dari daftar deteksi model.
+All modifications were applied to [VNetra/app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt](app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt). The implementation details are outlined below:
 
-- **Kelas Pothole (Jalan Berlubang)**: 
-  - Baris *download* dataset dari Roboflow dimatikan (`# dataset_pothole = rf.workspace...`).
-  - Baris eksekusi penggabungan (pemanggilan `merge_dataset` untuk *pothole*) dihilangkan.
-  - Nama kelas `'pothole'` dihapus dari *array* `master_classes`.
-- **Kelas Train (Kereta Api)**: 
-  - Nama kelas `'train'` dicabut dari *array* `master_classes`.
-  - Pada pemetaan dictionary dataset bawaan (`custom_coco`), kunci `"train": "train"` dihapus. Ini memaksa fungsi untuk mengabaikan segala *bounding box* kereta dari data COCO.
-- **Efek pada Model**: Total jumlah kelas yang semula ada 16, kini secara dinamis tercatat **hanya 14 kelas utama** (`nc=14`) di dalam `data.yaml`.
+### A. Cross-Thread Pipeline Sync
+Since the camera frame processing (`frameCollectJob`) and the ToF data collection (`tofCollectJob`) run on different threads and variable sample rates (~15Hz camera vs ~10Hz ToF), we established a thread-safe bridge:
+* Declared a `@Volatile private var latestDetections: List<DetectionResult>` state.
+* The camera pipeline publishes the latest inference results into this state immediately after the YOLO model finishes processing.
 
-## 4. Penyesuaian Hyperparameter Augmentasi YOLO
-Augmentasi bawaan dari kode sebelumnya sangatlah ekstrem (dimaksudkan untuk simulasi noise kamera OV2640), tetapi disinyalir terlalu merusak bentuk asli objek sehingga memperburuk akurasi. Parameter tersebut kini dihaluskan agar menjadi **lebih natural**.
+### B. Refactoring the ToF Processing Loop (`tofCollectJob`)
+Instead of reading static columns, the ToF thread now processes spatial coordinates dynamically:
+1. **Centroid Extraction (Formula B):** Calculates the horizontal center of each detected object:
+   $$x_c = \frac{x_{min} + x_{max}}{2}$$
+2. **FoV Filtering (Guard Condition):** Checks if the object's centroid falls inside the ToF active zone. If it's outside (ToF has a narrower horizontal FoV compared to the camera), it gets ignored immediately to prevent false depth calculations.
+3. **Auditory Clock Mapping (Formula C):** Converts the pixel centroid `x_c` into an auditory clock direction (e.g., 10, 11, 12, 1, 2 o'clock).
+4. **Column Binning (Formula D):** Maps the camera-space coordinate `x_c` to the corresponding ToF sensor column ($j \in [0..7]$).
+5. **Head-Tilt Compensation & Depth Extraction (Formula E):** Utilizes the head pitch angle ($\theta$) from the MPU6050 IMU to dynamically shift the ToF rows. This ensures the rangefinder is always looking forward relative to the horizon, not the ground, even when the user is looking down.
+6. **TTS Dispatcher (Formula H):** Feeds the semantically labeled object (`className`), calculated distance, and clock direction into the TTS engine.
 
-- `degrees`: Diturunkan dari **15.0 menjadi 10.0** (Miring wajar, tanpa membahayakan objek tiang atau pejalan kaki).
-- `scale`: Dinaikkan dari **0.3 menjadi 0.5** (Kembali ke default YOLO agar *zoom-in/out* tidak memotong objek secara brutal).
-- `hsv_s`: Saturation diturunkan dari **0.9 menjadi 0.5** (Warna tidak terlalu pucat/kontras secara ekstrem, garis marka masih jelas).
-- `hsv_v`: Value/Brightness diturunkan dari **0.8 menjadi 0.4** (Simulasi terang redup diturunkan ke level menengah).
-- `erasing`: Efek penghapusan sebagian gambar acak diturunkan tajam dari **0.3 menjadi 0.1** (Agar area penting seperti *Tactile Paving* tidak tertutup sepenuhnya oleh balok hitam augmentasi).
+### C. Fallback Strategy (Failsafe)
+If YOLO fails to detect any objects (due to poor lighting, motion blur, or model limitations), the system automatically falls back to Phase 1 monitoring. This prevents the system from going silent in front of unknown barriers:
+```kotlin
+if (detections.isNotEmpty()) {
+    // Phase 2: Dynamic Semantics + Distance + Direction
+} else {
+    // Phase 1 (Fallback): Static center ToF columns monitoring
+    // Alerts the user of a generic "rintangan" at 12 o'clock
+}
+```
 
-## 5. Perubahan Lain-Lain (Minor Fixes)
-- Memperbaiki `max_samples` untuk pemanggilan dataset *Crosswalk* menjadi `900`.
-- Menghapus pembatasan `max_samples=3000` dari dataset tangga `dataset_stairs2`.
-- Menambahkan ikon peringatan `🚨` pada *print statement* darurat untuk indikator pengingat sisa waktu (kuota runtime) sesi Kaggle/Colab.
+---
+
+## 3. Engineering Fixes & Optimization
+
+### ✅ [FIXED] MPU6050 Inverted Hardware Correction
+* **Issue:** The MPU6050 sensor was physically mounted upside down on the glasses (components facing downwards). This inverted the Z-axis vector, causing the EKF (Extended Kalman Filter) and Formula E pitch compensation to calculate offsets in the wrong direction.
+* **Resolution:** Instead of rebuilding the hardware, we refactored the firmware in [VNetra/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino](firmware-vnetra/firmware-vnetra/firmware-vnetra.ino). We introduced an `MPU_MOUNTING_INVERTED` flag and wrapped the sensor reads in a custom `getMpuEvent()` function. When activated, the firmware mathematically negates the Z-axis and X-axis (maintaining a Right-Handed coordinate system) before feeding the values into the EKF, resolving the issue transparently.
+
+### ✅ [FIXED] Resolution Resiliency (VGA vs. QVGA scaling)
+* **Issue:** The ESP32 firmware falls back to `FRAMESIZE_QVGA` (320x240) if PSRAM is disabled or missing (standard is `FRAMESIZE_VGA` 640x480). Because `FormulaUtils.kt` hardcodes mapping coordinates assuming a 640px camera width, a 320px frame would shift the right half of the screen into a permanent dead zone.
+* **Resolution:** Added a volatile `latestFrameWidth` tracker in the Android app. The raw centroid `xcRaw` is now scaled dynamically to the virtual 640px space before running mapping formulas:
+  $$x_c = x_{c\_raw} \times \frac{640}{W_{frame}}$$
+  This decouples the fusion algorithm from the camera hardware output resolution.
+
+### ✅ [OPTIMIZED] TTS Natural Distance & Speed Tuning
+* **Distance Conversion:** Natively, the VL53L5CX measures depth in millimeters (mm). Hearing *"seribu seratus milimeter"* (1100 mm) is counterintuitive and slow to digest. The pipeline now converts values to centimeters by dividing the raw depth by 10 (`dObj / 10`), announcing a cleaner *"110 sentimeter"*.
+* **Speed Acceleration:** Increased the TTS speech rate from `1.05f` to **`1.3f`** in `TtsAlertManager.kt`. This 30% speedup makes the voice notifications noticeably more prompt and responsive during movement.
+
+### ✅ [REFACTOR] Functional Renaming (Removing "Formula" Confusion)
+* **Issue:** The generic "Formula" naming convention (`FormulaUtils`, `FormulaE`, `FormulaH`) introduced cognitive overhead and made it hard to grasp the underlying functional purpose of each helper file.
+* **Resolution:** Reorganized the file structure and internal class/object names to be semantic and self-documenting:
+  * `FormulaUtils.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt](app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt) (Centroid & clock/column mapping)
+  * `FormulaE.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt](app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt) (Row depth averaging with pitch offset)
+  * `FormulaH.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt](app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt) (One-shot alert flags & TTS engine wrapper)
+  All imports and calls inside `CameraStreamActivity.kt` were refactored accordingly, and the project build compiles successfully.
+
+---
+
+## 4. Next Action Items
+- [ ] Conduct field tests with fast-moving targets to evaluate latency sync between YOLO detections and TTS output.
+- [ ] Calibrate the threshold value ($D_{W0}$) for TTS triggers under different walking speeds.

@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * FormulaH — Peringatan Objek Statis One-Shot (v9.4)
+ * TtsAlertManager — Peringatan Objek Statis One-Shot (v9.4)
  *
  * Logika one-shot per tracking ID:
  *   - Kondisi trigger: d_obj < D_W0 (1000 mm) DAN flag[id] == false
@@ -26,10 +26,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * Referensi: formula-matematis-v9.4.md §H
  */
-class FormulaH(private val context: Context) {
+class TtsAlertManager(private val context: Context) {
 
     companion object {
-        private const val TAG = "FormulaH"
+        private const val TAG = "TtsAlertManager"
 
         // Konstanta Sistem (§H + §G)
         const val D_W0      = 1000  // mm — threshold jarak aman minimum
@@ -60,7 +60,7 @@ class FormulaH(private val context: Context) {
                     tts?.setLanguage(Locale.getDefault())
                     Log.w(TAG, "TTS: Bahasa Indonesia tidak tersedia, fallback ke ${Locale.getDefault()}")
                 }
-                tts?.setSpeechRate(1.05f)  // sedikit lebih cepat dari normal untuk info navigasi
+                tts?.setSpeechRate(1.3f)   // Dipercepat menjadi 1.3f agar penyampaian instruksi lebih responsif
                 ttsReady.set(true)
                 Log.d(TAG, "TTS engine siap")
             } else {
@@ -93,7 +93,7 @@ class FormulaH(private val context: Context) {
             dObj < D_W0 && !alreadyAlerted -> {
                 // Kondisi: masuk zona bahaya, belum pernah diperingatkan → one-shot
                 alertFlags[trackingId] = true
-                val dirText  = FormulaUtils.clockDirectionToTts(clockDirection)
+                val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
                 val distCm   = dObj / 10  // mm → cm (lebih natural untuk TTS)
                 speak("$objectLabel, $distCm sentimeter, $dirText")
                 Log.d(TAG, "One-shot: id=$trackingId d=${dObj}mm dir=$clockDirection")

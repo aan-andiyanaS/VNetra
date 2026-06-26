@@ -96,6 +96,40 @@ using namespace BLA;
 SemaphoreHandle_t i2c_mutex;
 SemaphoreHandle_t ws_mutex;   // Proteksi ws.binaryAll() dari multiple FreeRTOS tasks
 Adafruit_MPU6050 mpu;
+
+// ======== CONFIG ORIENTASI MPU6050 ========
+// Aktifkan MPU_MOUNTING_INVERTED jika komponen MPU6050 menghadap ke BAWAH (terbalik)
+#define MPU_MOUNTING_INVERTED 
+
+#ifdef MPU_MOUNTING_INVERTED
+  // Secara bawaan diasumsikan pembalikan 180 derajat pada sumbu putar longitudinal (roll/Y)
+  // sehingga sumbu Z dibalik (Z -> -Z) dan sumbu X dibalik (X -> -X) agar tetap Right-Handed System.
+  // Jika pembalikan terjadi pada sumbu lateral (pitch/X), matikan define MPU_FLIP_X_AXIS agar sumbu Y yang dibalik.
+  #define MPU_FLIP_X_AXIS
+#endif
+
+void getMpuEvent(sensors_event_t *a, sensors_event_t *g, sensors_event_t *temp) {
+    mpu.getEvent(a, g, temp);
+#ifdef MPU_MOUNTING_INVERTED
+    if (a != NULL) {
+        a->acceleration.z = -a->acceleration.z;
+#ifdef MPU_FLIP_X_AXIS
+        a->acceleration.x = -a->acceleration.x;
+#else
+        a->acceleration.y = -a->acceleration.y;
+#endif
+    }
+    if (g != NULL) {
+        g->gyro.z = -g->gyro.z;
+#ifdef MPU_FLIP_X_AXIS
+        g->gyro.x = -g->gyro.x;
+#else
+        g->gyro.y = -g->gyro.y;
+#endif
+    }
+#endif
+}
+
 SparkFun_VL53L5CX myImager;
 VL53L5CX_ResultsData measurementData;
 
@@ -840,7 +874,7 @@ void calibrateAccelBias(int n_samples = 200) {
     for (int i = 0; i < n_samples; i++) {
         sensors_event_t a, g, temp;
         if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
-            mpu.getEvent(&a, &g, &temp);
+            getMpuEvent(&a, &g, &temp);
             xSemaphoreGive(i2c_mutex);
         }
         sum[0] += a.acceleration.x;
@@ -890,7 +924,7 @@ void IMU_Task(void *pvParameters) {
 
     sensors_event_t a, g, temp;
     if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
-      mpu.getEvent(&a, &g, &temp);
+      getMpuEvent(&a, &g, &temp);
       xSemaphoreGive(i2c_mutex);
     }
 
@@ -1470,7 +1504,7 @@ void setup() {
         mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
         calibrateAccelBias();
         sensors_event_t a, g, temp;
-        mpu.getEvent(&a, &g, &temp);
+        getMpuEvent(&a, &g, &temp);
         initEKFState(a.acceleration.x - accel_bias[0], a.acceleration.y - accel_bias[1], a.acceleration.z - accel_bias[2]);
         last_ts_esp = millis();
         xTaskCreatePinnedToCore(IMU_Task, "IMU_Task", 12288, NULL, 2, &EKF_TaskHandle, 1);

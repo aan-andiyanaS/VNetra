@@ -27,9 +27,9 @@ import androidx.core.view.GestureDetectorCompat
 import androidx.lifecycle.lifecycleScope
 import com.airi.vnetra.databinding.ActivityCameraStreamBinding
 import com.airi.vnetra.service.CameraStreamService
-import com.airi.vnetra.util.FormulaE
-import com.airi.vnetra.util.FormulaH
-import com.airi.vnetra.util.FormulaUtils
+import com.airi.vnetra.util.TofDepthEstimator
+import com.airi.vnetra.util.TtsAlertManager
+import com.airi.vnetra.util.SpatialMappingUtils
 import com.airi.vnetra.util.SessionManager
 import com.airi.vnetra.util.TerrainDetector
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +37,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.airi.vnetra.model.YoloDetector
+import com.airi.vnetra.model.DetectionResult
 import com.airi.vnetra.model.ModelStatus
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -117,8 +118,8 @@ class CameraStreamActivity : AppCompatActivity() {
     private var latencyMonitorJob: Job? = null
     private var pingWebsocketJob: Job? = null
 
-    // ── Formula H — One-shot alert + TTS Engine (P3.3) ────────────────
-    private lateinit var formulaH: FormulaH
+    // ── TTS Alert Manager (P3.3) ────────────────
+    private lateinit var ttsAlertManager: TtsAlertManager
 
     // ── Formula J — Terrain Detector (P6) ───────────────────────
     private val terrainDetector = TerrainDetector()
@@ -145,6 +146,8 @@ class CameraStreamActivity : AppCompatActivity() {
 
     // AI Detector
     private var yoloDetector: YoloDetector? = null
+    @Volatile private var latestDetections: List<DetectionResult> = emptyList()
+    @Volatile private var latestFrameWidth: Int = 640
     private var isInferencing = false
 
     private val exitReceiver = object : android.content.BroadcastReceiver() {
@@ -248,10 +251,10 @@ class CameraStreamActivity : AppCompatActivity() {
         requestNotificationPermission()
         requestBatteryOptimizationBypass()
 
-        // P3.3: Inisialisasi FormulaH + TTS Engine
-        // Dipanggil di onCreate agar TTS punya cukup waktu init sebelum sensor aktif
-        formulaH = FormulaH(this)
-        formulaH.initTts()
+        // P3.3: Inisialisasi TtsAlertManager + TTS Engine
+        // Dipanggil di onCreate agar TTS punya cukup waktu 
+        ttsAlertManager = TtsAlertManager(this)
+        ttsAlertManager.initTts()
 
         // Init YOLO Detector (Secara default akan mencoba GPU/NPU karena masalah library sudah diperbaiki)
         yoloDetector = YoloDetector(this)
@@ -288,7 +291,7 @@ class CameraStreamActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         // P3.3: Bebaskan resource TTS — mencegah leak AudioTrack di background
-        if (::formulaH.isInitialized) formulaH.shutdown()
+        if (::ttsAlertManager.isInitialized) ttsAlertManager.shutdown()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         yoloDetector?.close()
     }
@@ -478,6 +481,7 @@ class CameraStreamActivity : AppCompatActivity() {
                     pingCamera = System.currentTimeMillis() - startTime
 
                     if (bitmap == null) return@collect
+                    latestFrameWidth = bitmap.width
 
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring) {
@@ -493,6 +497,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                         try {
                                             // 1. Lakukan proses deteksi di background
                                             val results = detector.detect(bitmap)
+                                            latestDetections = results
                                             
                                             // 2. Jika berhasil, update UI di Main Thread
                                             withContext(Dispatchers.Main) {
@@ -675,28 +680,64 @@ class CameraStreamActivity : AppCompatActivity() {
                     val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
                     val thetaDeg = rawTheta - 20f
 
-                    // Fase 2: Formula E & H
                     val startFormula = System.currentTimeMillis()
-                    if (::formulaH.isInitialized) {
-                        for (col in FormulaUtils.centerColumns(currentTofMode)) {
-                            val dObj = FormulaE.calculate(
-                                tofData    = tofData,
-                                j          = col,
-                                thetaDeg   = thetaDeg,
-                                resolution = currentTofMode
-                            )
-                            formulaH.process(
-                                trackingId    = col,   // proxy ID = indeks kolom
-                                dObj          = dObj,
-                                clockDirection = 12    // kolom tengah = selalu JAM 12
-                            )
+                    if (::ttsAlertManager.isInitialized) {
+                        val detections = latestDetections
+                        if (detections.isNotEmpty()) {
+                            for (det in detections) {
+                                // Centroid Bounding Box (Raw)
+                                val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
+                                
+                                // Normalisasikan xc ke koordinat virtual 640px (W_CAM) agar kompatibel dengan konstanta fisik
+                                val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / latestFrameWidth.toFloat())
+                                
+                                // Abaikan jika objek di luar jangkauan horizontal sensor ToF
+                                if (!SpatialMappingUtils.isInTofZone(xc)) continue
+                                
+                                // Arah Jam
+                                val arahJam = SpatialMappingUtils.mapToClockDirection(xc)
+                                
+                                // Pemetaan ke Kolom ToF
+                                val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
+                                
+                                // Kalkulasi Jarak Geometri
+                                val dObj = TofDepthEstimator.calculate(
+                                    tofData    = tofData,
+                                    j          = j,
+                                    thetaDeg   = thetaDeg,
+                                    resolution = currentTofMode
+                                )
+                                
+                                // Peringatan Objek (Tahap 2 - Dengan YOLO)
+                                ttsAlertManager.process(
+                                    trackingId     = det.classId,
+                                    dObj           = dObj,
+                                    clockDirection = arahJam,
+                                    objectLabel    = det.className
+                                )
+                            }
+                        } else {
+                            // Tahap 1 (Fallback statis jika tidak ada objek terdeteksi)
+                            for (col in SpatialMappingUtils.centerColumns(currentTofMode)) {
+                                val dObj = TofDepthEstimator.calculate(
+                                    tofData    = tofData,
+                                    j          = col,
+                                    thetaDeg   = thetaDeg,
+                                    resolution = currentTofMode
+                                )
+                                ttsAlertManager.process(
+                                    trackingId     = col,   // proxy ID = indeks kolom
+                                    dObj           = dObj,
+                                    clockDirection = 12     // kolom tengah = selalu JAM 12
+                                )
+                            }
                         }
                     }
                     pingFormulaEH = System.currentTimeMillis() - startFormula
 
                     // Fase 3: TerrainDetector
                     val startTerrain = System.currentTimeMillis()
-                    if (::formulaH.isInitialized) {
+                    if (::ttsAlertManager.isInitialized) {
                         val expectedSize = currentTofMode * currentTofMode
                         if (tofData.size == expectedSize) {
                             val terrainResult = terrainDetector.process(
@@ -737,13 +778,13 @@ class CameraStreamActivity : AppCompatActivity() {
                                     }
 
                                     if (msg.isNotEmpty()) {
-                                        if (isHigh) formulaH.speak(msg)
-                                        else formulaH.speakAdd(msg)
+                                        if (isHigh) ttsAlertManager.speak(msg)
+                                        else ttsAlertManager.speakAdd(msg)
                                     }
                                 }
                             }
                         }
-                    } // end if (formulaH.isInitialized)
+                    } // end if (ttsAlertManager.isInitialized)
                     pingTerrain = System.currentTimeMillis() - startTerrain
 
                     pingTotalTof = pingTofSmooth + pingFormulaEH + pingTerrain
@@ -940,9 +981,9 @@ class CameraStreamActivity : AppCompatActivity() {
     private fun clearStaleSensorDisplay() {
         if (isDestroyed || isFinishing) return
         // P3.3 + P6.3: Reset state sensor dan formula saat disconnect
-        if (::formulaH.isInitialized) {
-            formulaH.stopSpeaking()    // hentikan TTS yang mungkin sedang berjalan
-            formulaH.resetAllFlags()   // siap diperingatkan lagi saat reconnect
+        if (::ttsAlertManager.isInitialized) {
+            ttsAlertManager.stopSpeaking()    // hentikan TTS yang mungkin sedang berjalan
+            ttsAlertManager.resetAllFlags()   // siap diperingatkan lagi saat reconnect
         }
         lastTerrainAlertTime = 0L      // reset cooldown terrain
 
