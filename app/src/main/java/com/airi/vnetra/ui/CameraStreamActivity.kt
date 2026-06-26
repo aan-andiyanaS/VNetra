@@ -499,6 +499,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                             // 1. Lakukan proses deteksi di background
                                             val results = detector.detect(bitmap)
                                             latestDetections = results
+                                            triggerInstantYoloTts(results)
                                             
                                             // 2. Jika berhasil, update UI di Main Thread
                                             withContext(Dispatchers.Main) {
@@ -837,6 +838,39 @@ class CameraStreamActivity : AppCompatActivity() {
             }
             frameCount     = 0
             fpsWindowStart = now
+        }
+    }
+
+    /**
+     * Memproses peringatan TTS untuk YOLO secara instan segera setelah inferensi AI selesai.
+     * Hal ini memangkas delay ToF Loop (100ms) untuk objek YOLO.
+     */
+    private fun triggerInstantYoloTts(detections: List<DetectionResult>) {
+        if (detections.isEmpty() || !::ttsAlertManager.isInitialized) return
+        val tofData = latestTofData ?: return
+        val imuSnap = latestImuData
+        val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
+        val thetaDeg = rawTheta - 20f
+        val frameWidth = latestFrameWidth
+
+        for (det in detections) {
+            val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
+            val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / frameWidth.toFloat())
+            if (!SpatialMappingUtils.isInTofZone(xc)) continue
+            val arahJam = SpatialMappingUtils.mapToClockDirection(xc)
+            val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
+            val dObj = TofDepthEstimator.calculate(
+                tofData    = tofData,
+                j          = j,
+                thetaDeg   = thetaDeg,
+                resolution = currentTofMode
+            )
+            ttsAlertManager.process(
+                trackingId     = det.classId,
+                dObj           = dObj,
+                clockDirection = arahJam,
+                objectLabel    = det.className
+            )
         }
     }
 
