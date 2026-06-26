@@ -1,75 +1,42 @@
-# Catatan Rilis Teknis: Fusi Sensor YOLOv11 & VL53L5CX ToF (Tahap 2)
+# Pembaruan Minor: Penghapusan Kelas 'Bench' & Sinkronisasi Aplikasi (Optimasi Kapasitas YOLOv11n)
 
-**Tanggal:** 26 Juni 2026  
-**Status:** `RELEASED`  
-**Cakupan:** Transisi dari sistem penghindar rintangan statis (Tahap 1) ke pemetaan spasial dinamis berbasis objek (Tahap 2).
+Berdasarkan hasil evaluasi *training* terbaru, dokumen ini merangkum langkah optimasi lanjutan yang dilakukan pada proyek VNetra. Fokus utama pada iterasi ini adalah penghapusan kelas `bench` secara menyeluruh dari *pipeline* data hingga ke level aplikasi klien Android.
 
 ---
 
-## 1. Latar Belakang & Masalah
-Sebelumnya, sistem VNetra bergantung pada alur monitoring rintangan statis yang sederhana (Tahap 1). Rintangan dideteksi murni dari data jarak raw dari kolom tengah sensor ToF, memicu peringatan Text-to-Speech (TTS) umum dengan kalimat "rintangan". Walaupun pendeteksi objek YOLOv11n sudah berjalan, output-nya baru sebatas di-render secara visual pada UI overlay dan belum terintegrasi dengan alur komputasi sensor jarak.
+## 1. Latar Belakang & Analisis Hasil Evaluasi
 
-Untuk mengatasi ini, kami mengimplementasikan kalkulasi **Centroid Bounding Box** untuk memetakan output semantik dari model computer vision dengan data kedalaman sensor ToF. Hal ini memungkinkan sistem untuk menyebutkan *apa* objeknya, *berapa* jaraknya, dan *ke arah mana* posisinya dalam satu alur pipeline yang terpadu.
+Dari log validasi model YOLOv11n sebelumnya, terlihat jelas fenomena **limitasi kapasitas parameter**:
+- Kelas dengan jumlah data dominan seperti `person` (19k *instances*) hanya mencapai mAP50 **0.603**.
+- Kelas esensial untuk keselamatan jalan seperti `bicycle` (0.456) dan `motorcycle` (0.628) masih *underperforming* karena model kehabisan kapasitas (*representational bottleneck*) akibat noise latar belakang dataset COCO.
+- Kelas `bench` memiliki performa yang sangat buruk (**0.468 mAP50**). Bagi tunanetra, bangku bukanlah objek dinamis yang mengancam nyawa. Memaksa model *nano* (2,6M parameter) untuk mempelajari variasi bentuk bangku hanya membuang kapasitas memori yang seharusnya bisa dipakai untuk objek berbahaya.
 
----
+Atas dasar ini, diputuskan bahwa kelas `bench` dihapus agar parameter model bisa difokuskan ulang ke objek kendaraan (*motorcycle/bicycle*) dan fasilitas tunanetra.
 
-## 2. Detail Arsitektur & Implementasi
+## 2. Pembersihan di Notebooks (Colab & Kaggle)
 
-Seluruh modifikasi diterapkan pada berkas [VNetra/app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt](https://github.com/aan-andiyanaS/VNetra/blob/yolo/app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt). Detail implementasinya adalah sebagai berikut:
+Berkas *training* (`train_vnetra_yolo11n_colab.ipynb` & `train_vnetra_yolo11n_kaggle.ipynb`) telah dimodifikasi agar bersih dari ketergantungan terhadap kelas `bench`.
 
-### A. Sinkronisasi Alur Lintas-Thread (Cross-Thread Pipeline Sync)
-Karena pemrosesan frame kamera (`frameCollectJob`) dan pengumpulan data ToF (`tofCollectJob`) berjalan pada thread terpisah dengan sample rate yang berbeda (~15Hz kamera vs ~10Hz ToF), kami membangun jembatan thread-safe:
-* Mendeklarasikan state `@Volatile private var latestDetections: List<DetectionResult>`.
-* Pipeline kamera memublikasikan hasil inferensi terbaru ke dalam state ini segera setelah proses deteksi YOLO selesai.
+- **Penghapusan Dataset Kustom**: Baris kode yang bertugas mengunduh dataset khusus bangku dari Roboflow (`dataset_bench1`, `dataset_bench2`, `dataset_bench3`) dan pemanggilan `merge_dynamic` untuk ketiganya telah dihilangkan.
+- **Pembaruan Konfigurasi `merge_dataset`**: Konfigurasi COCO dari Roboflow sekarang murni hanya mengekstrak kelas kendaraan roda dua, diubah menjadi:
+  ```python
+  coco_rf_mapping = {"motorcycle": "motorcycle", "bicycle": "bicycle"}
+  coco_rf_limits = {"motorcycle": 1500, "bicycle": 1500}
+  ```
+- **Pembaruan Susunan Kelas Dinamis**: Kata `'bench'` telah dicabut dari *array* `master_classes`. Skrip *generator* file `data.yaml` langsung menyesuaikan pergeseran jumlah dan nama kelas tanpa menyebabkan *error*.
+- Perbaikan *markdown/comment* terkait agar dokumentasi *notebook* tetap rapi dan relevan.
 
-### B. Perombakan Loop Pemrosesan ToF (`tofCollectJob`)
-Alih-alih membaca kolom statis tengah, thread ToF sekarang memproses koordinat spasial secara dinamis:
-1. **Centroid Extraction (Ekstraksi Centroid):** Menghitung titik tengah horizontal dari setiap objek terdeteksi:
-   $$x_c = \frac{x_{min} + x_{max}}{2}$$
-2. **FoV Filtering (Penyaringan FoV):** Memastikan centroid objek berada dalam zona aktif ToF. Jika di luar (FoV ToF lebih sempit secara horizontal dibanding kamera), objek segera diabaikan untuk mencegah miskalkulasi jarak.
-3. **Spatial Clock Direction Mapping (Pemetaan Arah Jam Spasial):** Mengonversi koordinat titik tengah `x_c` menjadi arah jam pendengaran (misalnya jam 10, 11, 12, 1, 2).
-4. **Column Binning (Pemetaan Kolom):** Memetakan koordinat ruang gambar `x_c` ke kolom sensor ToF yang sesuai secara dinamis (misal $j \in [0..7]$ untuk 8x8, atau $j \in [0..3]$ untuk 4x4).
-5. **Head Tilt Compensation & Depth Extraction (Kompensasi Kemiringan Kepala & Ekstraksi Jarak):** Memanfaatkan sudut pitch kepala ($\theta$) dari IMU MPU6050 untuk menggeser baris pembacaan ToF secara dinamis. Ini menjamin sensor jarak selalu memantau ke depan relatif terhadap cakrawala, bukan menghadap tanah, saat pengguna menunduk.
-6. **TTS Dispatcher (Penyalur Pesan Suara TTS):** Mengirimkan data semantik objek (`className`), hasil perhitungan jarak, dan arah jam ke TTS engine.
+## 3. Sinkronisasi Kode Aplikasi Android
 
-### C. Strategi Cadangan Tanpa YOLO (Fallback Strategy)
-Jika YOLO gagal mendeteksi objek (akibat minim cahaya atau batasan model), sistem akan memeriksa apakah ToF mendeteksi tembok di depannya secara dinamis. Peringatan suara hanya akan aktif jika hambatan tersebut terkonfirmasi berupa tembok datar luas, sedangkan rintangan kecil tak dikenal lainnya akan diabaikan (senyap):
-```kotlin
-if (wallDetected) {
-    // Tembok terdeteksi di depan: Peringatkan "tembok" di arah jam 12
-} else {
-    // Senyap (tidak mengeluarkan suara rintangan statis)
-}
-```
+Perubahan struktur deteksi wajib diiringi dengan penyesuaian kode pada klien (*inference parser*) Android, jika tidak akan timbul *IndexOutOfBoundsException* atau nama kelas yang tertukar.
+
+- **Berkas `YoloDetector.kt`**: 
+  1. Daftar objek dibersihkan total. Kelas usang (`train`, `pothole`, dan sekarang `bench`) dihapus dari konstanta array `CLASSES`.
+  2. Konstanta kelas diperbarui secara eksplisit: `private const val NUM_CLASSES = 14`.
+  3. Aplikasi klien VNetra sekarang hanya berfokus mendeteksi 14 kategori utama yang paling esensial untuk keselamatan dan navigasi tunanetra.
+- Berkas manajemen suara (`TtsAlertManager.kt`) secara *native* mewarisi penyaringan ini, sehingga pengguna VNetra tidak akan lagi menerima peringatan suara *spam* tentang "bangku".
 
 ---
 
-## 3. Perbaikan Teknis & Optimasi
-
-### ✅ [FIXED] Koreksi Fisik Sensor MPU6050 Terbalik
-* **Masalah:** Sensor MPU6050 dipasang terbalik secara fisik pada kacamata (komponen menghadap ke tanah). Hal ini membalikkan vektor sumbu Z, sehingga perhitungan EKF (Extended Kalman Filter) dan kompensasi pitch menghasilkan offset arah yang salah.
-* **Solusi:** Alih-alih merombak sirkuit fisik, kami memodifikasi kode firmware pada [VNetra/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino](https://github.com/aan-andiyanaS/VNetra/blob/yolo/firmware-vnetra/firmware-vnetra/firmware-vnetra.ino). Kami menambahkan flag `MPU_MOUNTING_INVERTED` dan membungkus pembacaan sensor dalam fungsi kustom `getMpuEvent()`. Saat diaktifkan, firmware secara matematis membalikkan sumbu Z dan sumbu X (menjaga sistem koordinat kaidah tangan kanan / Right-Handed System) sebelum menyuplai nilainya ke EKF, menyelesaikan masalah ini secara transparan.
-
-### ✅ [FIXED] Ketahanan Resolusi (Skala VGA vs. QVGA)
-* **Masalah:** Firmware ESP32 memiliki fallback ke resolusi `FRAMESIZE_QVGA` (320x240) jika PSRAM tidak terbaca (resolusi standar adalah `FRAMESIZE_VGA` 640x480). Karena `FormulaUtils.kt` menggunakan koordinat hardcoded asumsi lebar kamera 640px, frame 320px akan menggeser setengah layar kanan ke zona mati permanen.
-* **Solusi:** Menambahkan pelacak volatile `latestFrameWidth` pada aplikasi Android. Centroid mentah `xcRaw` sekarang dikalibrasi secara dinamis ke ruang koordinat virtual 640px sebelum dialirkan ke rumus pemetaan:
-  $$x_c = x_{c\_raw} \times \frac{640}{W_{frame}}$$
-  Hal ini memisahkan algoritma fusi dari dependensi resolusi fisik kamera.
-
-### ✅ [OPTIMIZED] Penyesuaian Nada & Kecepatan TTS
-* **Konversi Jarak & Pemangkasan Kata:** Secara native, VL53L5CX mengukur kedalaman dalam milimeter (mm). Untuk meminimalkan delay penyampaian navigasi, sistem mengonversinya ke centimeter dengan membagi nilai raw dengan 10 (`dObj / 10`), dan menghapus penyebutan kata *'sentimeter'* (misalnya dibacakan langsung sebagai *'110'* dan bukan *'110 sentimeter'*).
-* **Akselerasi Kecepatan:** Meningkatkan speech rate TTS menjadi **`1.6f`** pada `TtsAlertManager.kt` agar tempo asisten asisten suara terasa jauh lebih responsif, tanggap, dan mengurangi jeda waktu saat pengguna berjalan.
-
-### ✅ [REFACTOR] Pembenahan Nama Berkas Fungsional (Menghindari Kebingungan "Formula")
-* **Masalah:** Skema penamaan generik menggunakan istilah 'Formula' (`FormulaUtils`, `FormulaE`, `FormulaH`) memicu kebingungan struktural (*cognitive overhead*) dan menyulitkan pembacaan fungsi asli masing-masing file utilitas.
-* **Solusi:** Menyusun ulang struktur berkas dan penamaan kelas/objek internal agar lebih semantis dan self-documenting:
-  * `FormulaUtils.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt](https://github.com/aan-andiyanaS/VNetra/blob/yolo/app/src/main/java/com/airi/vnetra/util/SpatialMappingUtils.kt) (Fungsi centroid & pemetaan arah jam/kolom)
-  * `FormulaE.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt](https://github.com/aan-andiyanaS/VNetra/blob/yolo/app/src/main/java/com/airi/vnetra/util/TofDepthEstimator.kt) (Rata-rata jarak baris dengan kompensasi pitch)
-  * `FormulaH.kt` $\rightarrow$ [VNetra/app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt](https://github.com/aan-andiyanaS/VNetra/blob/yolo/app/src/main/java/com/airi/vnetra/util/TtsAlertManager.kt) (Manajemen flag one-shot & pembungkus TTS engine)
-  Seluruh deklarasi import dan pemanggilan objek di dalam `CameraStreamActivity.kt` disesuaikan, dan kompilasi proyek berhasil diselesaikan.
-
----
-
-## 4. Rencana Tindak Lanjut
-- [ ] Melakukan pengujian lapangan dengan objek bergerak cepat untuk mengevaluasi latensi sinkronisasi antara deteksi YOLO dan keluaran suara TTS.
-- [ ] Mengalibrasi nilai ambang batas ($D_{W0}$) untuk pemicu TTS pada berbagai variasi kecepatan jalan kaki pengguna.
+**Kesimpulan:**
+Dengan 14 kelas final ini, YOLOv11n diharapkan memiliki "ruang berpikir" yang jauh lebih lega. Pada eksperimen pelatihan berikutnya (terutama saat jumlah *person* dibatasi ke 6.000 dan *car* ke 3.000), mAP rata-rata model sangat berpotensi melonjak melewati 0.85+.
