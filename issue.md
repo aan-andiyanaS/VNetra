@@ -57,8 +57,8 @@ if (wallDetected) {
   Hal ini memisahkan algoritma fusi dari dependensi resolusi fisik kamera.
 
 ### ✅ [OPTIMIZED] Penyesuaian Nada & Kecepatan TTS
-* **Konversi Jarak:** Secara native, VL53L5CX mengukur kedalaman dalam milimeter (mm). Mendengar ucapan *'seribu seratus milimeter'* (1100 mm) terasa kurang natural dan lambat dicerna. Pipeline sekarang mengonversinya ke centimeter dengan membagi nilai raw dengan 10 (`dObj / 10`), sehingga dibacakan sebagai *'110 sentimeter'* yang lebih efisien.
-* **Akselerasi Kecepatan:** Meningkatkan speech rate TTS dari `1.05f` menjadi **`1.3f`** pada `TtsAlertManager.kt`. Peningkatan tempo bicara 30% ini membuat penyampaian suara navigasi terasa jauh lebih tanggap dan responsif selama pengguna berjalan.
+* **Konversi Jarak & Pemangkasan Kata:** Secara native, VL53L5CX mengukur kedalaman dalam milimeter (mm). Untuk meminimalkan delay penyampaian navigasi, sistem mengonversinya ke centimeter dengan membagi nilai raw dengan 10 (`dObj / 10`), dan menghapus penyebutan kata *'sentimeter'* (misalnya dibacakan langsung sebagai *'110'* dan bukan *'110 sentimeter'*).
+* **Akselerasi Kecepatan:** Meningkatkan speech rate TTS menjadi **`1.6f`** pada `TtsAlertManager.kt` agar tempo asisten asisten suara terasa jauh lebih responsif, tanggap, dan mengurangi jeda waktu saat pengguna berjalan.
 
 ### ✅ [REFACTOR] Pembenahan Nama Berkas Fungsional (Menghindari Kebingungan "Formula")
 * **Masalah:** Skema penamaan generik menggunakan istilah 'Formula' (`FormulaUtils`, `FormulaE`, `FormulaH`) memicu kebingungan struktural (*cognitive overhead*) dan menyulitkan pembacaan fungsi asli masing-masing file utilitas.

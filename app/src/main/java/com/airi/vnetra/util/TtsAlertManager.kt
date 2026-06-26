@@ -60,7 +60,7 @@ class TtsAlertManager(private val context: Context) {
                     tts?.setLanguage(Locale.getDefault())
                     Log.w(TAG, "TTS: Bahasa Indonesia tidak tersedia, fallback ke ${Locale.getDefault()}")
                 }
-                tts?.setSpeechRate(1.3f)   // Dipercepat menjadi 1.3f agar penyampaian instruksi lebih responsif
+                tts?.setSpeechRate(1.6f)   // Dipercepat menjadi 1.6f agar lebih responsif
                 ttsReady.set(true)
                 Log.d(TAG, "TTS engine siap")
             } else {
@@ -95,7 +95,7 @@ class TtsAlertManager(private val context: Context) {
                 alertFlags[trackingId] = true
                 val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
                 val distCm   = dObj / 10  // mm → cm (lebih natural untuk TTS)
-                speak("$objectLabel, $distCm sentimeter, $dirText")
+                speak("$objectLabel, $distCm, $dirText")
                 Log.d(TAG, "One-shot: id=$trackingId d=${dObj}mm dir=$clockDirection")
                 true
             }

@@ -797,9 +797,9 @@ class CameraStreamActivity : AppCompatActivity() {
 
                                     val msg = when (terrainResult.alertLevel) {
                                         TerrainDetector.AlertLevel.HIGH ->
-                                            "Awas! $typeText, sekitar $hCm sentimeter, $dirText!"
+                                            "Awas! $typeText, sekitar $hCm, $dirText!"
                                         TerrainDetector.AlertLevel.MED  ->
-                                            "Perhatian, $typeText, $hCm sentimeter, $dirText"
+                                            "Perhatian, $typeText, $hCm, $dirText"
                                         TerrainDetector.AlertLevel.INFO ->
                                             "Landai $dirText"
                                         else -> ""
