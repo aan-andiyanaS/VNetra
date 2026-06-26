@@ -24,13 +24,13 @@ Karena pemrosesan frame kamera (`frameCollectJob`) dan pengumpulan data ToF (`to
 
 ### B. Perombakan Loop Pemrosesan ToF (`tofCollectJob`)
 Alih-alih membaca kolom statis tengah, thread ToF sekarang memproses koordinat spasial secara dinamis:
-1. **Ekstraksi Centroid:** Menghitung titik tengah horizontal dari setiap objek terdeteksi:
+1. **Centroid Extraction (Ekstraksi Centroid):** Menghitung titik tengah horizontal dari setiap objek terdeteksi:
    $$x_c = \frac{x_{min} + x_{max}}{2}$$
-2. **Penyaringan FoV (Guard Condition):** Memastikan centroid objek berada dalam zona aktif ToF. Jika di luar (FoV ToF lebih sempit secara horizontal dibanding kamera), objek segera diabaikan untuk mencegah miskalkulasi jarak.
-3. **Pemetaan Arah Jam Spasial:** Mengonversi koordinat titik tengah `x_c` menjadi arah jam pendengaran (misalnya jam 10, 11, 12, 1, 2).
-4. **Kolom Binning:** Memetakan koordinat ruang gambar `x_c` ke kolom sensor ToF yang sesuai secara dinamis (misal $j \in [0..7]$ untuk 8x8, atau $j \in [0..3]$ untuk 4x4).
-5. **Kompensasi Kemiringan Kepala & Ekstraksi Jarak:** Memanfaatkan sudut pitch kepala ($\theta$) dari IMU MPU6050 untuk menggeser baris pembacaan ToF secara dinamis. Ini menjamin sensor jarak selalu memantau ke depan relatif terhadap cakrawala, bukan menghadap tanah, saat pengguna menunduk.
-6. **TTS Dispatcher:** Mengirimkan data semantik objek (`className`), hasil perhitungan jarak, dan arah jam ke TTS engine.
+2. **FoV Filtering (Penyaringan FoV):** Memastikan centroid objek berada dalam zona aktif ToF. Jika di luar (FoV ToF lebih sempit secara horizontal dibanding kamera), objek segera diabaikan untuk mencegah miskalkulasi jarak.
+3. **Spatial Clock Direction Mapping (Pemetaan Arah Jam Spasial):** Mengonversi koordinat titik tengah `x_c` menjadi arah jam pendengaran (misalnya jam 10, 11, 12, 1, 2).
+4. **Column Binning (Pemetaan Kolom):** Memetakan koordinat ruang gambar `x_c` ke kolom sensor ToF yang sesuai secara dinamis (misal $j \in [0..7]$ untuk 8x8, atau $j \in [0..3]$ untuk 4x4).
+5. **Head Tilt Compensation & Depth Extraction (Kompensasi Kemiringan Kepala & Ekstraksi Jarak):** Memanfaatkan sudut pitch kepala ($\theta$) dari IMU MPU6050 untuk menggeser baris pembacaan ToF secara dinamis. Ini menjamin sensor jarak selalu memantau ke depan relatif terhadap cakrawala, bukan menghadap tanah, saat pengguna menunduk.
+6. **TTS Dispatcher (Penyalur Pesan Suara TTS):** Mengirimkan data semantik objek (`className`), hasil perhitungan jarak, dan arah jam ke TTS engine.
 
 ### C. Strategi Cadangan (Fallback Strategy - Failsafe)
 Jika YOLO gagal mendeteksi objek (akibat minim cahaya, motion blur, atau batasan model), sistem otomatis beralih ke monitoring Tahap 1. Ini mencegah sistem membisu saat berada di depan rintangan tak dikenal:
