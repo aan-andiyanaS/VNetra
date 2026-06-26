@@ -207,4 +207,31 @@ object SpatialMappingUtils {
      */
     fun isInTofZone(xc: Float): Boolean =
         xc >= D_LEFT && xc < (D_LEFT + W_TOF)
+
+    /**
+     * Mendeteksi apakah ToF mendeteksi tembok (nilai jarak di hampir semua cell nyaris sama).
+     * Syarat tembok:
+     * - Minimal 60% cell bernilai dekat (di antara 30mm s.d. 1500mm).
+     * - Rentang (max - min) dari cell-cell dekat tersebut kurang dari atau sama dengan 300mm (berarti datar).
+     *
+     * @param tofData array data jarak ToF (mm)
+     * @param resolution resolusi aktif (4 atau 8)
+     */
+    fun isWall(tofData: IntArray, resolution: Int): Boolean {
+        val size = resolution * resolution
+        if (tofData.size != size) return false
+
+        // Ambil cell yang berada dalam rentang dekat (30 s.d. 1500 mm)
+        val nearValues = tofData.filter { it in 30..1500 }
+
+        // Minimal 60% dari seluruh cell mendeteksi jarak dekat tersebut
+        if (nearValues.size < size * 0.60) return false
+
+        val min = nearValues.minOrNull() ?: return false
+        val max = nearValues.maxOrNull() ?: return false
+
+        // Deviasi maksimal 300 mm (datar)
+        return (max - min) <= 300
+    }
 }
+

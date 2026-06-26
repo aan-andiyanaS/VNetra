@@ -124,6 +124,7 @@ class CameraStreamActivity : AppCompatActivity() {
     // ── Formula J — Terrain Detector (P6) ───────────────────────
     private val terrainDetector = TerrainDetector()
     private var lastTerrainAlertTime  = 0L
+    @Volatile private var isBlockedState = false
     // Cooldown: cegah terrain alert flood (min. 3 detik antar peringatan, kecuali HIGH yang selalu langsung)
     private val TERRAIN_ALERT_COOLDOWN_MS = 3000L
 
@@ -681,7 +682,11 @@ class CameraStreamActivity : AppCompatActivity() {
                     val thetaDeg = rawTheta - 20f
 
                     val startFormula = System.currentTimeMillis()
+                    var closeThreatExists = false
+                    var allClear = true
+
                     if (::ttsAlertManager.isInitialized) {
+                        var hasCloseYoloThreat = false
                         val detections = latestDetections
                         if (detections.isNotEmpty()) {
                             for (det in detections) {
@@ -715,9 +720,23 @@ class CameraStreamActivity : AppCompatActivity() {
                                     clockDirection = arahJam,
                                     objectLabel    = det.className
                                 )
+
+                                if (dObj < TtsAlertManager.D_W0) {
+                                    hasCloseYoloThreat = true
+                                    closeThreatExists  = true
+                                }
+                                if (dObj < TtsAlertManager.D_RESET) {
+                                    allClear = false
+                                }
                             }
-                        } else {
-                            // Tahap 1 (Fallback statis jika tidak ada objek terdeteksi)
+                        }
+
+                        // Jika tidak ada deteksi YOLO yang berada di dekat (< D_W0),
+                        // jalankan pengecekan fallback statis / tembok
+                        if (!hasCloseYoloThreat) {
+                            val wallDetected = SpatialMappingUtils.isWall(tofData, currentTofMode)
+                            val label = if (wallDetected) "tembok" else "rintangan"
+
                             for (col in SpatialMappingUtils.centerColumns(currentTofMode)) {
                                 val dObj = TofDepthEstimator.calculate(
                                     tofData    = tofData,
@@ -728,9 +747,25 @@ class CameraStreamActivity : AppCompatActivity() {
                                 ttsAlertManager.process(
                                     trackingId     = col,   // proxy ID = indeks kolom
                                     dObj           = dObj,
-                                    clockDirection = 12     // kolom tengah = selalu JAM 12
+                                    clockDirection = 12,    // kolom tengah = selalu JAM 12
+                                    objectLabel    = label
                                 )
+
+                                if (dObj < TtsAlertManager.D_W0) {
+                                    closeThreatExists = true
+                                }
+                                if (dObj < TtsAlertManager.D_RESET) {
+                                    allClear = false
+                                }
                             }
+                        }
+
+                        // Logika Peringatan Jalan Kosong (One-Shot Hysteresis)
+                        if (closeThreatExists) {
+                            isBlockedState = true
+                        } else if (allClear && isBlockedState) {
+                            ttsAlertManager.speak("jalan kosong")
+                            isBlockedState = false
                         }
                     }
                     pingFormulaEH = System.currentTimeMillis() - startFormula
@@ -986,6 +1021,7 @@ class CameraStreamActivity : AppCompatActivity() {
             ttsAlertManager.resetAllFlags()   // siap diperingatkan lagi saat reconnect
         }
         lastTerrainAlertTime = 0L      // reset cooldown terrain
+        isBlockedState = false         // reset status terhalang
 
         pingCamera = 0
         pingTofSmooth = 0
