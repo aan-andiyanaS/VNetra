@@ -1,4 +1,4 @@
-# Laporan Perubahan Arsitektur & Performa (Diff HEAD vs be855bf8080f)
+# Rilis Fitur: Optimasi YOLOv11n (15 Kelas), Smart Navigation TTS, dan OTA Kalibrasi IMU
 
 Dokumen ini merangkum seluruh perubahan dan optimasi teknis tingkat lanjut yang diterapkan pada repositori VNetra sejak commit `be855bf8080f453dbb97e7e6b93b670e2d12b2bb`. Perubahan ini mencakup tiga ranah utama: **Model AI (YOLOv11n)**, **Android Client**, dan **Firmware ESP32**.
 
