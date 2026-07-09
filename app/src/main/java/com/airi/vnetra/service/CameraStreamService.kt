@@ -537,6 +537,15 @@ class CameraStreamService : Service() {
         }
     }
 
+    fun sendCustomCommand(cmd: String) {
+        runCatching {
+            activeWebSocket?.send(cmd)
+            Log.d(TAG, "Sent custom command: $cmd")
+        }.onFailure {
+            Log.e(TAG, "Failed to send custom command: ${it.message}")
+        }
+    }
+
     private fun acquireWakeLock() {
         runCatching {
             wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)

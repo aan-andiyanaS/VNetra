@@ -33,13 +33,16 @@ class TtsAlertManager(private val context: Context) {
 
         // Konstanta Sistem (§H + §G)
         const val D_W0      = 1000  // mm — threshold jarak aman minimum
-        const val EPS_NOISE = 30    // mm — noise floor ToF untuk hysteresis reset
-        const val D_RESET   = D_W0 + EPS_NOISE  // 1030 mm — batas reset flag
+        const val EPS_NOISE = 150   // mm — noise floor ToF untuk hysteresis reset (diperlebar untuk stabilitas)
+        const val D_RESET   = D_W0 + EPS_NOISE  // 1150 mm — batas reset flag
     }
 
     // State one-shot per tracking ID (atau kolom ToF sebagai proxy di Tahap 1).
     // ConcurrentHashMap aman untuk akses concurrent dari coroutine ToF dan IMU.
     private val alertFlags = ConcurrentHashMap<Int, Boolean>()
+
+    // Waktu terakhir setiap tracking ID terdeteksi aktif di zona bahaya
+    private val lastSeenTime = ConcurrentHashMap<Int, Long>()
 
     // TTS Engine
     private var tts: TextToSpeech? = null
@@ -70,41 +73,72 @@ class TtsAlertManager(private val context: Context) {
     }
 
     /**
-     * Proses satu objek: periksa kondisi one-shot dan bunyikan peringatan jika perlu.
+     * Proses satu objek: periksa kondisi one-shot dan kembalikan teks peringatan jika perlu.
      *
-     * Dipanggil dari tofCollectJob (Dispatchers.Default) — pastikan speak() aman dipanggil
-     * dari non-Main thread (TTS.speak() memang thread-safe di Android).
+     * Dipanggil dari tofCollectJob (Dispatchers.Default) atau triggerInstantYoloTts.
      *
      * @param trackingId ID unik objek — kolom ToF [0..7] di Tahap 1, YOLO ID di Tahap 2
      * @param dObj       jarak objek (mm) dari Formula E ∈ [EPS_NOISE, D_MAX]
      * @param clockDirection arah jam dari Formula C ∈ {10, 11, 12, 1, 2}
      * @param objectLabel label objek untuk TTS (default "rintangan")
-     * @return true jika peringatan baru dibunyikan pada frame ini
+     * @return String peringatan jika baru dipicu pada frame ini, atau null jika tidak perlu bersuara
      */
     fun process(
         trackingId: Int,
         dObj: Int,
         clockDirection: Int,
         objectLabel: String = "rintangan"
-    ): Boolean {
+    ): String? {
         val alreadyAlerted = alertFlags[trackingId] ?: false
 
         return when {
             dObj < D_W0 && !alreadyAlerted -> {
                 // Kondisi: masuk zona bahaya, belum pernah diperingatkan → one-shot
                 alertFlags[trackingId] = true
+                lastSeenTime[trackingId] = System.currentTimeMillis()
                 val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
                 val distCm   = dObj / 10  // mm → cm (lebih natural untuk TTS)
-                speak("$objectLabel, $distCm, $dirText")
-                Log.d(TAG, "One-shot: id=$trackingId d=${dObj}mm dir=$clockDirection")
-                true
+                Log.d(TAG, "One-shot triggered: id=$trackingId d=${dObj}mm dir=$clockDirection")
+                "$objectLabel, $distCm, $dirText"
             }
             dObj > D_RESET && alreadyAlerted -> {
                 // Kondisi: objek pergi dari zona bahaya → reset flag (siap diperingatkan lagi)
                 alertFlags[trackingId] = false
-                false
+                null
             }
-            else -> false
+            else -> {
+                // Jika sudah diperingatkan tapi tetap di zona bahaya, update last seen
+                if (dObj < D_W0) {
+                    lastSeenTime[trackingId] = System.currentTimeMillis()
+                }
+                null
+            }
+        }
+    }
+
+    /**
+     * Lakukan pembersihan berkala terhadap flag one-shot untuk objek YOLO yang tidak terdeteksi.
+     * Jika suatu objek terdeteksi aktif sebelumnya tetapi sekarang tidak terdeteksi selama > 3 detik,
+     * reset flag one-shot objek tersebut agar siap dideteksi lagi.
+     *
+     * @param activeClasses Set ID kelas objek YOLO yang terdeteksi aktif pada frame ini.
+     */
+    fun postProcessDetections(activeClasses: Set<Int>) {
+        val now = System.currentTimeMillis()
+        for (classId in activeClasses) {
+            lastSeenTime[classId] = now
+        }
+
+        for ((trackingId, alerted) in alertFlags) {
+            // Kita tidak me-reset WALL_TRACKING_ID di sini karena reset tembok
+            // dikendalikan langsung oleh jarak ToF di tofCollectJob.
+            if (alerted && trackingId != SpatialMappingUtils.WALL_TRACKING_ID) {
+                val lastSeen = lastSeenTime[trackingId] ?: 0L
+                if (now - lastSeen > 3000L) {
+                    alertFlags[trackingId] = false
+                    Log.d(TAG, "Reset flag untuk trackingId=$trackingId karena absensi (>3s)")
+                }
+            }
         }
     }
 
@@ -141,6 +175,7 @@ class TtsAlertManager(private val context: Context) {
      */
     fun resetAllFlags() {
         alertFlags.clear()
+        lastSeenTime.clear()
         Log.d(TAG, "Semua flag one-shot di-reset (${alertFlags.size} entries)")
     }
 
@@ -161,6 +196,98 @@ class TtsAlertManager(private val context: Context) {
         tts = null
         ttsReady.set(false)
         alertFlags.clear()
+        lastSeenTime.clear()
         Log.d(TAG, "TTS engine shutdown")
     }
+
+    // =========================================================================
+    // SMART NAVIGATION TTS
+    // =========================================================================
+
+    enum class NavState {
+        PATH_CLEAR, WALL_WARNING
+    }
+
+    /**
+     * Smart Navigation TTS: State Machine untuk navigasi cerdas
+     * (mempertimbangkan user diam, maju, dan menengok)
+     */
+    inner class SmartNavigationTts {
+
+        private var currentState = NavState.PATH_CLEAR
+        private var lastWarningTime = 0L
+        private var lastClearTime = System.currentTimeMillis()
+        private var hasGivenSecondClearWarning = false
+
+        /**
+         * Panggil setiap kali ada pembaruan data ToF dan IMU.
+         *
+         * @param isDanger true jika ToF mendeteksi halangan signifikan (Kuning/Merah)
+         * @param isMovingForward true jika kecepatan maju (v_head_base) cukup besar
+         * @param isTurning true jika kecepatan menengok (yaw rate) cukup besar
+         */
+        fun processNavigationState(isDanger: Boolean, isMovingForward: Boolean, isTurning: Boolean) {
+            val now = System.currentTimeMillis()
+
+            if (isDanger) {
+                // KONDISI: Deteksi Tembok (WARNING)
+                if (currentState == NavState.PATH_CLEAR) {
+                    // Transisi dari CLEAR ke WARNING
+                    currentState = NavState.WALL_WARNING
+                    lastWarningTime = now
+                    
+                    if (!isTurning) {
+                        // Jika tidak menengok, peringatkan seketika
+                        speak("Awas, tembok di depan")
+                    } else {
+                        // Jika sedang menengok mencari jalan, tetap diam agar tidak spam
+                    }
+                } else {
+                    // Tetap di WALL_WARNING
+                    if (isMovingForward && !isTurning) {
+                        // User memaksakan maju ke arah tembok -> Beri peringatan berulang (tiap 3 detik)
+                        if (now - lastWarningTime > 3000L) {
+                            speak("Awas, masih ada tembok")
+                            lastWarningTime = now
+                        }
+                    }
+                    // Jika user diam atau sedang menengok -> Diam (tidak ada bahaya mendesak / sedang proses cari jalan)
+                }
+            } else {
+                // KONDISI: Jalan Kosong (CLEAR)
+                if (currentState == NavState.WALL_WARNING) {
+                    // Transisi dari WARNING ke CLEAR (user berhasil menemukan jalan kosong saat menengok)
+                    currentState = NavState.PATH_CLEAR
+                    lastClearTime = now
+                    hasGivenSecondClearWarning = false
+                    
+                    // Langsung beritahu bahwa jalan kosong 1 kali
+                    speak("Jalan di depan kosong")
+                } else {
+                    // Tetap di PATH_CLEAR
+                    if (!isMovingForward) {
+                        // User masih ragu / belum maju setelah beberapa waktu (misal 6 detik)
+                        if (!hasGivenSecondClearWarning && now - lastClearTime > 6000L) {
+                            speak("Jalan aman, silakan maju")
+                            hasGivenSecondClearWarning = true // Jaminan tidak ada spam lagi selama user diam
+                        }
+                    } else {
+                        // User sedang maju di jalan kosong -> Diam (kondisi ideal, no spam)
+                        // Perbarui waktu clear dan reset flag agar siap memperingatkan lagi jika user tiba-tiba berhenti lama
+                        lastClearTime = now
+                        hasGivenSecondClearWarning = false
+                    }
+                }
+            }
+        }
+        
+        fun resetState() {
+            currentState = NavState.PATH_CLEAR
+            lastWarningTime = 0L
+            lastClearTime = System.currentTimeMillis()
+            hasGivenSecondClearWarning = false
+        }
+    }
+
+    val smartNavigation = SmartNavigationTts()
 }

@@ -105,7 +105,8 @@ Adafruit_MPU6050 mpu;
   // Secara bawaan diasumsikan pembalikan 180 derajat pada sumbu putar longitudinal (roll/Y)
   // sehingga sumbu Z dibalik (Z -> -Z) dan sumbu X dibalik (X -> -X) agar tetap Right-Handed System.
   // Jika pembalikan terjadi pada sumbu lateral (pitch/X), matikan define MPU_FLIP_X_AXIS agar sumbu Y yang dibalik.
-  #define MPU_FLIP_X_AXIS
+  // [MODIFIKASI] Dinonaktifkan (MPU_FLIP_X_AXIS dimatikan) agar sumbu Y yang dibalik, menyesuaikan peletakan sensor fisik yang dibalik lateral.
+  // #define MPU_FLIP_X_AXIS
 #endif
 
 void getMpuEvent(sensors_event_t *a, sensors_event_t *g, sensors_event_t *temp) {
@@ -478,6 +479,13 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                         tofModeChangePending = true;
                         Serial.println("[TOF] Mode change requested -> 8x8");
                     }
+                } else if (cmd == "CALIBRATE_IMU") {
+                    Serial.println("[CAL] Request calibration. Clearing NVS bias and restarting...");
+                    preferences.begin("sensors", false);
+                    preferences.remove("bias_ok");
+                    preferences.end();
+                    delay(500);
+                    esp_restart();
                 }
             }
             break;

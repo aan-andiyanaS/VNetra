@@ -32,6 +32,7 @@ import com.airi.vnetra.util.TtsAlertManager
 import com.airi.vnetra.util.SpatialMappingUtils
 import com.airi.vnetra.util.SessionManager
 import com.airi.vnetra.util.TerrainDetector
+import com.airi.vnetra.util.CameraDepthEstimator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -149,6 +150,7 @@ class CameraStreamActivity : AppCompatActivity() {
     private var yoloDetector: YoloDetector? = null
     @Volatile private var latestDetections: List<DetectionResult> = emptyList()
     @Volatile private var latestFrameWidth: Int = 640
+    @Volatile private var latestFrameHeight: Int = 480
     private var isInferencing = false
 
     private val exitReceiver = object : android.content.BroadcastReceiver() {
@@ -410,6 +412,12 @@ class CameraStreamActivity : AppCompatActivity() {
                         true
                     } else false
                 }
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    android.util.Log.d("CameraStreamActivity", "Double tap on badge detected -> sending CALIBRATE_IMU")
+                    streamService?.sendCustomCommand("CALIBRATE_IMU")
+                    Toast.makeText(this@CameraStreamActivity, "Mengirim perintah kalibrasi MPU6050...", Toast.LENGTH_SHORT).show()
+                    return true
+                }
                 override fun onDown(e: MotionEvent): Boolean = true
             }
         )
@@ -483,6 +491,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
                     if (bitmap == null) return@collect
                     latestFrameWidth = bitmap.width
+                    latestFrameHeight = bitmap.height
 
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring) {
@@ -700,27 +709,29 @@ class CameraStreamActivity : AppCompatActivity() {
                                 // Abaikan jika objek di luar jangkauan horizontal sensor ToF
                                 if (!SpatialMappingUtils.isInTofZone(xc)) continue
                                 
-                                // Arah Jam
-                                val arahJam = SpatialMappingUtils.mapToClockDirection(xc)
-                                
                                 // Pemetaan ke Kolom ToF
                                 val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
                                 
                                 // Kalkulasi Jarak Geometri
-                                val dObj = TofDepthEstimator.calculate(
+                                var dObj = TofDepthEstimator.calculate(
                                     tofData    = tofData,
                                     j          = j,
                                     thetaDeg   = thetaDeg,
                                     resolution = currentTofMode
                                 )
                                 
-                                // Peringatan Objek (Tahap 2 - Dengan YOLO)
-                                ttsAlertManager.process(
-                                    trackingId     = det.classId,
-                                    dObj           = dObj,
-                                    clockDirection = arahJam,
-                                    objectLabel    = det.className
-                                )
+                                // Jika ToF gagal membaca jarak (D_MAX), gunakan estimasi kamera monokuler sebagai cadangan
+                                if (dObj >= TofDepthEstimator.D_MAX) {
+                                    dObj = CameraDepthEstimator.estimateDistance(
+                                        className   = det.className,
+                                        boundingBox = det.boundingBox,
+                                        imageHeight = latestFrameHeight,
+                                        thetaDeg    = thetaDeg
+                                    )
+                                }
+                                
+                                // Catatan: ttsAlertManager.process untuk YOLO kini ditangani penuh secara instan
+                                // oleh triggerInstantYoloTts. Di sini kita hanya mengupdate state deteksi ancaman.
 
                                 if (dObj < TtsAlertManager.D_W0) {
                                     hasCloseYoloThreat = true
@@ -734,31 +745,62 @@ class CameraStreamActivity : AppCompatActivity() {
 
                         // Jika tidak ada deteksi YOLO yang berada di dekat (< D_W0),
                         // cek apakah ToF mendeteksi tembok di depannya.
-                        if (!hasCloseYoloThreat) {
-                            val wallDetected = SpatialMappingUtils.isWall(tofData, currentTofMode)
-                            if (wallDetected) {
-                                val wallDistance = tofData.filter { it in 30..1500 }.average().toInt()
-                                ttsAlertManager.process(
-                                    trackingId     = SpatialMappingUtils.WALL_TRACKING_ID,
-                                    dObj           = wallDistance,
-                                    clockDirection = 12,    // tembok selalu didepan
-                                    objectLabel    = "tembok"
-                                )
-
-                                if (wallDistance < TtsAlertManager.D_W0) {
-                                    closeThreatExists = true
-                                }
-                                if (wallDistance < TtsAlertManager.D_RESET) {
-                                    allClear = false
-                                }
+                        val wallDetected = SpatialMappingUtils.isWall(tofData, currentTofMode)
+                        if (!hasCloseYoloThreat && wallDetected) {
+                            val wallDistance = tofData.filter { it in 30..1500 }.average().toInt()
+                            val wallAlert = ttsAlertManager.process(
+                                trackingId     = SpatialMappingUtils.WALL_TRACKING_ID,
+                                dObj           = wallDistance,
+                                clockDirection = 12,    // tembok selalu didepan
+                                objectLabel    = "tembok"
+                            )
+                            if (wallAlert != null) {
+                                ttsAlertManager.speak(wallAlert)
                             }
+
+                            if (wallDistance < TtsAlertManager.D_W0) {
+                                closeThreatExists = true
+                            }
+                            if (wallDistance < TtsAlertManager.D_RESET) {
+                                allClear = false
+                            }
+                        } else {
+                            // Jika tidak ada tembok terdeteksi (atau tertutup objek YOLO dekat), 
+                            // panggil process dengan jarak aman agar flag tembok di-reset
+                            ttsAlertManager.process(
+                                trackingId     = SpatialMappingUtils.WALL_TRACKING_ID,
+                                dObj           = 2000, // jarak aman > D_RESET
+                                clockDirection = 12,
+                                objectLabel    = "tembok"
+                            )
                         }
 
-                        // Logika Peringatan Jalan Kosong (One-Shot Hysteresis)
+                        // =========================================================
+                        // Logika Peringatan Smart Navigation TTS (Jalan Kosong / Tembok)
+                        // =========================================================
+                        val yawRate = latestImuData?.getOrElse(4) { 0f } ?: 0f
+                        val aLinMag = latestImuData?.getOrElse(5) { 0f } ?: 0f
+                        
+                        val isTurning = Math.abs(yawRate) > 30f // deg/s
+                        val isMovingForward = aLinMag > 0.3f    // m/s^2 (terdeteksi ada langkah/guncangan maju)
+                        
+                        // Bahaya jika ada tembok yang mendekat (closeThreatExists)
+                        // Atau jika seluruh ToF mendeteksi halangan < D_RESET (allClear == false)
+                        // allClear = false berarti ada sesuatu di jarak < 1150 mm
+                        val isDanger = closeThreatExists || !allClear
+
+                        if (::ttsAlertManager.isInitialized) {
+                            ttsAlertManager.smartNavigation.processNavigationState(
+                                isDanger = isDanger,
+                                isMovingForward = isMovingForward,
+                                isTurning = isTurning
+                            )
+                        }
+                        
+                        // Update legacy state for other potential dependencies
                         if (closeThreatExists) {
                             isBlockedState = true
                         } else if (allClear && isBlockedState) {
-                            ttsAlertManager.speak("jalan kosong")
                             isBlockedState = false
                         }
                     }
@@ -853,25 +895,65 @@ class CameraStreamActivity : AppCompatActivity() {
         val thetaDeg = rawTheta - 20f
         val frameWidth = latestFrameWidth
 
-        for (det in detections) {
+        // 1. Hitung dObj dan saring deteksi yang berada di zona aktif ToF
+        val mappedDetections = detections.mapNotNull { det ->
             val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
             val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / frameWidth.toFloat())
-            if (!SpatialMappingUtils.isInTofZone(xc)) continue
-            val arahJam = SpatialMappingUtils.mapToClockDirection(xc)
-            val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
-            val dObj = TofDepthEstimator.calculate(
-                tofData    = tofData,
-                j          = j,
-                thetaDeg   = thetaDeg,
-                resolution = currentTofMode
-            )
-            ttsAlertManager.process(
-                trackingId     = det.classId,
+            if (!SpatialMappingUtils.isInTofZone(xc)) null
+            else {
+                val arahJam = SpatialMappingUtils.mapToClockDirection(xc)
+                val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
+                var dObj = TofDepthEstimator.calculate(
+                    tofData    = tofData,
+                    j          = j,
+                    thetaDeg   = thetaDeg,
+                    resolution = currentTofMode
+                )
+                // Jika ToF gagal membaca jarak (D_MAX), gunakan estimasi kamera monokuler
+                if (dObj >= TofDepthEstimator.D_MAX) {
+                    dObj = CameraDepthEstimator.estimateDistance(
+                        className   = det.className,
+                        boundingBox = det.boundingBox,
+                        imageHeight = latestFrameHeight,
+                        thetaDeg    = thetaDeg
+                    )
+                }
+                det to Triple(dObj, arahJam, det.className)
+            }
+        }
+
+        // 2. Kelompokkan per classId dan pilih hanya objek terdekat per kelas (mencegah spamming multi-instance)
+        val closestDetections = mappedDetections
+            .groupBy { it.first.classId }
+            .mapValues { entry -> entry.value.minByOrNull { it.second.first }!! }
+
+        val activeClasses = closestDetections.keys
+        val newAlerts = mutableListOf<String>()
+
+        // 3. Proses deteksi terdekat untuk one-shot alert
+        for ((classId, detPair) in closestDetections) {
+            val dObj = detPair.second.first
+            val arahJam = detPair.second.second
+            val label = detPair.second.third
+            val alertMsg = ttsAlertManager.process(
+                trackingId     = classId,
                 dObj           = dObj,
                 clockDirection = arahJam,
-                objectLabel    = det.className
+                objectLabel    = label
             )
+            if (alertMsg != null) {
+                newAlerts.add(alertMsg)
+            }
         }
+
+        // 4. Gabungkan suara jika ada lebih dari satu peringatan baru pada frame yang sama
+        if (newAlerts.isNotEmpty()) {
+            val combinedMsg = newAlerts.joinToString(", dan ")
+            ttsAlertManager.speak(combinedMsg)
+        }
+
+        // 5. Bersihkan berkala flag untuk kelas yang tidak terdeteksi aktif
+        ttsAlertManager.postProcessDetections(activeClasses)
     }
 
     // ──────────────────────────────────────────────────────────────────────────
