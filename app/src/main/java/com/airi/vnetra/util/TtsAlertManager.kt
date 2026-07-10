@@ -153,9 +153,16 @@ class TtsAlertManager(private val context: Context) {
                 alertFlags[trackingId] = true
                 lastSeenTime[trackingId] = System.currentTimeMillis()
                 val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
-                val distCm   = dObj / 10  // mm → cm (lebih natural untuk TTS)
+                
+                // Konversi jarak ke kategori sederhana
+                val distText = when {
+                    dObj < 500 -> "dekat"
+                    dObj < 1500 -> "sedang"
+                    else -> "jauh"
+                }
+                
                 Log.d(TAG, "One-shot triggered: id=$trackingId d=${dObj}mm dir=$clockDirection")
-                "$objectLabel, $distCm, $dirText"
+                "$objectLabel, $distText, $dirText"
             }
             dObj > D_RESET && alreadyAlerted -> {
                 // Kondisi: objek pergi dari zona bahaya → reset flag (siap diperingatkan lagi)

@@ -126,13 +126,13 @@ object SpatialMappingUtils {
     /**
      * Konversi nilai arah jam ke string Bahasa Indonesia untuk TTS.
      */
-    fun clockDirectionToTts(direction: Int): String = when (direction) {
-        10 -> "jam sepuluh"
-        11 -> "jam sebelas"
-        12 -> "jam dua belas"
-         1 -> "jam satu"
-         2 -> "jam dua"
-        else -> "depan"
+    fun clockDirectionToTts(clockDirection: Int): String = when (clockDirection) {
+        10 -> "arah 10"
+        11 -> "arah 11"
+        12 -> "arah 12"
+         1 -> "arah 1"
+         2 -> "arah 2"
+        else -> "arah depan"
     }
 
     // ── Formula D: Indeks kolom ToF ───────────────────────────────────────────
