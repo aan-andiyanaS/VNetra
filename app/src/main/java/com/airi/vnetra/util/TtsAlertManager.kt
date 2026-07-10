@@ -162,7 +162,13 @@ class TtsAlertManager(private val context: Context) {
                 }
                 
                 Log.d(TAG, "One-shot triggered: id=$trackingId d=${dObj}mm dir=$clockDirection")
-                "$objectLabel, $distText, $dirText"
+                
+                // Aturan khusus: Jika objek adalah "paving" dan jaraknya dekat, hiraukan sebut jarak
+                if (objectLabel.equals("paving", ignoreCase = true) && dObj < 500) {
+                    "$objectLabel, $dirText"
+                } else {
+                    "$objectLabel, $distText, $dirText"
+                }
             }
             dObj > D_RESET && alreadyAlerted -> {
                 // Kondisi: objek pergi dari zona bahaya → reset flag (siap diperingatkan lagi)
