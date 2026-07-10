@@ -693,8 +693,13 @@ class CameraStreamActivity : AppCompatActivity() {
                     var closeThreatExists = false
                     var allClear = true
 
+                    val yawRate = latestImuData?.getOrElse(4) { 0f } ?: 0f
+                    val aLinMag = latestImuData?.getOrElse(5) { 0f } ?: 0f
+                    val isTurning = Math.abs(yawRate) > 30f // deg/s
+                    val isMovingForward = aLinMag > 0.3f    // m/s^2 (terdeteksi ada langkah/guncangan maju)
+
+                    var hasCloseYoloThreat = false
                     if (::ttsAlertManager.isInitialized) {
-                        var hasCloseYoloThreat = false
                         val detections = latestDetections
                         if (detections.isNotEmpty()) {
                             for (det in detections) {
@@ -747,10 +752,11 @@ class CameraStreamActivity : AppCompatActivity() {
                         if (!hasCloseYoloThreat && wallDetected) {
                             val wallDistance = tofData.filter { it in 30..1500 }.average().toInt()
                             val wallAlert = ttsAlertManager.process(
-                                trackingId     = SpatialMappingUtils.WALL_TRACKING_ID,
-                                dObj           = wallDistance,
-                                clockDirection = 12,    // tembok selalu didepan
-                                objectLabel    = "tembok"
+                                trackingId      = SpatialMappingUtils.WALL_TRACKING_ID,
+                                dObj            = wallDistance,
+                                clockDirection  = 12,    // tembok selalu didepan
+                                objectLabel     = "tembok",
+                                isMovingForward = isMovingForward
                             )
                             if (wallAlert != null) {
                                 ttsAlertManager.speak(wallAlert)
@@ -766,21 +772,17 @@ class CameraStreamActivity : AppCompatActivity() {
                             // Jika tidak ada tembok terdeteksi (atau tertutup objek YOLO dekat), 
                             // panggil process dengan jarak aman agar flag tembok di-reset
                             ttsAlertManager.process(
-                                trackingId     = SpatialMappingUtils.WALL_TRACKING_ID,
-                                dObj           = 2000, // jarak aman > D_RESET
-                                clockDirection = 12,
-                                objectLabel    = "tembok"
+                                trackingId      = SpatialMappingUtils.WALL_TRACKING_ID,
+                                dObj            = 2000, // jarak aman > D_RESET
+                                clockDirection  = 12,
+                                objectLabel     = "tembok",
+                                isMovingForward = isMovingForward
                             )
                         }
 
                         // =========================================================
                         // Logika Peringatan Smart Navigation TTS (Jalan Kosong / Tembok)
                         // =========================================================
-                        val yawRate = latestImuData?.getOrElse(4) { 0f } ?: 0f
-                        val aLinMag = latestImuData?.getOrElse(5) { 0f } ?: 0f
-                        
-                        val isTurning = Math.abs(yawRate) > 30f // deg/s
-                        val isMovingForward = aLinMag > 0.3f    // m/s^2 (terdeteksi ada langkah/guncangan maju)
                         
                         // Bahaya jika ada tembok yang mendekat (closeThreatExists)
                         // Atau jika seluruh ToF mendeteksi halangan < D_RESET (allClear == false)

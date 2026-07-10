@@ -185,6 +185,17 @@ class TtsAlertManager(private val context: Context) {
                 // Objek masih di zona bahaya
                 lastSeenTime[trackingId] = now
                 
+                val isWall = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
+                
+                if (isWall && isMovingForward) {
+                    val lastSpoken = lastSpokenTime[trackingId] ?: 0L
+                    if (now - lastSpoken > 1500L) { // Spam tiap 1.5 detik jika terus bergerak maju ke tembok
+                        lastSpokenTime[trackingId] = now
+                        Log.d(TAG, "Wall Spam (Moving Forward): id=$trackingId")
+                        return textToSpeak
+                    }
+                }
+                
                 // Stationary Paving Reminder
                 if (isPaving && !isMovingForward) {
                     val lastSpoken = lastSpokenTime[trackingId] ?: 0L
