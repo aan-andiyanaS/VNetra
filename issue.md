@@ -1,45 +1,17 @@
-# Refaktor Arsitektur Notebook: Perbaikan Syntax, Renaming, & Isolasi Kuantisasi INT8
+# Optimasi Latensi Firmware ESP32 (Ponytail Full)
 
-Berikut adalah ringkasan perubahan (perbandingan) antara *working directory* saat ini dengan commit `1fed77e00c6c343f4b1a0653aed169ddae6fbc3d`:
+Berdasarkan investigasi `/doubt-driven-development` pada `firmware-vnetra.ino`, keterlambatan (latensi) sistem tidak disebabkan oleh kerumitan operasi matematika EKF, melainkan oleh pembagian beban Core yang menumpuk dan adanya sisa kode mati (*Dead Code*). 
 
-### 1. Pembersihan dan Penamaan Ulang (Renaming)
-Sebagian besar notebook lama yang menumpuk dan memiliki inkonsistensi penamaan telah dihapus dan digantikan dengan format standar baru (menambahkan huruf `v` pada `yolov11n`).
-* **Dihapus:** `train_vnetra_yolo11n_colab.ipynb`, `train_vnetra_yolo11n_kaggle.ipynb`, `quantize_vnetra_int8_colab.ipynb`, dan beberapa file *manual* atau cadangan (*resume*) yang sudah tidak relevan.
-* **Ditambahkan (dengan versi baru):** `dataset_vnetra_yolov11n_colab.ipynb`, `train_vnetra_yolov11n_colab.ipynb`, dan `train_vnetra_yolov11n_kaggle.ipynb`.
+Berikut adalah rencana perbaikan efisiensi ekstrem tanpa mengubah satupun output atau fungsionalitas yang ada:
 
-### 2. Perbaikan Fatal `SyntaxError` di JSON Jupyter
-Sebelumnya, notebook rusak di tingkat struktur JSON akibat adanya kesalahan *escape character* (literal `\n` terbaca sebagai `\ ` dan `n` di Python). Ini menyebabkan `SyntaxError` saat dijalankan.
-* **Solusi:** Seluruh blok kode yang rusak diganti ulang secara bersih. `print("\n===...")` diperbaiki sehingga Python `ast.parse` dapat mengkompilasi file tanpa error (TDD pass 100%).
+## 1. Hapus Dead Code (`wsQueue`)
+*   **Masalah:** Di fungsi `loop()`, ESP32 secara terus-menerus mengecek antrian `wsQueue` ratusan kali per detik. Namun, tidak ada satupun instruksi `xQueueSend` di seluruh firmware (sensor IMU & TOF sudah berevolusi mengirim data via UDP secara langsung).
+*   **Solusi:** Hapus seluruh deklarasi `wsQueue`, `xQueueCreate`, dan blok pembacaan `xQueueReceive` di `loop()`. Ini adalah pendekatan *Ponytail Full*: menghapus beban komputasi dan memori yang tidak pernah digunakan.
 
-### 3. Optimasi Fungsi `merge_dataset` (Ponytail Mode)
-Kode penyaringan dataset YOLO disederhanakan drastis.
-* **Diubah:** Mengganti perulangan panjang saat membaca file `.txt` YOLO menjadi implementasi himpunan (`Set`) satu baris yang ringan di RAM:
-  ```python
-  lines = open(lbl_path).readlines()
-  classes_in_img = {str(original_classes[int(p.split()[0])]).lower() 
-                    for p in lines if p.strip() and int(p.split()[0]) < len(original_classes)}
-  if classes_in_img.intersection({'motorcycle', 'bicycle', 'bus', 'truck'}):
-      score += 100
-  ```
-* Logika *Smart Sort*, *Distance Filter*, dan *Spatial Passenger Filter* kini sepenuhnya konsisten dan dipakai secara seragam di Kaggle dan Colab.
+## 2. Load Balancing (Pindahkan `TOF_Task` ke Core 0)
+*   **Masalah:** Saat ini `IMU_Task` (Prioritas 2), `TOF_Task` (Prioritas 1), dan `loop()` untuk kamera (Prioritas 1) semuanya berdesakan memperebutkan **Core 1** ESP32! Akibatnya, saat Kamera sibuk memproses gambar, task sensor harus antre (berimbas pada *jitter*).
+*   **Solusi:** Ubah parameter `xTaskCreatePinnedToCore` untuk `TOF_Task` dari Core 1 menjadi **Core 0**. Core 0 saat ini sangat luang karena hanya menangani instruksi WiFi. Mengingat jalur I2C sudah diamankan secara ketat dengan `i2c_mutex`, kedua task sensor ini bisa berjalan paralel dengan sempurna di dua *core* fisik berbeda.
 
-### 4. Pemisahan Kuantisasi INT8
-Kuantisasi `INT8` ditarik keluar secara total dari notebook *training* untuk mencegah *Catastrophic Failure* akibat kehabisan memori saat kalibrasi paska-latih.
-* **Dihapus:** Blok kode `model.export(format="litert", int8=True)` dari seluruh notebook training.
-* **Ditambahkan:** File baru `quantize_vnetra_yolov11n_int8_colab.ipynb` khusus untuk Kuantisasi INT8.
-
-### 5. Notebook Kuantisasi Baru yang Jauh Lebih Interaktif
-File `quantize_vnetra_yolov11n_int8_colab.ipynb` kini memiliki alur *(pipeline)* yang sangat terstruktur:
-* **Ekstraksi Otomatis:** Menambahkan sel ekstraksi `zipfile` dari Google Drive agar dataset siap dipakai kalibrasi INT8.
-* **Tabel Distribusi Pandas:** Menyisipkan kode untuk membaca `data.yaml` dan mencetak tabel DataFrame pembagian proporsi dataset sebelum melakukan kuantisasi.
-* **Dokumentasi Bawaan:** Menyisipkan instruksi berformat *Markdown* berbahasa Indonesia pada setiap awal sel untuk menjelaskan fungsinya.
-* **Visualisasi Matplotlib:** Menambahkan *bar chart* komparatif di akhir eksekusi untuk secara visual membandingkan nilai **Akurasi (mAP@50)** antara:
-  - Model Original (.pt)
-  - Model LiteRT (.tflite FP32)
-  - Model LiteRT (.tflite INT8) 
-  
-  ```python
-  bars = plt.bar(labels, values, color=['#1f77b4', '#ff7f0e', '#2ca02c'])
-  #...
-  plt.title('Perbandingan mAP@50: Original vs FP32 vs INT8')
-  ```
+## 3. Stabilisasi EKF 200Hz (`vTaskDelayUntil`)
+*   **Masalah:** `IMU_Task` saat ini menghitung *delta time* (`dt`) dengan `millis()`, lalu menjeda task menggunakan `vTaskDelay(5)`. Jitter membuat nilai `dt` fluktuatif antara 4-6ms, yang membuat pembacaan EKF berisiko kurang presisi dan membebani komputasi *floating-point*.
+*   **Solusi:** Terapkan `vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5))` dan jadikan `dt = 0.005f` sebagai konstanta pasti. Ini memaksa EKF untuk mengunci pada kecepatan absolut 200Hz, mengurangi overhead waktu eksekusi CPU pada baris tersebut menjadi hampir nol.

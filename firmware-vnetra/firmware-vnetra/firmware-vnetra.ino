@@ -198,11 +198,6 @@ static constexpr uint8_t       QUALITY_MOTION   = 30;     // Kualitas saat berge
 static constexpr uint32_t POWER_SAVE_TIMEOUT = 30000;  // 30 detik tanpa client → hemat daya
 
 // ======== GLOBAL STATE ========
-typedef struct {
-    uint8_t* data;
-    size_t len;
-} WsMessage_t;
-QueueHandle_t wsQueue = NULL;
 
 volatile int unacked_frames = 0;
 uint32_t last_ack_time = 0;
@@ -897,12 +892,12 @@ void calibrateAccelBias(int n_samples = 200) {
         (float)(sum[2] / n_samples)
     };
 
-    float g_meas = sqrt(mean[0]*mean[0] + mean[1]*mean[1] + mean[2]*mean[2]);
-    float scale  = g_const / g_meas;
-
-    accel_bias[0] = mean[0] - mean[0] * scale;
-    accel_bias[1] = mean[1] - mean[1] * scale;
-    accel_bias[2] = mean[2] - mean[2] * scale;
+    // Ponytail Full: Simplest additive offset. 
+    // X and Y should be 0 when flat on table.
+    // Z should be g_const (since MPU_MOUNTING_INVERTED flips it to positive).
+    accel_bias[0] = mean[0];
+    accel_bias[1] = mean[1];
+    accel_bias[2] = mean[2] - g_const;
 
     Serial.printf("[CAL] Accel bias: X=%.4f Y=%.4f Z=%.4f m/s²\n",
                   accel_bias[0], accel_bias[1], accel_bias[2]);
@@ -924,11 +919,11 @@ void initEKFState(float ax, float ay, float az) {
 }
 
 void IMU_Task(void *pvParameters) {
+  TickType_t xLastWakeTime = xTaskGetTickCount();
   for (;;) {
+    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5));
     unsigned long current_ts_esp = millis();
-    float dt = (current_ts_esp - last_ts_esp) / 1000.0f;
-    dt = max(dt, dt_min);
-    if (dt < dt_min) { vTaskDelay(1); continue; }
+    float dt = 0.005f; // Konstan 5ms (200Hz)
 
     sensors_event_t a, g, temp;
     if (xSemaphoreTake(i2c_mutex, portMAX_DELAY)) {
@@ -1064,7 +1059,6 @@ void IMU_Task(void *pvParameters) {
       stat_frames_imu++; // Counter untuk log statistik
     }
 
-    vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
 
@@ -1302,7 +1296,7 @@ void TOF_InitTask(void* pvParams) {
         xSemaphoreGive(i2c_mutex);
 
         if (ok) {
-            xTaskCreatePinnedToCore(TOF_Task, "TOF_Task", 6144, NULL, 1, &TOF_TaskHandle, 1);
+            xTaskCreatePinnedToCore(TOF_Task, "TOF_Task", 6144, NULL, 1, &TOF_TaskHandle, 0); // Pindah ke Core 0
             Serial.println("[OK] VL53L5CX Started (deferred).");
         } else {
             Serial.println("[WARN] VL53L5CX tidak terdeteksi!");
@@ -1313,6 +1307,7 @@ void TOF_InitTask(void* pvParams) {
 
 // ======== BUTTON RESET TASK ========
 void ButtonReset_Task(void *pvParameters) {
+    unsigned long lastShortReleaseTime = 0;
     for (;;) {
         if (digitalRead(RESET_BUTTON_PIN) == LOW) {
             if (resetTriggered) {
@@ -1374,8 +1369,7 @@ void ButtonReset_Task(void *pvParameters) {
                     }
                     wsClientConnected = false;
                     
-                    // Flush queue agar task (IMU/TOF) tidak memproses pointer ke WiFi mati
-                    xQueueReset(wsQueue);
+                    // (wsQueue dihapus)
                     
                     delay(500); // Tambah delay tutup ws
 
@@ -1432,6 +1426,7 @@ void ButtonReset_Task(void *pvParameters) {
                 resetLedPhase      = 0;
                 Serial.println("[RESET] Tombol dilepas — sistem siap.");
             } else if (resetButtonPressed) {
+                unsigned long holdTime = millis() - resetButtonPressTime;
                 // Tombol dilepas sebelum 5 detik — batalkan, kembalikan LED
                 Serial.println("[RESET] Tombol dilepas sebelum 5 detik — reset dibatalkan.");
                 if (wifiConnected)    ledGreen();
@@ -1439,6 +1434,24 @@ void ButtonReset_Task(void *pvParameters) {
                 else                  ledOff();
                 resetButtonPressed = false;
                 resetLedPhase      = 0;
+
+                // Double click detection untuk kalibrasi IMU
+                if (holdTime < 1000) { // Anggap short press jika < 1 detik
+                    if (millis() - lastShortReleaseTime < 600) { // Jeda antar klik < 600ms
+                        Serial.println("[CAL] Double click detected! Mengatur ulang bias IMU...");
+                        for(int i=0; i<3; i++) {
+                            ledBlue(); delay(80);
+                            ledOff(); delay(80);
+                        }
+                        preferences.begin("sensors", false);
+                        preferences.remove("bias_ok");
+                        preferences.end();
+                        delay(500);
+                        esp_restart();
+                    } else {
+                        lastShortReleaseTime = millis();
+                    }
+                }
             }
         }
         vTaskDelay(pdMS_TO_TICKS(50)); // Poll every 50ms to reduce CPU usage
@@ -1459,7 +1472,7 @@ void setup() {
 
     i2c_mutex = xSemaphoreCreateMutex();
     ws_mutex  = xSemaphoreCreateMutex();
-    wsQueue   = xQueueCreate(20, sizeof(WsMessage_t));
+    // wsQueue dihapus
 
     // Initialize UDP Sensor Server (ditunda hingga WiFi connected)
     // udpSensor.listen(8081);
@@ -1619,21 +1632,7 @@ void loop() {
             }
         }
 
-        // PROSES ANTRIAN WEBSOCKET DARI SENSOR
-        WsMessage_t msg;
-        while (xQueueReceive(wsQueue, &msg, 0) == pdTRUE) {
-            if (!powerSaveMode && wsClientConnected && ws.count() > 0) {
-                if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    for (auto& client : ws.getClients()) {
-                        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
-                            client.binary(msg.data, msg.len);
-                        }
-                    }
-                    xSemaphoreGive(ws_mutex);
-                }
-            }
-            free(msg.data); // Bebaskan memori yang dialokasikan di task
-        }
+        // (Antrian WebSocket sensor dihapus karena sudah memakai UDP)
 
         // Capture & kirim frame (dilewati jika powerSaveMode atau tidak ada client)
         if (nowUs - lastFrameUs >= TARGET_FRAME_US) {

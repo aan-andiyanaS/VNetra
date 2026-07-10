@@ -412,12 +412,7 @@ class CameraStreamActivity : AppCompatActivity() {
                         true
                     } else false
                 }
-                override fun onDoubleTap(e: MotionEvent): Boolean {
-                    android.util.Log.d("CameraStreamActivity", "Double tap on badge detected -> sending CALIBRATE_IMU")
-                    streamService?.sendCustomCommand("CALIBRATE_IMU")
-                    Toast.makeText(this@CameraStreamActivity, "Mengirim perintah kalibrasi MPU6050...", Toast.LENGTH_SHORT).show()
-                    return true
-                }
+
                 override fun onDown(e: MotionEvent): Boolean = true
             }
         )
