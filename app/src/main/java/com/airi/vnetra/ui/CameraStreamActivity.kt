@@ -957,9 +957,13 @@ class CameraStreamActivity : AppCompatActivity() {
             )
             if (alertMsg != null) {
                 val isPaving = label in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-                if (isPaving) {
+                val isPeripheral = arahJam == 10 || arahJam == 2
+                
+                // Paving dan objek di pinggir (jam 10 / jam 2) hanya sebagai informasi (antre)
+                if (isPaving || isPeripheral) {
                     infoAlerts.add(alertMsg)
                 } else {
+                    // Objek berbahaya di area depan (jam 11, 12, 1) memotong suara
                     urgentAlerts.add(alertMsg)
                 }
             }
