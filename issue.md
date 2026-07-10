@@ -1,4 +1,4 @@
-# ADR-003: Kompensasi Sudut Tunduk Mekanis (Fixed Pitch 20°) pada Modul Depth Estimator
+# ADR-004: Mekanisme A2DP Keep-Alive (Zero Wake-Up Delay) untuk Bluetooth TTS
 
 ## Status
 Proposed
@@ -7,20 +7,18 @@ Proposed
 2026-07-11
 
 ## Context
-Perangkat keras (kamera dan sensor ToF VL53L5CX) dipasang secara fisik dengan sudut kemiringan statis sebesar **20 derajat menunduk** ke arah permukaan jalan. 
-Saat ini, kalkulasi jarak di `CameraDepthEstimator.kt` dan pemilihan zona ROI (*Region of Interest*) di `TofDepthEstimator.kt` hanya memperhitungkan sudut dinamis `thetaDeg` dari sensor MPU6050 (kemiringan kepala pengguna). 
-Akibatnya:
-1. **Pada Kamera:** Kalkulasi koreksi *foreshortening* `cos(theta)` meleset 20 derajat, membuat estimasi jarak YOLO tidak akurat karena seolah-olah kamera dipasang lurus (0 derajat) saat kepala tegak.
-2. **Pada ToF:** Pencarian baris pusat (`rCenter`) untuk mendeteksi rintangan horizontal tidak selaras dengan sudut pandang sebenarnya, karena cakupan bidang pandang (FoV) ToF sudah menunduk 20 derajat secara *default*.
+Perangkat *headset* Bluetooth (khususnya TWS modern) menggunakan protokol *power saving* bernama *Sniff Mode* pada protokol A2DP. Jika tidak ada suara yang diputar dari HP selama beberapa detik, koneksi Bluetooth akan "tertidur" untuk menghemat baterai. 
+Ketika modul YOLO atau ToF memicu `TtsAlertManager.speak()`, HP Android harus "membangunkan" jalur audio Bluetooth (transisi dari *Sniff Mode* ke *Active Mode*). Proses transisi ini (*wake-up delay*) umumnya memakan waktu **500 ms hingga 1000 ms**, yang menyebabkan efek:
+1. Kata pertama dari peringatan terpotong (misal: "Tangga" hanya terdengar "...gga").
+2. Suara masuk sangat terlambat (jauh dari target 150-200 ms *end-to-end* yang kita hitung).
+
+Bagi penyandang tunanetra, jeda setengah detik ini berbahaya karena bisa menyebabkan keterlambatan respon fisik.
 
 ## Decision
-Menambahkan sebuah konstanta global `MOUNT_PITCH_DEG = 20f` di dalam kedua *estimator* (kamera dan ToF). 
-Sudut kemiringan total (`totalPitch`) yang akan digunakan untuk semua perhitungan trigonometri dan geometri adalah kombinasi dari sudut statis pemasangan perangkat dan sudut dinamis kepala pengguna:
-`totalPitch = thetaDeg + MOUNT_PITCH_DEG`
+Menerapkan teknik **A2DP Keep-Alive** dengan cara memutar aliran audio PCM statis (diam total / *silent buffer*) yang berulang secara terus-menerus (di-loop) di *background*.
+1. **AudioTrack Taktis:** Membuat objek `AudioTrack` di `TtsAlertManager` yang memompa sampel angka 0 secara kontinu. Hal ini "menipu" protokol Bluetooth agar mengira lagu sedang diputar, sehingga jalur audio tidak pernah tidur.
+2. **Audio Attributes Khusus:** Mengatur properti TTS Engine agar diprioritaskan menggunakan `USAGE_ASSISTANCE_ACCESSIBILITY` dan `CONTENT_TYPE_SPEECH`.
 
 ## Consequences
-- **`CameraDepthEstimator.kt`:** 
-  Perhitungan kompensasi jarak dasar kini menggunakan `cos(totalPitch)` dan bukan sekadar `cos(thetaDeg)`.
-- **`TofDepthEstimator.kt`:** 
-  Perhitungan `rCenter` (indeks baris pusat ToF) menggunakan `totalPitch`, sehingga pada saat kepala tegak lurus (`thetaDeg = 0`), ROI sudah otomatis menargetkan area yang tepat akibat sudut *default* pemasangan sensor.
-- **Konsistensi Sensor:** Fusi data antara YOLO dan ToF akan menjadi jauh lebih presisi karena keduanya kini berpatokan pada sumbu elevasi spasial yang persis sama.
+- **Keuntungan:** Waktu tunda bangun (*wake-up delay*) Bluetooth akan menjadi **0 milidetik (nol)**. Suara TTS akan langsung menembus seketika begitu *inference* YOLO selesai. Tidak ada kata terpotong.
+- **Kelemahan:** Baterai *headset* Bluetooth akan sedikit lebih boros karena radio Bluetooth dipaksa untuk terus aktif (*Active Mode*) selama aplikasi VNetra berjalan. Namun, ini adalah pertukaran (*trade-off*) mutlak demi keselamatan pengguna tunanetra.

@@ -1,6 +1,10 @@
 package com.airi.vnetra.util
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import java.util.Locale
@@ -48,6 +52,9 @@ class TtsAlertManager(private val context: Context) {
     private var tts: TextToSpeech? = null
     private val ttsReady = AtomicBoolean(false)
 
+    // A2DP Keep-Alive (Zero Wake-Up Delay)
+    private var silentAudioTrack: AudioTrack? = null
+
     /**
      * Inisialisasi TextToSpeech engine.
      * Panggil dari onCreate() — async, tidak memblokir UI thread.
@@ -56,6 +63,13 @@ class TtsAlertManager(private val context: Context) {
         if (ttsReady.get()) return
         tts = TextToSpeech(context) { status ->
             if (status == TextToSpeech.SUCCESS) {
+                // Konfigurasi prioritas aksesibilitas (anti-ducking)
+                val audioAttributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                tts?.setAudioAttributes(audioAttributes)
+
                 // Coba set Bahasa Indonesia; fallback ke locale default jika tidak tersedia
                 val result = tts?.setLanguage(Locale("id", "ID"))
                 if (result == TextToSpeech.LANG_MISSING_DATA ||
@@ -66,9 +80,51 @@ class TtsAlertManager(private val context: Context) {
                 tts?.setSpeechRate(1.6f)   // Dipercepat menjadi 1.6f agar lebih responsif
                 ttsReady.set(true)
                 Log.d(TAG, "TTS engine siap")
+
+                // Mulai mekanisme A2DP Keep-Alive agar Bluetooth tidak masuk mode sleep/sniff
+                startA2dpKeepAlive(audioAttributes)
             } else {
                 Log.e(TAG, "TTS init gagal: status=$status")
             }
+        }
+    }
+
+    /**
+     * Memutar loop audio senyap untuk memaksa headset Bluetooth (A2DP) tetap dalam status Active.
+     * Mencegah "wake-up delay" 500-1000ms yang memotong kata pertama peringatan.
+     */
+    private fun startA2dpKeepAlive(attributes: AudioAttributes) {
+        try {
+            val sampleRate = 16000
+            val format = AudioFormat.Builder()
+                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                .setSampleRate(sampleRate)
+                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                .build()
+
+            val minBufferSize = AudioTrack.getMinBufferSize(
+                sampleRate,
+                AudioFormat.CHANNEL_OUT_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+
+            // Gunakan MODE_STATIC untuk me-loop buffer pendek secara kontinu tanpa membebani CPU
+            silentAudioTrack = AudioTrack(
+                attributes,
+                format,
+                minBufferSize,
+                AudioTrack.MODE_STATIC,
+                AudioManager.AUDIO_SESSION_ID_GENERATE
+            )
+
+            val silentBuffer = ShortArray(minBufferSize / 2) // Default berisi nilai 0 (senyap)
+            silentAudioTrack?.write(silentBuffer, 0, silentBuffer.size)
+            silentAudioTrack?.setLoopPoints(0, silentBuffer.size, -1) // -1 berarti infinite loop
+            silentAudioTrack?.play()
+            
+            Log.d(TAG, "A2DP Keep-Alive berhasil diaktifkan")
+        } catch (e: Exception) {
+            Log.e(TAG, "Gagal mengaktifkan A2DP Keep-Alive", e)
         }
     }
 
@@ -191,6 +247,10 @@ class TtsAlertManager(private val context: Context) {
      * Bersihkan semua resource. Panggil dari onDestroy().
      */
     fun shutdown() {
+        silentAudioTrack?.stop()
+        silentAudioTrack?.release()
+        silentAudioTrack = null
+        
         tts?.stop()
         tts?.shutdown()
         tts = null
