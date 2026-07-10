@@ -156,9 +156,9 @@ class TtsAlertManager(private val context: Context) {
                 
                 // Konversi jarak ke kategori sederhana
                 val distText = when {
-                    dObj < 500 -> "dekat"
-                    dObj < 1500 -> "sedang"
-                    else -> "jauh"
+                    dObj < 500 -> "jarak dekat"
+                    dObj < 1500 -> "jarak sedang"
+                    else -> "jarak jauh"
                 }
                 
                 Log.d(TAG, "One-shot triggered: id=$trackingId d=${dObj}mm dir=$clockDirection")
