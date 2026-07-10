@@ -35,6 +35,9 @@ object CameraDepthEstimator {
     // Fallback jika label kelas tidak terdaftar
     private const val DEFAULT_HEIGHT_MM = 1200f
 
+    // Kemiringan mekanis dudukan perangkat (menunduk)
+    private const val MOUNT_PITCH_DEG = 20f
+
     /**
      * Estimasi jarak menggunakan Triangle Similarity berdasarkan tinggi Bounding Box.
      *
@@ -66,10 +69,10 @@ object CameraDepthEstimator {
         // Estimasi jarak dasar
         val distanceBase = (hReal * focalLengthPixel) / hPixel
 
-        // Kompensasi kemiringan kepala (pitch) menggunakan MPU6050:
-        // Tinggi proyeksi objek berkurang sebanding dengan cos(theta) saat menunduk/mendongak.
-        // Kalikan hasil estimasi jarak dengan cos(theta) untuk mengoreksi foreshortening.
-        val thetaRad = Math.toRadians(thetaDeg.toDouble())
+        // Kompensasi kemiringan total:
+        // Sudut fisik dudukan (20 derajat) ditambah sudut dinamis kepala (thetaDeg dari MPU6050).
+        val totalPitch = thetaDeg + MOUNT_PITCH_DEG
+        val thetaRad = Math.toRadians(totalPitch.toDouble())
         val distanceCorrected = distanceBase * kotlin.math.cos(thetaRad)
 
         // Clamp hasil estimasi ke range VL53L5CX untuk menjaga konsistensi dengan filter Formula E

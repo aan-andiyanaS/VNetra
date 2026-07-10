@@ -24,6 +24,9 @@ object TofDepthEstimator {
     const val D_MAX     = 4000   // mm — jangkauan maksimum sensor
     const val EPS_NOISE = 30     // mm — noise floor VL53L5CX
     const val TOF_FOV_V = 45f    // ° — FoV vertikal total VL53L5CX
+    
+    // Kemiringan mekanis dudukan perangkat (menunduk)
+    const val MOUNT_PITCH_DEG = 20f
 
     /**
      * Hitung jarak objek dari matriks ToF pada kolom [j], dengan kompensasi pitch [thetaDeg].
@@ -50,7 +53,9 @@ object TofDepthEstimator {
         //   4×4: center = (4-1)/2 = 1.5  → r_center range [0..3]
         val deltaTheta = TOF_FOV_V / resolution   // °/baris: 5.625° (8×8) atau 11.25° (4×4)
         val centerRow  = (resolution - 1) / 2.0f
-        val rCenter = (centerRow + thetaDeg / deltaTheta)
+        
+        val totalPitch = thetaDeg + MOUNT_PITCH_DEG
+        val rCenter = (centerRow + totalPitch / deltaTheta)
             .roundToInt()
             .coerceIn(0, resolution - 1)
 

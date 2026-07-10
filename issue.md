@@ -1,4 +1,4 @@
-# ADR-002: Lokalisasi & Reduksi Kata Label YOLO untuk Akselerasi TTS
+# ADR-003: Kompensasi Sudut Tunduk Mekanis (Fixed Pitch 20°) pada Modul Depth Estimator
 
 ## Status
 Proposed
@@ -7,43 +7,20 @@ Proposed
 2026-07-11
 
 ## Context
-Sistem saat ini menggunakan label bahasa Inggris secara bawaan (seperti `person`, `tactile_paving_straight`, `stairs_up`) sebagai keluaran dari model YOLOv11. Label-label ini kemudian diumpankan langsung ke mesin Text-to-Speech (TTS) yang dikonfigurasi untuk berbahasa Indonesia.
-Masalah yang muncul:
-1. **Prononsiasi Salah:** Mesin TTS Indonesia akan mengeja kata bahasa Inggris dengan dialek lokal, menghasilkan suara yang aneh dan sulit dimengerti (misal: "person" dibaca "per-son").
-2. **Durasi Eksekusi Suara (Latency):** Label seperti `tactile_paving_straight` terlalu panjang. Bagi tunanetra, informasi harus tersampaikan dalam hitungan milidetik. Kata yang panjang memperlambat waktu reaksi.
+Perangkat keras (kamera dan sensor ToF VL53L5CX) dipasang secara fisik dengan sudut kemiringan statis sebesar **20 derajat menunduk** ke arah permukaan jalan. 
+Saat ini, kalkulasi jarak di `CameraDepthEstimator.kt` dan pemilihan zona ROI (*Region of Interest*) di `TofDepthEstimator.kt` hanya memperhitungkan sudut dinamis `thetaDeg` dari sensor MPU6050 (kemiringan kepala pengguna). 
+Akibatnya:
+1. **Pada Kamera:** Kalkulasi koreksi *foreshortening* `cos(theta)` meleset 20 derajat, membuat estimasi jarak YOLO tidak akurat karena seolah-olah kamera dipasang lurus (0 derajat) saat kepala tegak.
+2. **Pada ToF:** Pencarian baris pusat (`rCenter`) untuk mendeteksi rintangan horizontal tidak selaras dengan sudut pandang sebenarnya, karena cakupan bidang pandang (FoV) ToF sudah menunduk 20 derajat secara *default*.
 
 ## Decision
-Menerjemahkan *array* `CLASSES` di `YoloDetector.kt` secara langsung ke dalam bahasa Indonesia menggunakan **kosakata paling singkat dan padat**. Dengan memodifikasinya di tingkat Model (YOLO), seluruh sistem turunan (termasuk `CameraDepthEstimator` dan `CameraStreamActivity`) otomatis akan menerima string ini, sehingga tidak perlu membuat *mapping* kamus (*dictionary*) baru di tingkat UI/TTS.
+Menambahkan sebuah konstanta global `MOUNT_PITCH_DEG = 20f` di dalam kedua *estimator* (kamera dan ToF). 
+Sudut kemiringan total (`totalPitch`) yang akan digunakan untuk semua perhitungan trigonometri dan geometri adalah kombinasi dari sudut statis pemasangan perangkat dan sudut dinamis kepala pengguna:
+`totalPitch = thetaDeg + MOUNT_PITCH_DEG`
 
-### Kamus Translasi Singkat
-| Index | Label Asli (Inggris) | Label Baru (Singkat) | Alasan & Catatan |
-|---|---|---|---|
-| 0 | `person` | **orang** | Jelas dan singkat. |
-| 1 | `car` | **mobil** | Universal. |
-| 2 | `motorcycle` | **motor** | Lebih cepat diucapkan daripada "sepeda motor". |
-| 3 | `bus` | **bus** | Universal. |
-| 4 | `pole` | **tiang** | Jelas. |
-| 5 | `tactile_paving_straight`| **lurus** | Konteks paving blok sudah diketahui tunanetra. |
-| 6 | `tactile_paving_turn` | **belok** | Singkat, instruksional. |
-| 7 | `tactile_paving_3way` | **simpang 3** | Cepat dilafalkan TTS sebagai "simpang tiga". |
-| 8 | `tactile_paving_4way` | **simpang 4** | Cepat dilafalkan TTS sebagai "simpang empat". |
-| 9 | `tactile_paving_stop` | **stop** | Universal dan darurat. |
-| 10 | `stairs_up` | **tangga naik** | Tetap dua kata agar tidak rancu. |
-| 11 | `stairs_down` | **tangga turun**| Tetap dua kata agar tidak rancu. |
-| 12 | `crosswalk` | **zebra cross** | Istilah paling umum di Indonesia. |
-| 13 | `tree` | **pohon** | Jelas. |
-
-## Consequences (File yang Terdampak)
-Karena nama *string* label berubah dari akar sumber (*source*), kita wajib memperbarui *hardcode* pengecekan _string_ di file-file lain:
-
-### 1. `app/src/main/java/com/airi/vnetra/model/YoloDetector.kt`
-- Ubah seluruh _string_ di dalam `val CLASSES = arrayOf(...)` menjadi nama baru sesuai kamus di atas.
-
-### 2. `app/src/main/java/com/airi/vnetra/util/CameraDepthEstimator.kt`
-- Ubah _keys_ di dalam *Map* `CLASS_HEIGHTS_MM` menggunakan nama baru (misal: `"person"` menjadi `"orang"`).
-
-### 3. `app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt`
-- Ubah logika validasi fusi tangga dari: 
-  `it.className == "stairs_up" || it.className == "stairs_down"` 
-  menjadi:
-  `it.className == "tangga naik" || it.className == "tangga turun"`
+## Consequences
+- **`CameraDepthEstimator.kt`:** 
+  Perhitungan kompensasi jarak dasar kini menggunakan `cos(totalPitch)` dan bukan sekadar `cos(thetaDeg)`.
+- **`TofDepthEstimator.kt`:** 
+  Perhitungan `rCenter` (indeks baris pusat ToF) menggunakan `totalPitch`, sehingga pada saat kepala tegak lurus (`thetaDeg = 0`), ROI sudah otomatis menargetkan area yang tepat akibat sudut *default* pemasangan sensor.
+- **Konsistensi Sensor:** Fusi data antara YOLO dan ToF akan menjadi jauh lebih presisi karena keduanya kini berpatokan pada sumbu elevasi spasial yang persis sama.
