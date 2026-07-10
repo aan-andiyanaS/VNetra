@@ -139,7 +139,7 @@ const float g_const = 9.81f;
 unsigned long last_ts_esp = 0;
 float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
 float integralFBx = 0.0f, integralFBy = 0.0f, integralFBz = 0.0f;
-const float twoKp = 1.0f; // 2 * proportional gain (Kp)
+const float twoKp = 2.5f; // 2 * proportional gain (Kp)
 const float twoKi = 0.0f; // 2 * integral gain (Ki)
 float gyro_bias_x = 0.0f, gyro_bias_y = 0.0f, gyro_bias_z = 0.0f;
 
@@ -1040,7 +1040,15 @@ void IMU_Task(void *pvParameters) {
     float gx_gravity = g_const * 2.0f * (qx*qz - qw*qy);
     float gy_gravity = g_const * 2.0f * (qw*qx + qy*qz);
     float gz_gravity = g_const * (qw*qw - qx*qx - qy*qy + qz*qz);
-    float a_lin_mag = sqrt(pow(ax - gx_gravity, 2) + pow(ay - gy_gravity, 2) + pow(az - gz_gravity, 2));
+    float a_lin_mag_raw = sqrt(pow(ax - gx_gravity, 2) + pow(ay - gy_gravity, 2) + pow(az - gz_gravity, 2));
+    
+    static float a_lin_smooth = 0.0f;
+    a_lin_smooth = (0.1f * a_lin_mag_raw) + (0.9f * a_lin_smooth);
+    
+    float a_lin_mag = a_lin_smooth;
+    if (a_lin_mag < 0.4f) {
+        a_lin_mag = 0.0f; // Noise Gate: clamp getaran statis di meja
+    }
 
     last_ts_esp = current_ts_esp;
 

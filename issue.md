@@ -1,4 +1,4 @@
-# ADR-008: Migrasi EKF ke Mahony Filter & *Dynamic Gyro Auto-Reset*
+# ADR-009: Peningkatan Akurasi Akselerometer (Mahony LPF & Kp Tuning)
 
 ## Status
 Proposed
@@ -7,41 +7,38 @@ Proposed
 2026-07-11
 
 ## Context
-Di *firmware* saat ini (`firmware-vnetra.ino`), kita menggunakan **Extended Kalman Filter (EKF)** berbasis operasi matriks 7x7 (`BasicLinearAlgebra.h`) untuk memproses orientasi dari MPU6050. 
-Pada mikrokontroler seperti ESP32, inversi matriks 7x7 pada *loop* kecepatan tinggi (200Hz) membuang siklus CPU yang sangat berharga yang seharusnya dipakai untuk kelancaran *streaming* JPEG kamera dan sensor *Time-of-Flight* (ToF).
-
-Selain itu, MPU6050 tidak memiliki Magnetometer (kompas), sehingga cepat atau lambat *noise* pada giroskop akan membesar dan membuat arah melenceng (*drift*). Pengguna meminta fitur "reset berkala" untuk menyelaraskan ulang (kalibrasi) titik tengah saat *noise* meninggi.
+Setelah melakukan migrasi dari EKF ke Mahony Filter (ADR-008), pengguna melaporkan bahwa indikator akselerasi linear (`a_lin_mag`) di layar Android menunjukkan angka **1.2 m/s² padahal kacamata (alat) sedang diam di atas meja**. Ini dianggap lebih buruk daripada saat menggunakan EKF.
 
 ## Doubt-Driven Analysis
-Berdasarkan hasil investigasi pada kode `IMU_Task`:
-1. *Firmware* ESP32 saat ini **hanya mengirimkan Pitch (theta) dan Roll (phi)** ke Android melalui paket UDP. Arah hadap absolut (*Yaw*) sama sekali tidak dikirim atau digunakan di Android. 
-2. Oleh karena itu, melakukan trik matematika untuk "me-reset *Yaw* ke arah jam 12" tidak akan berdampak apapun pada sistem.
-3. Masalah *noise* giroskop yang dikeluhkan sebenarnya adalah *Gyro Bias Drift* (giroskop membaca adanya putaran padahal pengguna diam). Ini yang menyebabkan hasil filter bergoyang perlahan.
+Kenapa hal ini terjadi?
+1. **EKF vs Mahony:** EKF menggunakan matriks kovarians (*Q* dan *R*) untuk menebak dan meredam *noise* sensor di level matematika yang dalam, sehingga hasil akhir `a_lin` tampak mulus. Sedangkan Mahony tidak memiliki peredam *noise* bawaan untuk hasil ekstraksi linear akselerasi. 
+2. **Kalkulasi Mentah:** Di kode saat ini, `a_lin_mag` dihitung secara mentah setiap 5ms (200Hz). Sensor MPU6050 murah memang memiliki getaran elektrik (jitter) alami sebesar 0.5 - 1.5 m/s². 
+3. **Konvergensi Gravitasi lambat:** Nilai Kp (*Proportional Gain*) pada Mahony mungkin terlalu rendah (`twoKp = 1.0f`), sehingga vektor gravitasi lambat mengejar posisi aslinya, menyisakan selisih yang terbaca sebagai "gerakan".
 
-## Decision
-Sebagai solusi penganut aliran *ponytail* (simpel, mematikan, langsung ke akar masalah):
+## Decision (Ponytail Approach)
+Kita tidak akan kembali ke EKF yang berat. Kita akan membuat Mahony menjadi halus dengan 3 langkah sederhana yang memakan 0% CPU:
 
-1. **Buang EKF, Gunakan Mahony Filter:**
-   Kita akan membuang semua kode `BLA::Matrix` dan `EKF` yang berat. Sebagai gantinya, kita gunakan `MahonyQuaternionUpdate`. Mahony hanya memerlukan belasan baris operasi aritmatika dasar (tanpa matriks) namun memberikan akurasi Pitch dan Roll yang sama presisinya dengan EKF untuk aplikasi 6-DOF.
-   
-2. **Dynamic Gyro Auto-Reset (Kalibrasi Otomatis Saat Diam):**
-   Alih-alih memaksa "reset arah", kita akan menyerang *noise*-nya secara langsung.
-   - Sistem akan terus memantau apakah kepala pengguna sedang diam total (*motionless*).
-   - Kondisi diam = pergerakan akselerometer nyaris 0 (hanya ada gravitasi 1G) dan putaran giroskop di bawah 2 derajat/detik, selama minimal 3 detik penuh.
-   - Jika kondisi diam tercapai, sistem akan mengambil *noise* giroskop saat itu dan menjadikannya titik 0 yang baru (memperbarui `gyro_bias`).
-   - Ini secara harfiah akan "membersihkan" *noise* secara *real-time* setiap kali tunanetra berdiri diam, membuat arah kembali presisi.
+1. **Implementasi LPF (Low-Pass Filter / EMA):**
+   Menerapkan rumus *Exponential Moving Average* pada hasil `a_lin_mag` sebelum dikirim ke Android.
+   `a_lin_smooth = (0.1 * a_lin_raw) + (0.9 * a_lin_smooth)`
+   Ini akan meratakan *noise* secara drastis layaknya EKF, tapi hanya butuh 1 baris kode.
+
+2. **Tuning Kp & Ki Mahony:**
+   Menaikkan `twoKp` (misal menjadi 2.5f) agar filter lebih kaku (cepat mengunci vektor gravitasi saat diam).
+
+3. **Noise Gate (Deadzone):**
+   Akselerasi linear di bawah ambang batas getaran statis alami (misalnya < 0.4 m/s²) akan dipaksa (*clamp*) menjadi 0.0 m/s². Dengan begini, saat ditaruh di meja, UI akan murni menampilkan 0.00 m/s².
 
 ## Proposed Changes
 ### `firmware-vnetra.ino`
-- **Hapus**: `#include <BasicLinearAlgebra.h>` dan semua variabel `x_ekf, P, Q, R, K`.
-- **Tambah**: Fungsi standar `MahonyAHRSupdateIMU(gx, gy, gz, ax, ay, az, dt)`.
-- **Ubah di `IMU_Task`**: 
-  - Ganti langkah update EKF menjadi pemanggilan `MahonyAHRSupdateIMU`.
-  - Tambahkan blok *Dynamic Gyro Auto-Reset* (penghitung *standstill timer*).
-  - Ekstrak *theta* dan *phi* dari *quaternion* keluaran Mahony.
-  - Sisa sistem pengiriman UDP ke Android tetap sama persis sehingga aplikasi Android **tidak perlu diubah sama sekali**.
+- **Variabel Global**:
+  - Ubah `const float twoKp = 1.0f;` menjadi `const float twoKp = 2.5f;`.
+  - Tambahkan `static float a_lin_smooth = 0.0f;` di dalam `IMU_Task`.
+- **IMU_Task**:
+  - Terapkan rumus LPF: `a_lin_smooth = (0.1f * a_lin_mag) + (0.9f * a_lin_smooth);`
+  - Terapkan *Noise Gate*: `if (a_lin_smooth < 0.4f) a_lin_smooth = 0.0f;`
+  - Masukkan `a_lin_smooth` ke dalam paket UDP payload `[5]`.
 
 ## Consequences
-- **Positif:** Menghemat penggunaan memori dan ratusan siklus CPU per detik di ESP32-S3. Modul kamera akan bekerja jauh lebih mulus.
-- **Positif:** *Noise* akan menghilang secara mandiri setiap kali pengguna berdiri diam sejenak di jalan (kalibrasi *on-the-fly*).
-- **Negatif:** Tidak ada, ini adalah peningkatan performa *hardware* murni.
+- **Positif:** Angka akselerasi linear di layar akan kembali 0 m/s² saat diam, dan pergerakan akan terasa jauh lebih *smooth* tanpa lonjakan *noise*.
+- **Positif:** CPU ESP32-S3 tetap ringan karena LPF hanya operasi matematika statis 1 dimensi.
