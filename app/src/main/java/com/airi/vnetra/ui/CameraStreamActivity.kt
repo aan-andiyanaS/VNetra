@@ -940,7 +940,8 @@ class CameraStreamActivity : AppCompatActivity() {
             .mapValues { entry -> entry.value.minByOrNull { it.second.first }!! }
 
         val activeClasses = closestDetections.keys
-        val newAlerts = mutableListOf<String>()
+        val urgentAlerts = mutableListOf<String>()
+        val infoAlerts = mutableListOf<String>()
 
         // 3. Proses deteksi terdekat untuk one-shot alert
         for ((classId, detPair) in closestDetections) {
@@ -955,14 +956,23 @@ class CameraStreamActivity : AppCompatActivity() {
                 isMovingForward = isMovingForward
             )
             if (alertMsg != null) {
-                newAlerts.add(alertMsg)
+                val isPaving = label in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
+                if (isPaving) {
+                    infoAlerts.add(alertMsg)
+                } else {
+                    urgentAlerts.add(alertMsg)
+                }
             }
         }
 
-        // 4. Gabungkan suara jika ada lebih dari satu peringatan baru pada frame yang sama
-        if (newAlerts.isNotEmpty()) {
-            val combinedMsg = newAlerts.joinToString(", dan ")
-            ttsAlertManager.speak(combinedMsg)
+        // 4. Suarakan peringatan (pisahkan prioritas)
+        if (urgentAlerts.isNotEmpty()) {
+            val combinedMsg = urgentAlerts.joinToString(", dan ")
+            ttsAlertManager.speak(combinedMsg) // QUEUE_FLUSH (Prioritas Tinggi, memotong suara lain)
+        }
+        if (infoAlerts.isNotEmpty()) {
+            val combinedMsg = infoAlerts.joinToString(", dan ")
+            ttsAlertManager.speakAdd(combinedMsg) // QUEUE_ADD (Informasi, masuk antrean)
         }
 
         // 5. Bersihkan berkala flag untuk kelas yang tidak terdeteksi aktif
