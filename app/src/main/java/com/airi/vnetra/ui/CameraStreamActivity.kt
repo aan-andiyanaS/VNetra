@@ -33,6 +33,7 @@ import com.airi.vnetra.util.SpatialMappingUtils
 import com.airi.vnetra.util.SessionManager
 import com.airi.vnetra.util.TerrainDetector
 import com.airi.vnetra.util.CameraDepthEstimator
+import com.airi.vnetra.util.SimpleTracker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -148,6 +149,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
     // AI Detector
     private var yoloDetector: YoloDetector? = null
+    private val tracker = SimpleTracker(maxAge = 5)
     @Volatile private var latestDetections: List<DetectionResult> = emptyList()
     @Volatile private var latestFrameWidth: Int = 640
     @Volatile private var latestFrameHeight: Int = 480
@@ -501,14 +503,15 @@ class CameraStreamActivity : AppCompatActivity() {
                                     lifecycleScope.launch(Dispatchers.Default) {
                                         try {
                                             // 1. Lakukan proses deteksi di background
-                                            val results = detector.detect(bitmap)
-                                            latestDetections = results
-                                            triggerInstantYoloTts(results)
+                                            val rawResults = detector.detect(bitmap)
+                                            val trackedResults = tracker.process(rawResults)
+                                            latestDetections = trackedResults
+                                            triggerInstantYoloTts(trackedResults)
                                             
                                             // 2. Jika berhasil, update UI di Main Thread
                                             withContext(Dispatchers.Main) {
                                                 if (!isDestroyed && !isFinishing && !isAkhiring) {
-                                                    binding.boundingBoxOverlay.setResults(results, bitmap.width.toFloat(), bitmap.height.toFloat())
+                                                    binding.boundingBoxOverlay.setResults(trackedResults, bitmap.width.toFloat(), bitmap.height.toFloat())
                                                 }
                                             }
                                         } catch (e: Exception) {
