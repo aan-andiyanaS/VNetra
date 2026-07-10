@@ -17,7 +17,6 @@ object CameraDepthEstimator {
     // Ukuran tinggi asli rata-rata objek di dunia nyata (dalam mm)
     private val CLASS_HEIGHTS_MM = mapOf(
         "person" to 1700f,
-        "bicycle" to 1000f,
         "car" to 1500f,
         "motorcycle" to 1100f,
         "bus" to 3000f,
