@@ -49,10 +49,10 @@ class YoloDetector(
         private const val IOU_THRESHOLD = 0.45f
 
         val CLASSES = arrayOf(
-            "person", "car", "motorcycle", "bus", "pole",
-            "tactile_paving_straight", "tactile_paving_turn", 
-            "tactile_paving_3way", "tactile_paving_4way", "tactile_paving_stop", 
-            "stairs_up", "stairs_down", "crosswalk", "tree"
+            "orang", "mobil", "motor", "bus", "tiang",
+            "lurus", "belok", 
+            "simpang 3", "simpang 4", "stop", 
+            "tangga naik", "tangga turun", "zebra cross", "pohon"
         )
     }
 

@@ -16,20 +16,20 @@ object CameraDepthEstimator {
 
     // Ukuran tinggi asli rata-rata objek di dunia nyata (dalam mm)
     private val CLASS_HEIGHTS_MM = mapOf(
-        "person" to 1700f,
-        "car" to 1500f,
-        "motorcycle" to 1100f,
+        "orang" to 1700f,
+        "mobil" to 1500f,
+        "motor" to 1100f,
         "bus" to 3000f,
-        "pole" to 2500f,
-        "tree" to 3000f,
-        "stairs_up" to 1500f,
-        "stairs_down" to 1500f,
-        "crosswalk" to 1000f, // Tinggi vertikal tampak di perspektif
-        "tactile_paving_straight" to 300f,
-        "tactile_paving_turn" to 300f,
-        "tactile_paving_3way" to 300f,
-        "tactile_paving_4way" to 300f,
-        "tactile_paving_stop" to 300f
+        "tiang" to 2500f,
+        "pohon" to 3000f,
+        "tangga naik" to 1500f,
+        "tangga turun" to 1500f,
+        "zebra cross" to 1000f, // Tinggi vertikal tampak di perspektif
+        "lurus" to 300f,
+        "belok" to 300f,
+        "simpang 3" to 300f,
+        "simpang 4" to 300f,
+        "stop" to 300f
     )
 
     // Fallback jika label kelas tidak terdaftar

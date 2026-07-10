@@ -827,7 +827,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                 if (isStair) {
                                     val currentDetections = latestDetections
                                     yoloValidated = currentDetections.any { 
-                                        it.className == "stairs_up" || it.className == "stairs_down" 
+                                        it.className == "tangga naik" || it.className == "tangga turun" 
                                     }
                                 }
 
