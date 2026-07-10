@@ -25,3 +25,12 @@ Meskipun kode saat ini sudah berjalan efisien secara performa, secara *penulisan
 ### 3. Simplifikasi Logika Kalibrasi Ganda (DRY Principle)
 *   **Masalah:** Baris kode untuk menghapus kalibrasi di memori (NVS) dan merestart ESP32 ditulis dua kali secara berulang (sekali di dalam `onWsEvent`, dan sekali lagi di logika *double-click* tombol).
 *   **Solusi:** Bungkus kode tersebut ke dalam satu helper `void triggerImuCalibration()`. Ini menerapkan prinsip *Don't Repeat Yourself* (DRY) yang membuat pemeliharaan kode menjadi lebih mudah.
+
+### 4. Injeksi Dokumentasi Berbasis ADR (Architecture Decision Records)
+*   **Masalah:** Kode tidak menceritakan *mengapa* sebuah keputusan dibuat (contoh: Mengapa ToF harus diinisialisasi di background task? Mengapa harus menggunakan `i2c_mutex`?).
+*   **Solusi:** Menyuntikkan blok komentar *ADR-style* di 5 titik krusial arsitektur sistem:
+    - Keselamatan sinkronisasi data *multi-core* via `i2c_mutex`.
+    - Mitigasi Watchdog Timeout (WDT) via eksekusi *background task* ToF.
+    - Penanganan status data ToF *out-of-bounds* menggunakan nilai sentinel `-1`.
+    - Arsitektur pemisahan *network*: UDP untuk *speed/data* vs WebSocket untuk *reliability/control*.
+    - Kewajiban flag `CAMERA_FB_IN_PSRAM` untuk menghindari kegagalan *heap buffer* di resolusi tinggi.

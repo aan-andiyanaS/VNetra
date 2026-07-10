@@ -402,6 +402,20 @@ bool initCamera() {
     return true;
 }
 
+// ======== HELPER ========
+void triggerImuCalibration() {
+    Serial.println("[CAL] Mengatur ulang bias IMU...");
+    for (int i = 0; i < 3; i++) {
+        ledBlue(); delay(80);
+        ledOff();  delay(80);
+    }
+    preferences.begin("sensors", false);
+    preferences.remove("bias_ok");
+    preferences.end();
+    delay(500);
+    esp_restart();
+}
+
 // ======== WEBSOCKET EVENT ========
 void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                AwsEventType type, void* arg, uint8_t* data, size_t len) {
@@ -475,12 +489,7 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                         Serial.println("[TOF] Mode change requested -> 8x8");
                     }
                 } else if (cmd == "CALIBRATE_IMU") {
-                    Serial.println("[CAL] Request calibration. Clearing NVS bias and restarting...");
-                    preferences.begin("sensors", false);
-                    preferences.remove("bias_ok");
-                    preferences.end();
-                    delay(500);
-                    esp_restart();
+                    triggerImuCalibration();
                 }
             }
             break;
@@ -1144,8 +1153,15 @@ void TOF_Task(void *pvParameters) {
           //   8  = hardware fail
           //   255 = no target in zone  (tidak ada objek)
           //
-          // Rentang jarak valid: 20mm (minimum) – 4000mm (maksimum SparkFun library)
-          // Jika jarak di luar rentang ini walau status valid → kirim -1 juga.
+          /**
+           * ADR: Nilai Sentinel "-1" pada Pembacaan Jarak ToF
+           * MENGAPA KITA MENGIRIM "-1"?
+           * Library VL53L5CX terkadang mereturn status valid (misal: 5) namun dengan jarak yang 
+           * tidak masuk akal secara fisik (contoh: di luar rentang batas 20mm - 4000mm). 
+           * Alih-alih meneruskan noise ini ke aplikasi Android, kita mem-filter-nya di level firmware 
+           * menjadi -1. Ini menstandarisasi indikator "tidak ada rintangan valid" (out of bound) 
+           * sehingga meminimalisir haptic feedback (getaran) palsu di sisi aplikasi client.
+           */
           static const uint16_t TOF_MIN_DIST_MM = 20;
           static const uint16_t TOF_MAX_DIST_MM = 4000;
 
@@ -1305,156 +1321,181 @@ void TOF_InitTask(void* pvParams) {
     vTaskDelete(NULL);
 }
 
-// ======== BUTTON RESET TASK ========
-void ButtonReset_Task(void *pvParameters) {
-    unsigned long lastShortReleaseTime = 0;
-    for (;;) {
-        if (digitalRead(RESET_BUTTON_PIN) == LOW) {
-            if (resetTriggered) {
-                // Reset sudah dieksekusi — abaikan sampai tombol dilepas terlebih dahulu
-            } else if (!resetButtonPressed) {
-                // Tombol baru ditekan — catat waktu, mulai phase 1
-                resetButtonPressed   = true;
-                resetButtonPressTime = millis();
-                resetLedPhase        = 0;
-                Serial.println("[RESET] Button pressed — tahan 5 detik untuk reset WiFi.");
+// ======== MODULAR LOOP HELPERS ========
+void handleButton() {
+    static unsigned long lastShortReleaseTime = 0;
+    static unsigned long lastPollTime = 0;
+    
+    // Poll max setiap 50ms
+    if (millis() - lastPollTime < 50) return;
+    lastPollTime = millis();
+
+    if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+        if (resetTriggered) {
+        } else if (!resetButtonPressed) {
+            resetButtonPressed   = true;
+            resetButtonPressTime = millis();
+            resetLedPhase        = 0;
+            Serial.println("[RESET] Button pressed — tahan 5 detik untuk reset WiFi.");
+        } else {
+            unsigned long held = millis() - resetButtonPressTime;
+            if (held < RESET_PHASE1_MS) {
+                if (resetLedPhase != 1) { resetLedPhase = 1; ledOrange(); Serial.println("[RESET] Phase 1/3 — Orange"); }
+            } else if (held < RESET_PHASE2_MS) {
+                if (resetLedPhase != 2) { resetLedPhase = 2; ledYellow(); Serial.println("[RESET] Phase 2/3 — Kuning"); }
+            } else if (held < RESET_HOLD_TIME) {
+                if (resetLedPhase != 3) { resetLedPhase = 3; ledRed(); Serial.println("[RESET] Phase 3/3 — Merah (segera reset!)"); }
             } else {
-                unsigned long held = millis() - resetButtonPressTime;
+                Serial.println("[SYSTEM] Reset button held 5s — Clearing WiFi credentials...");
+                resetTriggered = true; forceResetTriggered = true;
+                for (int i = 0; i < 6; i++) { ledWhite(); delay(80); ledOff(); delay(80); }
+                ledMagenta();
+                clearWiFiCredentials();
+                wifiConnected = false; deviceIP = "";
+                if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                    ws.closeAll(); xSemaphoreGive(ws_mutex);
+                }
+                wsClientConnected = false;
+                delay(500);
+                WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
+                delay(1000);
+                if (bleActive) {
+                    Serial.println("[BLE] Deinit existing BLE stack before re-init...");
+                    BLEDevice::deinit(true);
+                    bleActive = false; deviceConnected = false; oldDeviceConnected = false;
+                    pServer = nullptr; pCommandChar = nullptr; pResponseChar = nullptr;
+                    delay(200);
+                }
+                shouldScanWifi = false; shouldConnectWifi = false; pendingSSID = ""; pendingPassword = "";
+                currentSSID = ""; currentPassword = ""; isWifiDisconnected = false;
+                if (!isCameraActive) {
+                    Serial.println("[RESET] Re-initializing camera for BLE provisioning mode...");
+                    if (initCamera()) isCameraActive = true;
+                }
+                Serial.println("[BLE] Re-initializing BLE...");
+                initBLE();
+                Serial.println("[SYSTEM] WiFi reset done. BLE advertising aktif.");
+                forceResetTriggered = false;
+            }
+        }
+    } else {
+        if (resetTriggered) {
+            resetTriggered = false; resetButtonPressed = false; resetLedPhase = 0;
+            Serial.println("[RESET] Tombol dilepas — sistem siap.");
+        } else if (resetButtonPressed) {
+            unsigned long holdTime = millis() - resetButtonPressTime;
+            Serial.println("[RESET] Tombol dilepas sebelum 5 detik — reset dibatalkan.");
+            if (wifiConnected) ledGreen(); else if (bleActive) ledBlue(); else ledOff();
+            resetButtonPressed = false; resetLedPhase = 0;
+            if (holdTime < 1000) {
+                if (millis() - lastShortReleaseTime < 600) triggerImuCalibration();
+                else lastShortReleaseTime = millis();
+            }
+        }
+    }
+}
 
-                // --- Indikator LED progresif (countdown 3 phase) ---
-                if (held < RESET_PHASE1_MS) {
-                    // Phase 1: 0 – 1.6 s → Orange
-                    if (resetLedPhase != 1) {
-                        resetLedPhase = 1;
-                        ledOrange();
-                        Serial.println("[RESET] Phase 1/3 — Orange");
-                    }
-                } else if (held < RESET_PHASE2_MS) {
-                    // Phase 2: 1.6 – 3.3 s → Kuning
-                    if (resetLedPhase != 2) {
-                        resetLedPhase = 2;
-                        ledYellow();
-                        Serial.println("[RESET] Phase 2/3 — Kuning");
-                    }
-                } else if (held < RESET_HOLD_TIME) {
-                    // Phase 3: 3.3 – 5.0 s → Merah
-                    if (resetLedPhase != 3) {
-                        resetLedPhase = 3;
-                        ledRed();
-                        Serial.println("[RESET] Phase 3/3 — Merah (segera reset!)");
-                    }
-                } else {
-                    // ======== TRIGGERED: 5 detik tercapai ========
-                    Serial.println("[SYSTEM] Reset button held 5s — Clearing WiFi credentials...");
-                    resetTriggered = true; // tandai agar loop berikutnya tidak restart countdown
-                    forceResetTriggered = true; // Set flag interupsi wifi
+void handleBLEProvisioning() {
+    if (!bleActive) return;
+    if (shouldScanWifi && deviceConnected) { scanWiFiNetworks(); shouldScanWifi = false; }
+    if (shouldConnectWifi && deviceConnected) { bleConnectWifi(); shouldConnectWifi = false; }
+    if (!deviceConnected && !wifiConnected) {
+        unsigned long now = millis();
+        if (now - previousMillis >= BLINK_INTERVAL) {
+            previousMillis = now; ledState = !ledState;
+            if (ledState) ledBlue(); else ledOff();
+        }
+    }
+    if (!deviceConnected && oldDeviceConnected && !wifiConnected) {
+        delay(500); pServer->startAdvertising(); oldDeviceConnected = deviceConnected;
+    }
+    if (deviceConnected && !oldDeviceConnected) oldDeviceConnected = deviceConnected;
+}
 
-                    // A. Feedback visual: 6x blink putih cepat → magenta (sedang proses)
-                    for (int i = 0; i < 6; i++) {
-                        ledWhite(); delay(80);
-                        ledOff();   delay(80);
-                    }
-                    ledMagenta(); // indikator: sedang memproses reset
+void handleCameraStreaming(uint64_t nowUs, uint32_t nowMs) {
+    if (!wifiConnected || bleActive) return;
+    static uint64_t lastFrameUs = 0;
+    static uint32_t lastCleanup = 0;
 
-                    // 1. Hapus kredensial dari flash (NVS/Preferences)
-                    clearWiFiCredentials();
+    if (!powerSaveMode && hadClientBefore && !wsClientConnected &&
+        lastClientLostTime > 0 && (nowMs - lastClientLostTime >= POWER_SAVE_TIMEOUT)) {
+        powerSaveMode = true; Serial.println("[PWR] Masuk mode hemat daya — kamera tidak aktif");
+    }
 
-                    wifiConnected = false;
-                    deviceIP      = "";
+    if (powerSaveMode) {
+        static uint32_t lastPwrLed = 0;
+        static bool pwrLedOn = false;
+        if (nowMs - lastPwrLed >= 1500) {
+            lastPwrLed = nowMs; pwrLedOn = !pwrLedOn;
+            if (pwrLedOn) ledRed(); else ledOff();
+        }
+    }
 
-                    // 2. Tutup semua koneksi WebSocket yang masih aktif secara graceful
-                    if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                        ws.closeAll();
-                        xSemaphoreGive(ws_mutex);
-                    }
-                    wsClientConnected = false;
-                    
-                    // (wsQueue dihapus)
-                    
-                    delay(500); // Tambah delay tutup ws
+    if (nowUs - lastFrameUs >= TARGET_FRAME_US) {
+        lastFrameUs = nowUs;
+        captureAndSend();
+        if (!powerSaveMode && wsClientConnected) stat_frames_cam++;
+    }
 
-                    // 3. Putuskan WiFi dan matikan radio WiFi sepenuhnya
-                    WiFi.disconnect(true);  // true = juga clear AP/STA config internal
-                    WiFi.mode(WIFI_OFF);
-                    
-                    delay(1000);
+    if (nowMs - lastCleanup >= 2000) {
+        lastCleanup = nowMs;
+        ws.cleanupClients();
+    }
+}
 
-                    // 4. Deinit BLE jika masih aktif (cegah double-init crash)
-                    if (bleActive) {
-                        Serial.println("[BLE] Deinit existing BLE stack before re-init...");
-                        BLEDevice::deinit(true);
-                        bleActive          = false;
-                        deviceConnected    = false;
-                        oldDeviceConnected = false;
-                        pServer            = nullptr;
-                        pCommandChar       = nullptr;
-                        pResponseChar      = nullptr;
-                        delay(200);
-                    }
-
-                    // 5. Reset flag BLE command agar tidak ada perintah lama yang tertinggal
-                    shouldScanWifi    = false;
-                    shouldConnectWifi = false;
-                    pendingSSID       = "";
-                    pendingPassword   = "";
-                    currentSSID       = "";
-                    currentPassword   = "";
-                    isWifiDisconnected = false;
-
-                    // Aktifkan kembali kamera jika sebelumnya sempat mati sebelum masuk mode BLE provisioning
-                    if (!isCameraActive) {
-                        Serial.println("[RESET] Re-initializing camera for BLE provisioning mode...");
-                        if (initCamera()) {
-                            isCameraActive = true;
-                        }
-                    }
-
-                    // 6. Init ulang BLE dari kondisi bersih
-                    Serial.println("[BLE] Re-initializing BLE...");
-                    initBLE(); // set bleActive = true, LED biru di dalamnya
-
-                    Serial.println("[SYSTEM] WiFi reset done. BLE advertising aktif.");
-                    forceResetTriggered = false; // Reset interupsi flag setelah selesai
+void handleWiFiReconnection(uint32_t nowMs) {
+    if (!wifiConnected || bleActive) return;
+    static uint32_t lastWifiCheck = 0;
+    if (nowMs - lastWifiCheck >= 1000) {
+        lastWifiCheck = nowMs;
+        if (WiFi.status() != WL_CONNECTED) {
+            if (!isWifiDisconnected) {
+                isWifiDisconnected = true; wifiDisconnectTime = nowMs;
+                Serial.println("[WiFi] Koneksi WiFi terputus! Mencoba menyambung kembali...");
+                WiFi.disconnect(); WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
+            } else {
+                if (nowMs - wifiDisconnectTime > 30000 && isCameraActive) {
+                    Serial.println("[WiFi] Terputus > 30 detik. Menonaktifkan kamera sementara untuk hemat daya...");
+                    esp_camera_deinit(); isCameraActive = false;
                 }
             }
         } else {
-            // Tombol dilepas
-            if (resetTriggered) {
-                // Reset telah selesai & tombol baru dilepas — bersihkan semua flag
-                resetTriggered     = false;
-                resetButtonPressed = false;
-                resetLedPhase      = 0;
-                Serial.println("[RESET] Tombol dilepas — sistem siap.");
-            } else if (resetButtonPressed) {
-                unsigned long holdTime = millis() - resetButtonPressTime;
-                // Tombol dilepas sebelum 5 detik — batalkan, kembalikan LED
-                Serial.println("[RESET] Tombol dilepas sebelum 5 detik — reset dibatalkan.");
-                if (wifiConnected)    ledGreen();
-                else if (bleActive)   ledBlue();
-                else                  ledOff();
-                resetButtonPressed = false;
-                resetLedPhase      = 0;
-
-                // Double click detection untuk kalibrasi IMU
-                if (holdTime < 1000) { // Anggap short press jika < 1 detik
-                    if (millis() - lastShortReleaseTime < 600) { // Jeda antar klik < 600ms
-                        Serial.println("[CAL] Double click detected! Mengatur ulang bias IMU...");
-                        for(int i=0; i<3; i++) {
-                            ledBlue(); delay(80);
-                            ledOff(); delay(80);
-                        }
-                        preferences.begin("sensors", false);
-                        preferences.remove("bias_ok");
-                        preferences.end();
-                        delay(500);
-                        esp_restart();
-                    } else {
-                        lastShortReleaseTime = millis();
-                    }
+            if (isWifiDisconnected) {
+                isWifiDisconnected = false;
+                Serial.println("[WiFi] Koneksi WiFi berhasil tersambung kembali!");
+                if (!isCameraActive) {
+                    Serial.println("[WiFi] Mengaktifkan kembali kamera...");
+                    if (initCamera()) isCameraActive = true;
+                    else Serial.println("[FATAL] Gagal mengaktifkan kembali kamera!");
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(50)); // Poll every 50ms to reduce CPU usage
+    }
+}
+
+void handleStatsAndHeartbeat(uint32_t nowMs) {
+    if (!wifiConnected || bleActive) return;
+    static uint32_t lastHbeat = 0;
+    if (nowMs - lastHbeat >= WS_PING_INTERVAL) {
+        lastHbeat = nowMs;
+        Serial.printf("[STAT] Heap: %u B | WS clients: %u | FPS ~%.1f | PowerSave: %s\n",
+            esp_get_free_heap_size(), ws.count(), (float)stat_frames_cam * 1000.0f / WS_PING_INTERVAL, powerSaveMode ? "ON" : "OFF");
+        Serial.printf("       [DATA SENT] CAM: %u | IMU: %u | TOF: %u\n", stat_frames_cam, stat_frames_imu, stat_frames_tof);
+        
+        stat_frames_cam = 0; stat_frames_imu = 0; stat_frames_tof = 0;
+
+        if (ws.count() > 0) {
+            uint8_t hbeat[FRAME_HEADER_SZ];
+            const uint64_t ts = esp_timer_get_time();
+            hbeat[0] = FRAME_TYPE_HBEAT;
+            memcpy(hbeat + 1, &ts, 8);
+            if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                for (auto& client : ws.getClients()) {
+                    if (client.status() == WS_CONNECTED && !client.queueIsFull()) client.binary(hbeat, FRAME_HEADER_SZ);
+                }
+                xSemaphoreGive(ws_mutex);
+            }
+        }
     }
 }
 
@@ -1464,7 +1505,6 @@ void setup() {
     rgbLed.setBrightness(LED_BRIGHTNESS);
     ledOff();
     pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
-    xTaskCreatePinnedToCore(ButtonReset_Task, "ButtonReset", 4096, NULL, 1, NULL, 1);
 
     Serial.begin(115200);
     delay(1000);
@@ -1562,165 +1602,29 @@ void setup() {
         initBLE();
     }
 
-    // ── Defer VL53L5CX init ke background task ──
-    // Upload firmware 90KB via I2C ~8 detik berjalan di background.
-    // ToF data mulai tersedia setelah task ini selesai.
+    /**
+     * ADR: Pemisahan Task Core 0 untuk Inisialisasi ToF (VL53L5CX)
+     * MENGAPA: Proses inisialisasi VL53L5CX mengharuskan upload firmware internal sebesar 90KB
+     * melalui bus I2C, yang bersifat *blocking* dan memakan waktu sekitar ~8 detik!
+     * Jika dieksekusi secara sinkron di `setup()` (Core 1), ini akan memicu 
+     * FreeRTOS Task Watchdog Timeout (TWDT) dan mematikan sistem (panic restart).
+     * Solusinya: didelegasikan ke background task mandiri (di Core 0) agar WiFi/BLE/Kamera 
+     * dapat langsung online dan tidak menghalangi booting utama.
+     */
     xTaskCreatePinnedToCore(TOF_InitTask, "TOFInit", 4096, NULL, 1, NULL, 1);
     Serial.println("[BOOT] Setup selesai. VL53L5CX init berjalan di background.");
 }
 
 // ======== LOOP ========
 void loop() {
-    // BLE provisioning
-    if (bleActive) {
-        if (shouldScanWifi && deviceConnected) {
-            scanWiFiNetworks();
-            shouldScanWifi = false;
-        }
-        if (shouldConnectWifi && deviceConnected) {
-            bleConnectWifi();
-            shouldConnectWifi = false;
-        }
+    uint64_t nowUs = esp_timer_get_time();
+    uint32_t nowMs = millis();
 
-        // Blink biru saat menunggu koneksi BLE
-        if (!deviceConnected && !wifiConnected) {
-            unsigned long now = millis();
-            if (now - previousMillis >= BLINK_INTERVAL) {
-                previousMillis = now;
-                ledState = !ledState;
-                if (ledState) ledBlue(); else ledOff();
-            }
-        }
-
-        // Re-advertise setelah disconnect
-        if (!deviceConnected && oldDeviceConnected && !wifiConnected) {
-            delay(500);
-            pServer->startAdvertising();
-            oldDeviceConnected = deviceConnected;
-        }
-        if (deviceConnected && !oldDeviceConnected) {
-            oldDeviceConnected = deviceConnected;
-        }
-    }
-
-    // WebSocket camera streaming
-    if (wifiConnected && !bleActive) {
-        static uint64_t lastFrameUs   = 0;
-        static uint32_t lastCleanup   = 0;
-        static uint32_t lastHbeat     = 0;
-        static uint32_t framesSent    = 0;
-        uint64_t nowUs = esp_timer_get_time();
-        uint32_t nowMs = millis();
-
-        // ── Power Save Mode: cek timeout jika tidak ada client ────────────
-        if (!powerSaveMode && hadClientBefore && !wsClientConnected &&
-            lastClientLostTime > 0 &&
-            (nowMs - lastClientLostTime >= POWER_SAVE_TIMEOUT)) {
-            powerSaveMode = true;
-            Serial.println("[PWR] Masuk mode hemat daya — kamera tidak aktif");
-            // LED berkedip merah pelan untuk indikasi power save
-        }
-
-        // LED indikator power save: berkedip merah pelan
-        if (powerSaveMode) {
-            static uint32_t lastPwrLed = 0;
-            static bool     pwrLedOn   = false;
-            if (nowMs - lastPwrLed >= 1500) {  // berkedip setiap 1.5 detik
-                lastPwrLed = nowMs;
-                pwrLedOn   = !pwrLedOn;
-                if (pwrLedOn) ledRed(); else ledOff();
-            }
-        }
-
-        // (Antrian WebSocket sensor dihapus karena sudah memakai UDP)
-
-        // Capture & kirim frame (dilewati jika powerSaveMode atau tidak ada client)
-        if (nowUs - lastFrameUs >= TARGET_FRAME_US) {
-            lastFrameUs = nowUs;
-            captureAndSend();
-            if (!powerSaveMode && wsClientConnected) {
-                framesSent++;
-                stat_frames_cam++;
-            }
-        }
-
-        // Bersihkan koneksi WS mati setiap 2 detik
-        if (nowMs - lastCleanup >= 2000) {
-            lastCleanup = nowMs;
-            ws.cleanupClients();
-        }
-
-        // ── WiFi Reconnection & Camera Management ────────────────────────
-        static uint32_t lastWifiCheck = 0;
-        if (nowMs - lastWifiCheck >= 1000) { // Cek status WiFi setiap 1 detik
-            lastWifiCheck = nowMs;
-            if (WiFi.status() != WL_CONNECTED) {
-                if (!isWifiDisconnected) {
-                    isWifiDisconnected = true;
-                    wifiDisconnectTime = nowMs;
-                    Serial.println("[WiFi] Koneksi WiFi terputus! Mencoba menyambung kembali...");
-                    WiFi.disconnect();
-                    WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
-                } else {
-                    unsigned long elapsed = nowMs - wifiDisconnectTime;
-                    if (elapsed > 30000 && isCameraActive) {
-                        Serial.println("[WiFi] Terputus > 30 detik. Menonaktifkan kamera sementara untuk hemat daya...");
-                        esp_camera_deinit();
-                        isCameraActive = false;
-                    }
-                }
-            } else {
-                if (isWifiDisconnected) {
-                    isWifiDisconnected = false;
-                    Serial.println("[WiFi] Koneksi WiFi berhasil tersambung kembali!");
-                    if (!isCameraActive) {
-                        Serial.println("[WiFi] Mengaktifkan kembali kamera...");
-                        if (initCamera()) {
-                            isCameraActive = true;
-                        } else {
-                            Serial.println("[FATAL] Gagal mengaktifkan kembali kamera!");
-                        }
-                    }
-                }
-            }
-        }
-
-        // Heartbeat setiap WS_PING_INTERVAL
-        if (nowMs - lastHbeat >= WS_PING_INTERVAL) {
-            lastHbeat = nowMs;
-
-            // Log statistik yang diperkaya untuk cek aliran data sensor
-            Serial.printf("[STAT] Heap: %u B | WS clients: %u | FPS ~%.1f | PowerSave: %s\n",
-                esp_get_free_heap_size(),
-                ws.count(),
-                (float)framesSent * 1000.0f / WS_PING_INTERVAL,
-                powerSaveMode ? "ON" : "OFF");
-            
-            Serial.printf("       [DATA SENT] CAM: %u | IMU: %u | TOF: %u\n", 
-                stat_frames_cam, stat_frames_imu, stat_frames_tof);
-            
-            framesSent = 0;
-            stat_frames_cam = 0;
-            stat_frames_imu = 0;
-            stat_frames_tof = 0;
-
-            // Heartbeat ke client aktif
-            if (ws.count() > 0) {
-                uint8_t hbeat[FRAME_HEADER_SZ];
-                const uint64_t ts = esp_timer_get_time();
-                hbeat[0] = FRAME_TYPE_HBEAT;
-                memcpy(hbeat + 1, &ts, 8);
-                if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    for (auto& client : ws.getClients()) {
-                        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
-                            client.binary(hbeat, FRAME_HEADER_SZ);
-                        }
-                    }
-                    xSemaphoreGive(ws_mutex);
-                }
-            }
-        }
-    }
+    handleButton();
+    handleBLEProvisioning();
+    handleCameraStreaming(nowUs, nowMs);
+    handleWiFiReconnection(nowMs);
+    handleStatsAndHeartbeat(nowMs);
 
     // yield() agar FreeRTOS watchdog tidak trigger — lebih baik dari delay(5)
     yield();
