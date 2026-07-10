@@ -161,13 +161,15 @@ class TtsAlertManager(private val context: Context) {
                     else -> "jarak jauh"
                 }
                 
-                Log.d(TAG, "One-shot triggered: id=$trackingId d=${dObj}mm dir=$clockDirection")
+                // Aturan khusus untuk Paving (Guiding Block)
+                val isPaving = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
+                val finalLabel = if (isPaving) "paving $objectLabel" else objectLabel
                 
-                // Aturan khusus: Jika objek adalah "paving" dan jaraknya dekat, hiraukan sebut jarak
-                if (objectLabel.equals("paving", ignoreCase = true) && dObj < 500) {
-                    "$objectLabel, $dirText"
+                // Jika objek adalah paving dan jaraknya dekat, hiraukan sebut jarak
+                if (isPaving && dObj < 500) {
+                    "$finalLabel, $dirText"
                 } else {
-                    "$objectLabel, $distText, $dirText"
+                    "$finalLabel, $distText, $dirText"
                 }
             }
             dObj > D_RESET && alreadyAlerted -> {
