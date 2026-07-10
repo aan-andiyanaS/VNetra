@@ -48,6 +48,9 @@ class TtsAlertManager(private val context: Context) {
     // Waktu terakhir setiap tracking ID terdeteksi aktif di zona bahaya
     private val lastSeenTime = ConcurrentHashMap<Int, Long>()
 
+    // Waktu terakhir setiap tracking ID diucapkan (diperingatkan)
+    private val lastSpokenTime = ConcurrentHashMap<Int, Long>()
+
     // TTS Engine
     private var tts: TextToSpeech? = null
     private val ttsReady = AtomicBoolean(false)
@@ -143,47 +146,62 @@ class TtsAlertManager(private val context: Context) {
         trackingId: Int,
         dObj: Int,
         clockDirection: Int,
-        objectLabel: String = "rintangan"
+        objectLabel: String = "rintangan",
+        isMovingForward: Boolean = true
     ): String? {
         val alreadyAlerted = alertFlags[trackingId] ?: false
+        val now = System.currentTimeMillis()
+
+        // Aturan khusus untuk Paving (Guiding Block)
+        val isPaving = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
+        val finalLabel = if (isPaving) "paving $objectLabel" else objectLabel
+        
+        val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
+        
+        // Konversi jarak ke kategori sederhana
+        val distText = when {
+            dObj < 500 -> "jarak dekat"
+            dObj < 1500 -> "jarak sedang"
+            else -> "jarak jauh"
+        }
+
+        // Jika objek adalah paving dan jaraknya dekat, hiraukan sebut jarak
+        val textToSpeak = if (isPaving && dObj < 500) {
+            "$finalLabel, $dirText"
+        } else {
+            "$finalLabel, $distText, $dirText"
+        }
 
         return when {
             dObj < D_W0 && !alreadyAlerted -> {
                 // Kondisi: masuk zona bahaya, belum pernah diperingatkan → one-shot
                 alertFlags[trackingId] = true
-                lastSeenTime[trackingId] = System.currentTimeMillis()
-                val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
+                lastSeenTime[trackingId] = now
+                lastSpokenTime[trackingId] = now
+                Log.d(TAG, "One-shot triggered: id=$trackingId d=${dObj}mm dir=$clockDirection")
+                textToSpeak
+            }
+            dObj < D_W0 && alreadyAlerted -> {
+                // Objek masih di zona bahaya
+                lastSeenTime[trackingId] = now
                 
-                // Konversi jarak ke kategori sederhana
-                val distText = when {
-                    dObj < 500 -> "jarak dekat"
-                    dObj < 1500 -> "jarak sedang"
-                    else -> "jarak jauh"
+                // Stationary Paving Reminder
+                if (isPaving && !isMovingForward) {
+                    val lastSpoken = lastSpokenTime[trackingId] ?: 0L
+                    if (now - lastSpoken > 6000L) {
+                        lastSpokenTime[trackingId] = now
+                        Log.d(TAG, "Stationary Paving Reminder: id=$trackingId")
+                        return textToSpeak
+                    }
                 }
-                
-                // Aturan khusus untuk Paving (Guiding Block)
-                val isPaving = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-                val finalLabel = if (isPaving) "paving $objectLabel" else objectLabel
-                
-                // Jika objek adalah paving dan jaraknya dekat, hiraukan sebut jarak
-                if (isPaving && dObj < 500) {
-                    "$finalLabel, $dirText"
-                } else {
-                    "$finalLabel, $distText, $dirText"
-                }
+                null
             }
             dObj > D_RESET && alreadyAlerted -> {
                 // Kondisi: objek pergi dari zona bahaya → reset flag (siap diperingatkan lagi)
                 alertFlags[trackingId] = false
                 null
             }
-            else -> {
-                // Jika sudah diperingatkan tapi tetap di zona bahaya, update last seen
-                if (dObj < D_W0) {
-                    lastSeenTime[trackingId] = System.currentTimeMillis()
-                }
-                null
-            }
+            else -> null
         }
     }
 
@@ -247,6 +265,7 @@ class TtsAlertManager(private val context: Context) {
     fun resetAllFlags() {
         alertFlags.clear()
         lastSeenTime.clear()
+        lastSpokenTime.clear()
         Log.d(TAG, "Semua flag one-shot di-reset (${alertFlags.size} entries)")
     }
 
@@ -272,6 +291,7 @@ class TtsAlertManager(private val context: Context) {
         ttsReady.set(false)
         alertFlags.clear()
         lastSeenTime.clear()
+        lastSpokenTime.clear()
         Log.d(TAG, "TTS engine shutdown")
     }
 

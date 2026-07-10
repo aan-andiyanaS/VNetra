@@ -898,6 +898,8 @@ class CameraStreamActivity : AppCompatActivity() {
         val tofData = latestTofData ?: return
         val imuSnap = latestImuData
         val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
+        val aLinMag = imuSnap?.getOrElse(5) { 0f } ?: 0f
+        val isMovingForward = aLinMag > 0.3f
         val thetaDeg = rawTheta - 20f
         val frameWidth = latestFrameWidth
 
@@ -945,7 +947,8 @@ class CameraStreamActivity : AppCompatActivity() {
                 trackingId     = classId,
                 dObj           = dObj,
                 clockDirection = arahJam,
-                objectLabel    = label
+                objectLabel    = label,
+                isMovingForward = isMovingForward
             )
             if (alertMsg != null) {
                 newAlerts.add(alertMsg)
