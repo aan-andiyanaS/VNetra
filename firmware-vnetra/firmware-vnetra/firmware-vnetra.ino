@@ -1043,11 +1043,21 @@ void IMU_Task(void *pvParameters) {
     float a_lin_mag_raw = sqrt(pow(ax - gx_gravity, 2) + pow(ay - gy_gravity, 2) + pow(az - gz_gravity, 2));
     
     static float a_lin_smooth = 0.0f;
+    static float a_lin_dc_bias = 0.0f;
+    
     a_lin_smooth = (0.1f * a_lin_mag_raw) + (0.9f * a_lin_smooth);
     
-    float a_lin_mag = a_lin_smooth;
-    if (a_lin_mag < 0.4f) {
-        a_lin_mag = 0.0f; // Noise Gate: clamp getaran statis di meja
+    // Hanya tangkap bias saat relatif diam (cegah goncangan berjalan merusak titik 0)
+    if (a_lin_smooth < 1.5f) {
+        a_lin_dc_bias = (0.005f * a_lin_smooth) + (0.995f * a_lin_dc_bias);
+    }
+    
+    float a_lin_dynamic = a_lin_smooth - a_lin_dc_bias;
+    if (a_lin_dynamic < 0.0f) a_lin_dynamic = 0.0f; // Clamp lantai
+    
+    float a_lin_mag = a_lin_dynamic;
+    if (a_lin_mag < 0.2f) {
+        a_lin_mag = 0.0f; // Noise gate final
     }
 
     last_ts_esp = current_ts_esp;
