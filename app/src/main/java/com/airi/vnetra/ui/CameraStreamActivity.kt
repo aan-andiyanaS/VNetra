@@ -818,16 +818,20 @@ class CameraStreamActivity : AppCompatActivity() {
                                 val nowMs = System.currentTimeMillis()
                                 val cooldown = (nowMs - lastTerrainAlertTime) > TERRAIN_ALERT_COOLDOWN_MS
                                 val isHigh = terrainResult.confidence >= 0.70f
+                                // Validasi: Prioritaskan YOLO. Jika YOLO mendeteksi rintangan dekat, bisukan peringatan Terrain.
+                                var yoloValidated = false
                                 
-                                // Validasi YOLO khusus untuk Tangga (HOLE, CONTAMINATED bypass YOLO)
-                                val isStair = terrainResult.type == TerrainDetector.TerrainType.STAIR_DOWN || 
-                                              terrainResult.type == TerrainDetector.TerrainType.STAIR_UP
-                                var yoloValidated = !isStair
-                                
-                                if (isStair) {
-                                    val currentDetections = latestDetections
-                                    yoloValidated = currentDetections.any { 
-                                        it.className == "tangga naik" || it.className == "tangga turun" 
+                                if (!hasCloseYoloThreat) {
+                                    // Validasi YOLO khusus untuk Tangga (HOLE, CONTAMINATED bypass YOLO)
+                                    val isStair = terrainResult.type == TerrainDetector.TerrainType.STAIR_DOWN || 
+                                                  terrainResult.type == TerrainDetector.TerrainType.STAIR_UP
+                                    yoloValidated = !isStair
+                                    
+                                    if (isStair) {
+                                        val currentDetections = latestDetections
+                                        yoloValidated = currentDetections.any { 
+                                            it.className == "tangga naik" || it.className == "tangga turun" 
+                                        }
                                     }
                                 }
 
