@@ -1,40 +1,47 @@
-# ADR-006: Pemisahan Prioritas Peringatan YOLO Berdasarkan Zona Spasial (Peripheral vs Center)
+# ADR-008: Migrasi EKF ke Mahony Filter & *Dynamic Gyro Auto-Reset*
 
 ## Status
-Accepted
+Proposed
 
 ## Date
 2026-07-11
 
 ## Context
-Aplikasi VNetra memanfaatkan fitur Text-to-Speech (TTS) untuk memberitahukan objek yang dideteksi oleh AI (YOLO). Sebelumnya, semua deteksi dari YOLO dianggap sebagai peringatan bahaya yang mendesak. Sistem mengirimkan peringatan ini melalui antrean `TextToSpeech.QUEUE_FLUSH`, yang secara agresif akan memotong (menginterupsi) suara apa pun yang sedang diucapkan TTS saat itu.
+Di *firmware* saat ini (`firmware-vnetra.ino`), kita menggunakan **Extended Kalman Filter (EKF)** berbasis operasi matriks 7x7 (`BasicLinearAlgebra.h`) untuk memproses orientasi dari MPU6050. 
+Pada mikrokontroler seperti ESP32, inversi matriks 7x7 pada *loop* kecepatan tinggi (200Hz) membuang siklus CPU yang sangat berharga yang seharusnya dipakai untuk kelancaran *streaming* JPEG kamera dan sensor *Time-of-Flight* (ToF).
 
-**Permasalahan**:
-1. Objek-objek yang berada jauh di pinggiran penglihatan (ujung kiri arah jam 10, atau ujung kanan arah jam 2) sebenarnya belum tentu menjadi ancaman langsung bagi pergerakan tunanetra, kecuali mereka berbelok tajam ke arah sana.
-2. Memotong suara secara agresif untuk semua objek (meskipun di pinggir) akan membuat aplikasi terdengar sangat *spammy* dan membingungkan, terutama jika sedang ada peringatan kritis di depan (arah jam 12) yang terpotong.
-3. Objek Paving (Guiding Block) sejak awal memang difungsikan sebagai petunjuk jalan (Informasi), bukan rintangan darurat (Peringatan), sehingga perlakuan TTS-nya pun harus berbeda.
+Selain itu, MPU6050 tidak memiliki Magnetometer (kompas), sehingga cepat atau lambat *noise* pada giroskop akan membesar dan membuat arah melenceng (*drift*). Pengguna meminta fitur "reset berkala" untuk menyelaraskan ulang (kalibrasi) titik tengah saat *noise* meninggi.
+
+## Doubt-Driven Analysis
+Berdasarkan hasil investigasi pada kode `IMU_Task`:
+1. *Firmware* ESP32 saat ini **hanya mengirimkan Pitch (theta) dan Roll (phi)** ke Android melalui paket UDP. Arah hadap absolut (*Yaw*) sama sekali tidak dikirim atau digunakan di Android. 
+2. Oleh karena itu, melakukan trik matematika untuk "me-reset *Yaw* ke arah jam 12" tidak akan berdampak apapun pada sistem.
+3. Masalah *noise* giroskop yang dikeluhkan sebenarnya adalah *Gyro Bias Drift* (giroskop membaca adanya putaran padahal pengguna diam). Ini yang menyebabkan hasil filter bergoyang perlahan.
 
 ## Decision
-Kami memutuskan untuk mengklasifikasikan suara TTS menjadi dua prioritas berbeda berdasarkan jenis rintangan dan letak spasial (arah jam) objek:
+Sebagai solusi penganut aliran *ponytail* (simpel, mematikan, langsung ke akar masalah):
 
-1. **Prioritas Tinggi (Urgent / Warning) → `QUEUE_FLUSH`**
-   - Berlaku untuk rintangan berbahaya (Motor, Orang, Tiang, dsb).
-   - Berlaku HANYA jika rintangan tersebut berada di zona depan atau tengah (Arah Jam 11, 12, dan 1).
-   - *Behavior*: Akan langsung memotong kalimat TTS yang sedang berjalan agar pengguna segera awas.
-
-2. **Prioritas Normal (Information) → `QUEUE_ADD`**
-   - Berlaku untuk semua jenis Paving / Guiding Block (Lurus, Belok, Simpang 3, Simpang 4, Stop).
-   - Berlaku juga untuk rintangan (selain paving) yang posisinya berada di zona pinggiran / *peripheral* (Arah Jam 10 dan 2).
-   - *Behavior*: Akan masuk antrean secara sopan, diucapkan satu kali ketika objek masuk ke zona, dan tidak akan memotong peringatan darurat yang sedang berjalan.
+1. **Buang EKF, Gunakan Mahony Filter:**
+   Kita akan membuang semua kode `BLA::Matrix` dan `EKF` yang berat. Sebagai gantinya, kita gunakan `MahonyQuaternionUpdate`. Mahony hanya memerlukan belasan baris operasi aritmatika dasar (tanpa matriks) namun memberikan akurasi Pitch dan Roll yang sama presisinya dengan EKF untuk aplikasi 6-DOF.
+   
+2. **Dynamic Gyro Auto-Reset (Kalibrasi Otomatis Saat Diam):**
+   Alih-alih memaksa "reset arah", kita akan menyerang *noise*-nya secara langsung.
+   - Sistem akan terus memantau apakah kepala pengguna sedang diam total (*motionless*).
+   - Kondisi diam = pergerakan akselerometer nyaris 0 (hanya ada gravitasi 1G) dan putaran giroskop di bawah 2 derajat/detik, selama minimal 3 detik penuh.
+   - Jika kondisi diam tercapai, sistem akan mengambil *noise* giroskop saat itu dan menjadikannya titik 0 yang baru (memperbarui `gyro_bias`).
+   - Ini secara harfiah akan "membersihkan" *noise* secara *real-time* setiap kali tunanetra berdiri diam, membuat arah kembali presisi.
 
 ## Proposed Changes
-Modifikasi dilakukan pada file `CameraStreamActivity.kt`, khususnya di fungsi `triggerInstantYoloTts`:
-- Membuat dua array penampung terpisah: `urgentAlerts` dan `infoAlerts`.
-- Menambahkan validasi `isPeripheral = arahJam == 10 || arahJam == 2`.
-- Memasukkan notifikasi ke array `infoAlerts` jika `isPaving || isPeripheral`.
-- Eksekusi `ttsAlertManager.speak(combinedMsg)` untuk `urgentAlerts` dan `ttsAlertManager.speakAdd(combinedMsg)` untuk `infoAlerts`.
+### `firmware-vnetra.ino`
+- **Hapus**: `#include <BasicLinearAlgebra.h>` dan semua variabel `x_ekf, P, Q, R, K`.
+- **Tambah**: Fungsi standar `MahonyAHRSupdateIMU(gx, gy, gz, ax, ay, az, dt)`.
+- **Ubah di `IMU_Task`**: 
+  - Ganti langkah update EKF menjadi pemanggilan `MahonyAHRSupdateIMU`.
+  - Tambahkan blok *Dynamic Gyro Auto-Reset* (penghitung *standstill timer*).
+  - Ekstrak *theta* dan *phi* dari *quaternion* keluaran Mahony.
+  - Sisa sistem pengiriman UDP ke Android tetap sama persis sehingga aplikasi Android **tidak perlu diubah sama sekali**.
 
 ## Consequences
-- **Positif:** Mengurangi polusi suara dan informasi berlebihan bagi tunanetra. Fokus dipertajam ke objek yang benar-benar ada tepat di arah jalan mereka.
-- **Positif:** Peringatan untuk rintangan pinggir (seperti tiang listrik di bahu jalan atau motor parkir di pinggir) akan diucapkan hanya sebagai "info tambahan" satu kali, tanpa menimbulkan rasa panik.
-- **Negatif:** Tidak ada dampak kinerja komputasi karena evaluasi arah jam (`arahJam`) sudah dihitung di hulu oleh *SpatialMappingUtils*.
+- **Positif:** Menghemat penggunaan memori dan ratusan siklus CPU per detik di ESP32-S3. Modul kamera akan bekerja jauh lebih mulus.
+- **Positif:** *Noise* akan menghilang secara mandiri setiap kali pengguna berdiri diam sejenak di jalan (kalibrasi *on-the-fly*).
+- **Negatif:** Tidak ada, ini adalah peningkatan performa *hardware* murni.

@@ -59,9 +59,9 @@
 #include <Wire.h>
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
-#include <BasicLinearAlgebra.h>
+
 #include <SparkFun_VL53L5CX_Library.h>
-using namespace BLA;
+
 
 
 // ======== KAMERA PIN — ESP32-S3 WROOM N16R8 ========
@@ -134,21 +134,19 @@ void getMpuEvent(sensors_event_t *a, sensors_event_t *g, sensors_event_t *temp) 
 SparkFun_VL53L5CX myImager;
 VL53L5CX_ResultsData measurementData;
 
-// --- EKF Variables ---
+// --- Mahony Variables ---
 const float g_const = 9.81f;
-const float dt_min = 0.01f;
 unsigned long last_ts_esp = 0;
-BLA::Matrix<7, 1> x_ekf; 
-BLA::Matrix<7, 7> P; 
-BLA::Matrix<7, 7> Q; 
-BLA::Matrix<3, 3> R; 
-TaskHandle_t EKF_TaskHandle;
+float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
+float integralFBx = 0.0f, integralFBy = 0.0f, integralFBz = 0.0f;
+const float twoKp = 1.0f; // 2 * proportional gain (Kp)
+const float twoKi = 0.0f; // 2 * integral gain (Ki)
+float gyro_bias_x = 0.0f, gyro_bias_y = 0.0f, gyro_bias_z = 0.0f;
+
+TaskHandle_t EKF_TaskHandle; // Tetap nama ini agar tidak ubah fungsi lain
 TaskHandle_t TOF_TaskHandle;
 
-// ======== EKF CONVERGENCE TRACKING (Formula A.EKF.5) ========
-// ekf_frame_count: jumlah paket IMU WebSocket yang sudah dikirim (~20Hz)
-// Konvergensi dianggap setelah EKF_WARMUP_FRAMES paket = 5 detik
-// (100 paket × 50ms/paket = 5000ms, sesuai N_warmup spesifikasi)
+// ======== MAHONY TRACKING ========
 static volatile uint32_t ekf_frame_count = 0;
 static const uint32_t    EKF_WARMUP_FRAMES = 100;  // 100 × 50ms = 5 detik
 static const float       DEG2RAD_F = 0.01745329252f;  // π/180, lebih portabel dari M_PI
@@ -920,11 +918,69 @@ void initEKFState(float ax, float ay, float az) {
   float phi0   = atan2(-ax, az);
   float cp = cos(theta0 / 2.0f); float sp = sin(theta0 / 2.0f);
   float cr = cos(phi0 / 2.0f);   float sr = sin(phi0 / 2.0f);
-  x_ekf(0) = cr * cp; x_ekf(1) = sr * cp; x_ekf(2) = cr * sp; x_ekf(3) = -sr * sp;
-  x_ekf(4) = 0; x_ekf(5) = 0; x_ekf(6) = 0;
-  P.Fill(0); for(int i=0; i<7; i++) P(i,i) = 1.0f;
-  Q.Fill(0); for(int i=0; i<4; i++) Q(i,i) = 1e-4f; for(int i=4; i<7; i++) Q(i,i) = 1e-3f;
-  R.Fill(0); for(int i=0; i<3; i++) R(i,i) = 0.0025f; 
+  q0 = cr * cp; q1 = sr * cp; q2 = cr * sp; q3 = -sr * sp;
+  integralFBx = 0; integralFBy = 0; integralFBz = 0;
+  gyro_bias_x = 0; gyro_bias_y = 0; gyro_bias_z = 0;
+}
+
+void MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float ay, float az, float dt) {
+  float recipNorm;
+  float halfvx, halfvy, halfvz;
+  float halfex, halfey, halfez;
+  float qa, qb, qc;
+
+  gx -= gyro_bias_x;
+  gy -= gyro_bias_y;
+  gz -= gyro_bias_z;
+
+  if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
+    recipNorm = 1.0f / sqrt(ax * ax + ay * ay + az * az);
+    ax *= recipNorm;
+    ay *= recipNorm;
+    az *= recipNorm;
+
+    halfvx = q1 * q3 - q0 * q2;
+    halfvy = q0 * q1 + q2 * q3;
+    halfvz = q0 * q0 - 0.5f + q3 * q3;
+
+    halfex = (ay * halfvz - az * halfvy);
+    halfey = (az * halfvx - ax * halfvz);
+    halfez = (ax * halfvy - ay * halfvx);
+
+    if(twoKi > 0.0f) {
+      integralFBx += twoKi * halfex * dt;
+      integralFBy += twoKi * halfey * dt;
+      integralFBz += twoKi * halfez * dt;
+      gx += integralFBx;
+      gy += integralFBy;
+      gz += integralFBz;
+    } else {
+      integralFBx = 0.0f;
+      integralFBy = 0.0f;
+      integralFBz = 0.0f;
+    }
+
+    gx += twoKp * halfex;
+    gy += twoKp * halfey;
+    gz += twoKp * halfez;
+  }
+
+  gx *= (0.5f * dt);
+  gy *= (0.5f * dt);
+  gz *= (0.5f * dt);
+  qa = q0;
+  qb = q1;
+  qc = q2;
+  q0 += (-qb * gx - qc * gy - q3 * gz);
+  q1 += (qa * gx + qc * gz - q3 * gy);
+  q2 += (qa * gy - qb * gz + q3 * gx);
+  q3 += (qa * gz + qb * gy - qc * gx);
+
+  recipNorm = 1.0f / sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+  q0 *= recipNorm;
+  q1 *= recipNorm;
+  q2 *= recipNorm;
+  q3 *= recipNorm;
 }
 
 void IMU_Task(void *pvParameters) {
@@ -954,95 +1010,53 @@ void IMU_Task(void *pvParameters) {
         is_moving_fast = false;
     }
 
-    float wx_corr = wx - x_ekf(4); float wy_corr = wy - x_ekf(5); float wz_corr = wz - x_ekf(6);
-    float qw = x_ekf(0), qx = x_ekf(1), qy = x_ekf(2), qz = x_ekf(3);
+    // ── Dynamic Gyro Auto-Reset ──
+    static uint32_t standstill_ms = 0;
+    float accel_mag = sqrt(ax*ax + ay*ay + az*az);
+    // Cek diam: akselerasi dekat 1G (9.81) dan gyro dekat 0
+    if (abs(accel_mag - g_const) < 0.3f && abs(wx) < 0.035f && abs(wy) < 0.035f && abs(wz) < 0.035f) {
+        standstill_ms += 5; // dt = 5ms
+        if (standstill_ms >= 3000) {
+            gyro_bias_x = wx;
+            gyro_bias_y = wy;
+            gyro_bias_z = wz;
+            standstill_ms = 0; // Reset timer setelah dikalibrasi
+            Serial.printf("[IMU] Auto-Reset Gyro Bias: %.4f, %.4f, %.4f\n", gyro_bias_x, gyro_bias_y, gyro_bias_z);
+        }
+    } else {
+        standstill_ms = 0;
+    }
 
-    x_ekf(0) += 0.5f * dt * (-qx*wx_corr - qy*wy_corr - qz*wz_corr);
-    x_ekf(1) += 0.5f * dt * ( qw*wx_corr - qz*wy_corr + qy*wz_corr);
-    x_ekf(2) += 0.5f * dt * ( qz*wx_corr + qw*wy_corr - qx*wz_corr);
-    x_ekf(3) += 0.5f * dt * (-qy*wx_corr + qx*wy_corr + qw*wz_corr);
+    // ── Update Mahony Filter ──
+    MahonyAHRSupdateIMU(wx, wy, wz, ax, ay, az, dt);
 
-    float q_norm = sqrt(x_ekf(0)*x_ekf(0) + x_ekf(1)*x_ekf(1) + x_ekf(2)*x_ekf(2) + x_ekf(3)*x_ekf(3));
-    x_ekf(0)/=q_norm; x_ekf(1)/=q_norm; x_ekf(2)/=q_norm; x_ekf(3)/=q_norm;
-
-    BLA::Matrix<7, 7> F_mat; F_mat.Fill(0);
-    F_mat(0,0) = 1; F_mat(0,1) = -0.5f*dt*wx_corr; F_mat(0,2) = -0.5f*dt*wy_corr; F_mat(0,3) = -0.5f*dt*wz_corr;
-    F_mat(1,0) = 0.5f*dt*wx_corr; F_mat(1,1) = 1; F_mat(1,2) = 0.5f*dt*wz_corr; F_mat(1,3) = -0.5f*dt*wy_corr;
-    F_mat(2,0) = 0.5f*dt*wy_corr; F_mat(2,1) = -0.5f*dt*wz_corr; F_mat(2,2) = 1; F_mat(2,3) = 0.5f*dt*wx_corr;
-    F_mat(3,0) = 0.5f*dt*wz_corr; F_mat(3,1) = 0.5f*dt*wy_corr; F_mat(3,2) = -0.5f*dt*wx_corr; F_mat(3,3) = 1;
-    F_mat(0,4) =  0.5f*dt*qx; F_mat(0,5) =  0.5f*dt*qy; F_mat(0,6) =  0.5f*dt*qz;
-    F_mat(1,4) = -0.5f*dt*qw; F_mat(1,5) =  0.5f*dt*qz; F_mat(1,6) = -0.5f*dt*qy;
-    F_mat(2,4) = -0.5f*dt*qz; F_mat(2,5) = -0.5f*dt*qw; F_mat(2,6) =  0.5f*dt*qx;
-    F_mat(3,4) =  0.5f*dt*qy; F_mat(3,5) = -0.5f*dt*qx; F_mat(3,6) = -0.5f*dt*qw;
-    F_mat(4,4) = 1; F_mat(5,5) = 1; F_mat(6,6) = 1;
-
-    P = F_mat * P * ~F_mat + Q;
-
-    qw = x_ekf(0); qx = x_ekf(1); qy = x_ekf(2); qz = x_ekf(3);
-    BLA::Matrix<3, 1> hx;
-    hx(0) = g_const * 2.0f * (qx*qz - qw*qy);
-    hx(1) = g_const * 2.0f * (qw*qx + qy*qz);
-    hx(2) = g_const * (qw*qw - qx*qx - qy*qy + qz*qz);
-
-    BLA::Matrix<3, 1> z; z(0)=ax; z(1)=ay; z(2)=az;
-    BLA::Matrix<3, 1> y = z - hx;
-
-    BLA::Matrix<3, 7> H; H.Fill(0);
-    H(0,0) = -2*qy; H(0,1) =  2*qz; H(0,2) = -2*qw; H(0,3) =  2*qx;
-    H(1,0) =  2*qx; H(1,1) =  2*qw; H(1,2) =  2*qz; H(1,3) =  2*qy;
-    H(2,0) =  2*qw; H(2,1) = -2*qx; H(2,2) = -2*qy; H(2,3) =  2*qz;
-    H *= g_const;
-
-    BLA::Matrix<3, 3> S = H * P * ~H + R;
-    BLA::Matrix<7, 3> K = P * ~H * Inverse(S);
-
-    x_ekf += K * y;
-    BLA::Matrix<7, 7> I; I.Fill(0); for(int i=0; i<7; i++) I(i,i) = 1.0f;
-    P = (I - K * H) * P;
-
-    q_norm = sqrt(x_ekf(0)*x_ekf(0) + x_ekf(1)*x_ekf(1) + x_ekf(2)*x_ekf(2) + x_ekf(3)*x_ekf(3));
-    x_ekf(0)/=q_norm; x_ekf(1)/=q_norm; x_ekf(2)/=q_norm; x_ekf(3)/=q_norm;
-
-    qw = x_ekf(0); qx = x_ekf(1); qy = x_ekf(2); qz = x_ekf(3);
+    float qw = q0, qx = q1, qy = q2, qz = q3;
     float theta = asin(2.0f * (qw*qy - qz*qx)) * RAD_TO_DEG;
     float phi   = atan2(2.0f * (qw*qx + qy*qz), 1.0f - 2.0f * (qx*qx + qy*qy)) * RAD_TO_DEG;
-    float wx_corr_deg = (wx - x_ekf(4)) * RAD_TO_DEG;
-    float wy_corr_deg = (wy - x_ekf(5)) * RAD_TO_DEG;
-    float wz_corr_deg = (wz - x_ekf(6)) * RAD_TO_DEG;
+    float wx_corr_deg = (wx - gyro_bias_x) * RAD_TO_DEG;
+    float wy_corr_deg = (wy - gyro_bias_y) * RAD_TO_DEG;
+    float wz_corr_deg = (wz - gyro_bias_z) * RAD_TO_DEG;
 
-    float gx = g_const * 2.0f * (qx*qz - qw*qy);
-    float gy = g_const * 2.0f * (qw*qx + qy*qz);
-    float gz = g_const * (qw*qw - qx*qx - qy*qy + qz*qz);
-    float a_lin_mag = sqrt(pow(ax - gx, 2) + pow(ay - gy, 2) + pow(az - gz, 2));
+    float gx_gravity = g_const * 2.0f * (qx*qz - qw*qy);
+    float gy_gravity = g_const * 2.0f * (qw*qx + qy*qz);
+    float gz_gravity = g_const * (qw*qw - qx*qx - qy*qy + qz*qz);
+    float a_lin_mag = sqrt(pow(ax - gx_gravity, 2) + pow(ay - gy_gravity, 2) + pow(az - gz_gravity, 2));
 
     last_ts_esp = current_ts_esp;
 
-    // ── A.EKF.5: Pra-komputasi v_head_base (BARU v8.1) ─────────────────────
-    // Formula: v_head_base = k_damp × |ω_x^corr| × cos(θ) × π/180  [rad/s]
-    // Dikirim ke Mobile untuk digunakan Formula G.1b: v_head^(i) = v_head_base × d_obj^(i)
-    // k_damp: faktor redaman saat pengguna menoleh tajam (|ωx| > 5°/s)
-    const float OMEGA_X_LIM_DEG = 5.0f;  // °/s — dari Konstanta Sistem
+    // ── A.EKF.5: Pra-komputasi v_head_base ─────────────────────
+    const float OMEGA_X_LIM_DEG = 5.0f;  
     float k_damp     = (fabsf(wx_corr_deg) > OMEGA_X_LIM_DEG) ? 0.5f : 1.0f;
-    float v_head_base = k_damp
-                      * (fabsf(wx_corr_deg) * DEG2RAD_F)   // |ω_x^corr| °/s → rad/s
-                      * cosf(theta * DEG2RAD_F);            // kompensasi pitch
+    float v_head_base = k_damp * (fabsf(wx_corr_deg) * DEG2RAD_F) * cosf(theta * DEG2RAD_F);
 
-    // ── Rate-limit UDP send: EKF 200Hz → kirim ~20Hz (setiap 10 iterasi) ──────
+    // ── Rate-limit UDP send ──
     static uint8_t imu_send_tick = 0;
     if (udpClientReady && !powerSaveMode && (++imu_send_tick >= 10)) {
       imu_send_tick = 0;
-      ekf_frame_count++;  // Hitung paket IMU dikirim untuk guard is_converged
-
-      // ── A.EKF.5: is_converged — OR antara frame counter dan norma Frobenius P ─
-      // Norma Frobenius ||P||_F: cukup bandingkan kuadratnya dengan ε_conv² = 0.01
-      // untuk menghindari sqrt() yang relatif mahal di dalam loop 20Hz ini.
-      float p_frob_sq = 0.0f;
-      for (int _i = 0; _i < 7; _i++)
-          for (int _j = 0; _j < 7; _j++)
-              p_frob_sq += P(_i, _j) * P(_i, _j);
-      bool p_ok  = (p_frob_sq < 0.01f);                    // ||P||_F < 0.10
-      bool frm_ok = (ekf_frame_count >= EKF_WARMUP_FRAMES); // frame counter >= 100
-      float is_converged = (p_ok || frm_ok) ? 1.0f : 0.0f;
+      ekf_frame_count++;  // Hitung paket IMU dikirim
+      
+      bool frm_ok = (ekf_frame_count >= EKF_WARMUP_FRAMES);
+      float is_converged = frm_ok ? 1.0f : 0.0f;
 
       // ── Payload v2: 9 float × 4B = 36B → total frame = 9B header + 36B = 45B ─
       // Urutan field sesuai Formula A.6:
