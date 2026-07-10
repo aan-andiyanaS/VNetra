@@ -811,12 +811,27 @@ class CameraStreamActivity : AppCompatActivity() {
                                 thetaDeg  = thetaDeg
                             )
 
-                            if (terrainResult.alertLevel != TerrainDetector.AlertLevel.NONE) {
-                                val nowMs    = System.currentTimeMillis()
-                                val isHigh   = terrainResult.alertLevel == TerrainDetector.AlertLevel.HIGH
+                            if (terrainResult.type != TerrainDetector.TerrainType.SAFE && 
+                                terrainResult.type != TerrainDetector.TerrainType.OPEN &&
+                                terrainResult.confidence >= 0.55f) {
+                                
+                                val nowMs = System.currentTimeMillis()
                                 val cooldown = (nowMs - lastTerrainAlertTime) > TERRAIN_ALERT_COOLDOWN_MS
+                                val isHigh = terrainResult.confidence >= 0.70f
+                                
+                                // Validasi YOLO khusus untuk Tangga (HOLE, CONTAMINATED bypass YOLO)
+                                val isStair = terrainResult.type == TerrainDetector.TerrainType.STAIR_DOWN || 
+                                              terrainResult.type == TerrainDetector.TerrainType.STAIR_UP
+                                var yoloValidated = !isStair
+                                
+                                if (isStair) {
+                                    val currentDetections = latestDetections
+                                    yoloValidated = currentDetections.any { 
+                                        it.className == "stairs_up" || it.className == "stairs_down" 
+                                    }
+                                }
 
-                                if (isHigh || cooldown) {
+                                if (yoloValidated && (isHigh || cooldown)) {
                                     lastTerrainAlertTime = nowMs
 
                                     val hCm      = (terrainResult.hEst / 10).toInt()
@@ -829,21 +844,17 @@ class CameraStreamActivity : AppCompatActivity() {
                                         TerrainDetector.TerrainType.STAIR_DOWN -> "tangga turun"
                                         TerrainDetector.TerrainType.STAIR_UP   -> "tangga naik"
                                         TerrainDetector.TerrainType.HOLE       -> "lubang"
-                                        TerrainDetector.TerrainType.RAMP       -> "landai"
+                                        TerrainDetector.TerrainType.CONTAMINATED -> "objek dekat"
                                         else -> ""
                                     }
 
-                                    val msg = when (terrainResult.alertLevel) {
-                                        TerrainDetector.AlertLevel.HIGH ->
-                                            "Awas! $typeText, sekitar $hCm, $dirText!"
-                                        TerrainDetector.AlertLevel.MED  ->
-                                            "Perhatian, $typeText, $hCm, $dirText"
-                                        TerrainDetector.AlertLevel.INFO ->
-                                            "Landai $dirText"
-                                        else -> ""
-                                    }
+                                    if (typeText.isNotEmpty()) {
+                                        val msg = if (isHigh) {
+                                            "Awas! $typeText, sekitar $hCm cm, $dirText!"
+                                        } else {
+                                            "Perhatian, $typeText, $hCm cm, $dirText"
+                                        }
 
-                                    if (msg.isNotEmpty()) {
                                         if (isHigh) ttsAlertManager.speak(msg)
                                         else ttsAlertManager.speakAdd(msg)
                                     }

@@ -1,17 +1,38 @@
-# Optimasi Latensi Firmware ESP32 (Ponytail Full)
+# Rencana Arsitektur Fusi YOLO & ToF (Terrain Detector V10.0)
 
-Berdasarkan investigasi `/doubt-driven-development` pada `firmware-vnetra.ino`, keterlambatan (latensi) sistem tidak disebabkan oleh kerumitan operasi matematika EKF, melainkan oleh pembagian beban Core yang menumpuk dan adanya sisa kode mati (*Dead Code*). 
+Berdasarkan permintaan Anda, arsitektur `TerrainDetector` akan dirombak total dari yang tadinya bertindak sebagai "Pengambil Keputusan Tunggal" (Single Source of Truth) menjadi sekadar "Estimator Jarak/Kedalaman", di mana **kamera/YOLO bertindak sebagai verifikator akhir** untuk topografi ekstrem.
 
-Berikut adalah rencana perbaikan efisiensi ekstrem tanpa mengubah satupun output atau fungsionalitas yang ada:
+## 🎯 Tujuan Utama
+1. Menghindari *false positive* ToF pada rintangan kompleks (seperti pantulan cahaya/permukaan aneh yang terbaca sebagai tangga/lubang).
+2. Mendelegasikan verifikasi visual ke AI (YOLO).
+3. Hanya menyisakan peringatan instan (*pure ToF*) untuk keselamatan dasar: `CONTAMINATED` (nabrak objek/tembok depan mata), `OPEN` (bebas halangan), dan `SAFE` (lantai normal).
+4. Pemusnahan fitur deteksi `RAMP` (tanjakan/bidang miring).
+5. Peningkatan ketat pada logika deteksi `HOLE` di tingkat raw ToF.
 
-## 1. Hapus Dead Code (`wsQueue`)
-*   **Masalah:** Di fungsi `loop()`, ESP32 secara terus-menerus mengecek antrian `wsQueue` ratusan kali per detik. Namun, tidak ada satupun instruksi `xQueueSend` di seluruh firmware (sensor IMU & TOF sudah berevolusi mengirim data via UDP secara langsung).
-*   **Solusi:** Hapus seluruh deklarasi `wsQueue`, `xQueueCreate`, dan blok pembacaan `xQueueReceive` di `loop()`. Ini adalah pendekatan *Ponytail Full*: menghapus beban komputasi dan memori yang tidak pernah digunakan.
+---
 
-## 2. Load Balancing (Pindahkan `TOF_Task` ke Core 0)
-*   **Masalah:** Saat ini `IMU_Task` (Prioritas 2), `TOF_Task` (Prioritas 1), dan `loop()` untuk kamera (Prioritas 1) semuanya berdesakan memperebutkan **Core 1** ESP32! Akibatnya, saat Kamera sibuk memproses gambar, task sensor harus antre (berimbas pada *jitter*).
-*   **Solusi:** Ubah parameter `xTaskCreatePinnedToCore` untuk `TOF_Task` dari Core 1 menjadi **Core 0**. Core 0 saat ini sangat luang karena hanya menangani instruksi WiFi. Mengingat jalur I2C sudah diamankan secara ketat dengan `i2c_mutex`, kedua task sensor ini bisa berjalan paralel dengan sempurna di dua *core* fisik berbeda.
+## 🛠️ Detail Perubahan (Incremental Implementation)
 
-## 3. Stabilisasi EKF 200Hz (`vTaskDelayUntil`)
-*   **Masalah:** `IMU_Task` saat ini menghitung *delta time* (`dt`) dengan `millis()`, lalu menjeda task menggunakan `vTaskDelay(5)`. Jitter membuat nilai `dt` fluktuatif antara 4-6ms, yang membuat pembacaan EKF berisiko kurang presisi dan membebani komputasi *floating-point*.
-*   **Solusi:** Terapkan `vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5))` dan jadikan `dt = 0.005f` sebagai konstanta pasti. Ini memaksa EKF untuk mengunci pada kecepatan absolut 200Hz, mengurangi overhead waktu eksekusi CPU pada baris tersebut menjadi hampir nol.
+### Fase 1: Perombakan `TerrainDetector.kt`
+- **Hapus `TerrainType.RAMP`:** Menghilangkan semua referensi dan blok logika `RAMP` dari *decision tree* (Formula J.3) dan *confidence scoring* (J.6).
+- **Pengetatan Kriteria `HOLE` (Formula J.3):**
+  Saat ini `HOLE` terdeteksi jika `anomalyCols.size <= 3`. Ini terlalu longgar. Kita akan memperketatnya:
+  1. Hanya boleh maksimal **2 kolom** anomali (`anomalyCols.size <= 2`).
+  2. Harus memiliki *vertical drop* ($\Delta z_v$) yang **sangat besar** (misal > `DELTA_Z_STEP * 1.5`).
+  3. Rasio kedalaman ($R$) dinaikkan *threshold*-nya.
+- **Pencabutan Wewenang *Alerting*:**
+  `TerrainDetector` tidak lagi berhak mengeluarkan `AlertLevel.HIGH` atau `AlertLevel.MED` untuk tangga dan lubang. Tanggung jawab ini dilempar ke atas (ke `CameraStreamActivity`), sehingga output murni hanya berisi `TerrainType`, `hEst` (estimasi kedalaman), dan `confidence`.
+
+### Fase 2: Pembangunan Sistem Validasi YOLO di `CameraStreamActivity.kt`
+- **Tof-YOLO Fusion Pipeline:**
+  Saat `TerrainDetector` melempar hasil `STAIR_DOWN` atau `STAIR_UP`, sistem **TIDAK AKAN** membunyikan *speaker* TTS.
+  Sistem akan terlebih dahulu menahan *state* ini dan memeriksa daftar *Bounding Box* terbaru (*latest available frame*) dari YOLO (Object Detection).
+- **Proses Validasi:**
+  1. Jika ToF mengatakan `STAIR_DOWN` di arah "Jam 12", sistem akan mengecek apakah YOLO melihat kelas `stairs_down` atau `stairs_up` di area tengah layar.
+  2. Jika **YA** (Validasi Lulus): TTS akan berbunyi dengan gabungan informasi: "Awas tangga turun, kedalaman [x] cm (dari ToF)".
+  3. Jika **TIDAK ADA** kotak YOLO yang cocok: Sistem akan mengabaikan peringatan ToF (menganggapnya *noise*).
+- **Pengecualian (*Bypass*):**
+  Untuk status `CONTAMINATED`, `SAFE`, `OPEN`, dan **`HOLE`**, sistem akan **membypass validasi YOLO** dan langsung percaya pada ToF. Khusus untuk `HOLE`, karena berjalan terlepas dari YOLO, validasinya di tingkat raw ToF dibuat jauh lebih ketat agar tidak menimbulkan *false positive*.
+
+---
+*(Semua pertanyaan konfirmasi telah terjawab, implementasi dapat dimulai.)*

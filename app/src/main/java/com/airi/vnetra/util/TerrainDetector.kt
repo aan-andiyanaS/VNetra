@@ -58,12 +58,8 @@ class TerrainDetector {
         CONTAMINATED, // Zona tengah terbaca dekat → kemungkinan ada objek di depan, bukan lantai
         STAIR_DOWN,   // Tangga turun / permukaan lebih rendah
         STAIR_UP,     // Tangga naik / hambatan ke atas
-        HOLE,         // Lubang / drop lokal
-        RAMP          // Bidang miring
+        HOLE          // Lubang / drop lokal
     }
-
-    /** Level alert output J.7 */
-    enum class AlertLevel { HIGH, MED, INFO, NONE }
 
     /**
      * Hasil deteksi terrain untuk satu frame.
@@ -71,14 +67,12 @@ class TerrainDetector {
      * @param confidence  keyakinan ∈ [0, 1]
      * @param hEst        estimasi kedalaman/ketinggian anomali (mm) — 0 untuk SAFE/OPEN
      * @param direction   arah jam dominan anomali: 11, 12, atau 1
-     * @param alertLevel  level peringatan J.7
      */
     data class TerrainResult(
         val type:       TerrainType = TerrainType.SAFE,
         val confidence: Float       = 0f,
         val hEst:       Float       = 0f,
-        val direction:  Int         = 12,
-        val alertLevel: AlertLevel  = AlertLevel.NONE
+        val direction:  Int         = 12
     )
 
     // State temporal: riwayat tipe per frame untuk C_temporal
@@ -187,8 +181,8 @@ class TerrainDetector {
         val anomalyCols = (0..7).filter { c -> sigmaJ[c] > SIGMA_COL_TH }
         val pattern = when {
             anomalyCols.isEmpty()  -> "SAFE"
-            anomalyCols.size >= 5  -> "UNIFORM"    // anomali menyebar luas → STAIR_DOWN
-            anomalyCols.size <= 3  -> "LOCALIZED"  // anomali sempit → HOLE
+            anomalyCols.size >= 4  -> "UNIFORM"    // anomali menyebar luas → STAIR_DOWN
+            anomalyCols.size <= 2  -> "LOCALIZED"  // anomali sempit → HOLE
             else                   -> "MIXED"
         }
 
@@ -202,14 +196,10 @@ class TerrainDetector {
 
             // Tangga turun / lubang: gradien besar ke bawah, R tinggi
             dzV > DELTA_Z_STEP && R > R_TH_HI && pattern == "UNIFORM"   -> TerrainType.STAIR_DOWN
-            dzV > DELTA_Z_STEP && R > R_TH_HI && pattern == "LOCALIZED" -> TerrainType.HOLE
+            dzV > (DELTA_Z_STEP * 1.5f) && R > R_TH_HI && pattern == "LOCALIZED" -> TerrainType.HOLE
 
             // Tangga naik / hambatan: gradien besar ke atas, tepi tajam
             dzV < -DELTA_Z_STEP && xi > EDGE_TH -> TerrainType.STAIR_UP
-
-            // Bidang miring: gradien kecil tapi R di atas threshold bawah, tepi tidak tajam
-            dzV in -DELTA_Z_STEP..DELTA_Z_STEP
-                && R > R_TH_LO && xi <= EDGE_TH -> TerrainType.RAMP
 
             // Default: lantai normal
             else -> TerrainType.SAFE
@@ -226,7 +216,6 @@ class TerrainDetector {
                 if (prevZLowSafe > 0f) abs(zLow - prevZLowSafe) / cosAlpha else abs(dzV) / cosAlpha
             TerrainType.HOLE       -> abs(zLow - zMid)
             TerrainType.STAIR_UP   -> abs(zMid - zLow)
-            TerrainType.RAMP       -> abs(zMid - zLow)
             else                   -> 0f
         }.coerceAtLeast(0f)
 
@@ -248,8 +237,6 @@ class TerrainDetector {
                 ((R - R_TH_HI) / (1f - R_TH_HI)).coerceIn(0f, 1f)
             TerrainType.STAIR_UP ->
                 (xi / (EDGE_TH * 2f)).coerceIn(0f, 1f)
-            TerrainType.RAMP ->
-                ((R - R_TH_LO) / (R_TH_HI - R_TH_LO)).coerceIn(0f, 1f)
             else -> 0f
         }
 
@@ -268,7 +255,6 @@ class TerrainDetector {
         // C_edge: dukungan edge sharpness terhadap keputusan
         val cEdge = when (type) {
             TerrainType.STAIR_UP  -> (xi / (EDGE_TH * 2f)).coerceIn(0f, 1f)
-            TerrainType.RAMP      -> (1f - xi / (EDGE_TH * 2f)).coerceIn(0f, 1f)
             TerrainType.HOLE      ->
                 // HOLE diperkuat jika Δz_t besar (objek mendekat cepat ke lubang) — post-audit C5
                 if (abs(dzT) > DELTA_Z_STEP * 0.5f) 0.8f else 0.5f
@@ -279,32 +265,11 @@ class TerrainDetector {
         val confidence = (0.40f * cR + 0.30f * cSpatial + 0.20f * cTemporal + 0.10f * cEdge)
             .coerceIn(0f, 1f)
 
-        // ── J.7: Routing alert ────────────────────────────────────────────────
-        // STAIR_DOWN, HOLE, STAIR_UP → HIGH (post-audit C3: STAIR_UP masuk HIGH)
-        // RAMP → hanya INFO (tidak mengancam keselamatan langsung)
-        val alertLevel = when {
-            type in setOf(TerrainType.STAIR_DOWN, TerrainType.HOLE, TerrainType.STAIR_UP)
-                && confidence >= C_HIGH -> AlertLevel.HIGH
-
-            type in setOf(TerrainType.STAIR_DOWN, TerrainType.HOLE, TerrainType.STAIR_UP)
-                && confidence >= C_MID  -> AlertLevel.MED
-
-            type == TerrainType.RAMP && confidence >= C_MID -> AlertLevel.INFO
-
-            else -> AlertLevel.NONE
-        }
-
-        if (alertLevel != AlertLevel.NONE) {
-            Log.d(TAG, "Terrain: $type conf=%.2f h=${hEst.toInt()}mm dir=$direction → $alertLevel"
-                .format(confidence))
-        }
-
         return TerrainResult(
             type       = type,
             confidence = confidence,
             hEst       = hEst,
-            direction  = direction,
-            alertLevel = alertLevel
+            direction  = direction
         )
     }
 
@@ -343,7 +308,7 @@ class TerrainDetector {
         val anomalyCols4 = (0 until N).filter { c -> sigmaJ4[c] > SIGMA_COL_TH }
         val pattern4 = when {
             anomalyCols4.isEmpty() -> "SAFE"
-            anomalyCols4.size >= 3 -> "UNIFORM"
+            anomalyCols4.size >= 2 -> "UNIFORM"
             anomalyCols4.size == 1 -> "LOCALIZED"
             else                   -> "MIXED"
         }
@@ -351,9 +316,8 @@ class TerrainDetector {
             zHigh >= D_GUARD                                                  -> TerrainType.OPEN
             zLow  <  D_CONT                                                   -> TerrainType.CONTAMINATED
             dzV   >  DELTA_Z_STEP && R > R_TH_HI && pattern4 == "UNIFORM"   -> TerrainType.STAIR_DOWN
-            dzV   >  DELTA_Z_STEP && R > R_TH_HI && pattern4 == "LOCALIZED" -> TerrainType.HOLE
+            dzV   >  (DELTA_Z_STEP * 1.5f) && R > R_TH_HI && pattern4 == "LOCALIZED" -> TerrainType.HOLE
             dzV   < -DELTA_Z_STEP && xi > EDGE_TH                            -> TerrainType.STAIR_UP
-            dzV in -DELTA_Z_STEP..DELTA_Z_STEP && R > R_TH_LO && xi <= EDGE_TH -> TerrainType.RAMP
             else                                                              -> TerrainType.SAFE
         }
         if (typeHistory.size >= HISTORY_SIZE) typeHistory.removeFirst()
@@ -361,7 +325,7 @@ class TerrainDetector {
         val cosAlpha = Math.cos(Math.toRadians(ALPHA_MOUNT.toDouble())).toFloat()
         val hEst = when (type) {
             TerrainType.STAIR_DOWN -> if (prevZLowSafe > 0f) abs(zLow - prevZLowSafe) / cosAlpha else abs(dzV) / cosAlpha
-            TerrainType.HOLE, TerrainType.STAIR_UP, TerrainType.RAMP -> abs(zHigh - zLow)
+            TerrainType.HOLE, TerrainType.STAIR_UP -> abs(zHigh - zLow)
             else -> 0f
         }.coerceAtLeast(0f)
         if (type == TerrainType.SAFE && zLow < D_MAX) prevZLowSafe = zLow
@@ -374,28 +338,16 @@ class TerrainDetector {
         val cR = when (type) {
             TerrainType.STAIR_DOWN, TerrainType.HOLE -> ((R - R_TH_HI) / (1f - R_TH_HI)).coerceIn(0f, 1f)
             TerrainType.STAIR_UP -> (xi / (EDGE_TH * 2f)).coerceIn(0f, 1f)
-            TerrainType.RAMP     -> ((R - R_TH_LO) / (R_TH_HI - R_TH_LO)).coerceIn(0f, 1f)
             else                 -> 0f
         }
         val cSpatial  = when (pattern4) { "UNIFORM" -> 0.9f; "LOCALIZED" -> 0.8f; "MIXED" -> 0.5f; else -> 0.1f }
         val cTemporal = if (typeHistory.isEmpty()) 0f else typeHistory.count { it == type }.toFloat() / typeHistory.size
         val cEdge = when (type) {
             TerrainType.STAIR_UP -> (xi / (EDGE_TH * 2f)).coerceIn(0f, 1f)
-            TerrainType.RAMP     -> (1f - xi / (EDGE_TH * 2f)).coerceIn(0f, 1f)
             TerrainType.HOLE     -> if (abs(dzT) > DELTA_Z_STEP * 0.5f) 0.8f else 0.5f
             else                 -> 0.5f
         }
         val confidence = (0.40f * cR + 0.30f * cSpatial + 0.20f * cTemporal + 0.10f * cEdge).coerceIn(0f, 1f)
-        // Threshold 4x4 lebih rendah - SNR lebih baik
-        val alertLevel = when {
-            type in setOf(TerrainType.STAIR_DOWN, TerrainType.HOLE, TerrainType.STAIR_UP) && confidence >= 0.70f -> AlertLevel.HIGH
-            type in setOf(TerrainType.STAIR_DOWN, TerrainType.HOLE, TerrainType.STAIR_UP) && confidence >= 0.55f -> AlertLevel.MED
-            type == TerrainType.RAMP && confidence >= 0.55f -> AlertLevel.INFO
-            else -> AlertLevel.NONE
-        }
-        if (alertLevel != AlertLevel.NONE) {
-            Log.d(TAG, "[4x4] Terrain: $type conf=%.2f h=${hEst.toInt()}mm dir=$direction -> $alertLevel".format(confidence))
-        }
-        return TerrainResult(type = type, confidence = confidence, hEst = hEst, direction = direction, alertLevel = alertLevel)
+        return TerrainResult(type = type, confidence = confidence, hEst = hEst, direction = direction)
     }
 }
