@@ -1,9 +1,4 @@
-# ADR-009: Peningkatan Akurasi Akselerometer (Mahony LPF & Kp Tuning)
-[... See previous history ...]
-
----
-
-# ADR-010: Dynamic DC Bias Removal (High-Pass Filter) untuk Akselerometer
+# ADR-011: Penghapusan Filter Spasial "Manusia di dalam Mobil" pada Pemrosesan Dataset
 
 ## Status
 Proposed
@@ -12,45 +7,40 @@ Proposed
 2026-07-11
 
 ## Context
-Meski kita telah menerapkan *Low-Pass Filter* (EMA) dan *Noise Gate* pada ADR-009, pengguna mendapati bahwa nilai `a_lin_mag` mentah tetap bertengger di angka ~0.5 m/s² saat kacamata tidak digerakkan sama sekali. Hal ini menyebabkan sensor *ToF / YOLO* mengira pengguna terus bergerak maju (*isMovingForward* tersangkut di logika `> 0.3`). 
-Ini terjadi karena ada penyimpangan mekanis statis (*DC Offset / Bias*) sebesar 0.05 G pada sensor fisik MPU6050 murah yang belum pernah dikalibrasi sempurna.
+Pada `dataset_vnetra_yolov11n_colab-FIX.ipynb` terdapat blok kode *Spatial Passenger Filter* yang secara otomatis menghapus (menandai `dropped = True`) kotak pembatas kelas `person` (manusia) apabila:
+1. Luas area manusia < 25% dari luas kendaraan.
+2. Lebih dari 70% area manusia tersebut tumpang tindih (berada di dalam) *bounding box* kendaraan (`car`, `bus`, `truck`).
 
-## Doubt-Driven Analysis & Literature Search
-Berdasarkan pencarian metode komputasi termurah untuk sensor MEMS murah melalui AI Perplexity dan riset pustaka, sebuah LPF standar tidak akan pernah menghilangkan offset statis, ia hanya akan *meratakannya* (0.5 yang bergetar menjadi 0.5 yang mulus rata). 
-Untuk mendapatkan kecepatan dinamik (*true dynamic linear acceleration*), kita memerlukan **High-Pass Filter (HPF)** atau metode integrasi bocor (*Leaky Integrator* / DC-Blocker). 
+Pengguna (*user*) mengeluhkan bahwa filter ini justru menghancurkan akurasi (*mAP*) dari kedua kelas tersebut saat model digunakan pada Android. Kenapa hal ini bisa terjadi? 
+Model pendeteksi objek berbasis YOLO bergantung erat pada konsistensi visual label. Jika mesin melihat objek manusia menempel/duduk di mobil (seperti pengendara motor atau penumpang yang terlihat jelas dari kaca depan) tetapi data labelnya dihapus, YOLO akan bingung dan menganggap fitur tubuh manusia tersebut sebagai bagian natural dari mobil biasa (mengakibatkan *false negative* untuk manusia, dan *noisy feature* untuk mobil). 
 
-## Decision (Ponytail Approach)
-Solusi paling ringan tanpa perhitungan matriks yang berat adalah menggunakan sepasang filter bertingkat:
-1. **Fast LPF:** (`a_lin_smooth`) untuk mematikan *jitter* elektrik berfrekuensi tinggi.
-2. **Super Slow LPF:** (`a_lin_dc_bias`) untuk menangkap nilai 0.5 m/s² secara perlahan, hanya saat tidak ada goncangan ekstrem.
-3. **Dynamic Output:** Pengurangan simpel `a_lin_dynamic = a_lin_smooth - a_lin_dc_bias`. 
+## Decision (Ponytail & Doubt-Driven)
+*Ponytail approach:* Jika sebuah filter pintar malah merusak keaslian label dari COCO secara destruktif, maka hapus sepenuhnya. Kita tidak perlu mencoba men-*tweak* toleransi persentase *IoU*-nya. Biarkan mesin YOLO mempelajari dan membedakan bentuk tumpang-tindih manusia dan kendaraan secara alami melalui *Loss Function* miliknya.
 
-Dengan ini, apapun nilai kasarnya saat diam (0.5, 0.8, 1.2 m/s²), *Super Slow LPF* akan mengejar angka tersebut, menolkan hasil akhir ke 0.0 m/s². Saat pengguna tiba-tiba melangkah maju, pergerakan tajam tersebut akan lolos sebagai m/s² bersih.
+Saya akan menghapus keseluruhan logika **SPATIAL PASSENGER FILTER** dari skrip Google Colab (`dataset_vnetra_yolov11n_colab-FIX.ipynb`).
 
 ## Proposed Changes
-### `firmware-vnetra.ino`
-- **Di dalam fungsi `IMU_Task` (baris kalkulasi `a_lin_mag`):**
-  - Ganti logika pemulusan statis dengan logika pemotongan *DC Offset* dinamis:
-    ```cpp
-    static float a_lin_smooth = 0.0f;
-    static float a_lin_dc_bias = 0.0f;
-    
-    a_lin_smooth = (0.1f * a_lin_mag_raw) + (0.9f * a_lin_smooth);
-    
-    // Hanya tangkap bias saat relatif diam (cegah goncangan berjalan merusak titik 0)
-    if (a_lin_smooth < 1.5f) {
-        a_lin_dc_bias = (0.005f * a_lin_smooth) + (0.995f * a_lin_dc_bias);
-    }
-    
-    float a_lin_dynamic = a_lin_smooth - a_lin_dc_bias;
-    if (a_lin_dynamic < 0.0f) a_lin_dynamic = 0.0f; // Clamp lantai
-    
-    if (a_lin_dynamic < 0.2f) {
-        a_lin_dynamic = 0.0f; // Noise gate final
-    }
-    ```
-  - Masukkan `a_lin_dynamic` ke dalam payload UDP `[5]`.
+### `notebooks/dataset_vnetra_yolov11n_colab-FIX.ipynb`
+- **Hapus blok kode berikut** (sekitar 15 baris) dari dalam *loop* parsing label:
+  ```python
+  # --- SPATIAL PASSENGER FILTER ---
+  vehicle_classes = {'car', 'bus', 'truck'}
+  for p_obj in (o for o in parsed_objs if o['orig_class'] == 'person' and not o['dropped']):
+      pxc, pyc, pw, ph = p_obj['box']
+      pxmin, pymin, pxmax, pymax = pxc - pw/2, pyc - ph/2, pxc + pw/2, pyc + ph/2
+      p_area = pw * ph
+      for v_obj in (o for o in parsed_objs if o['orig_class'] in vehicle_classes and not o['dropped']):
+          vxc, vyc, vw, vh = v_obj['box']
+          v_area = vw * vh
+          if p_area == 0 or v_area == 0 or (p_area / v_area > 0.25): continue
+          vxmin, vymin, vxmax, vymax = vxc - vw/2, vyc - vh/2, vxc + vw/2, vyc + vh/2
+          ixmin, iymin, ixmax, iymax = max(pxmin, vxmin), max(pymin, vymin), min(pxmax, vxmax), min(pymax, vymax)
+          if ixmax > ixmin and iymax > iymin and ((ixmax - ixmin) * (iymax - iymin)) / p_area > 0.7:
+              p_obj['dropped'] = True
+              break
+  ```
+- Biarkan *Critical Distance / Bbox Size Filter* dan *Per-Class Limit Enforcement* tetap utuh, karena fungsi tersebut menjaga agar label yang terlalu kecil secara fisik tidak masuk.
 
 ## Consequences
-- **Positif:** Angka `a_lin` di aplikasi Android akan 100% stabil di 0.00 m/s² saat statis, bebas dari anomali *spam* arah maju.
-- **Positif:** 0% penggunaan memori tambahan. CPU mikrokontroler hanya melakukan penambahan/pengurangan sederhana tanpa kalkulasi matriks 7x7 yang lambat.
+- **Positif:** Peningkatan akurasi (*Recall*) untuk kelas *person* dan kendaraan. Model YOLO tidak akan lagi kebingungan saat melihat manusia yang berkerumun dengan atau berada di dalam kendaraan.
+- **Negatif:** Kelas *person* akan sedikit bertambah ke dalam total kuota dataset, namun batasan keras (`max_samples_per_class`) yang ada di dalam skrip akan tetap menjaga keseluruhan dataset *balanced*.
