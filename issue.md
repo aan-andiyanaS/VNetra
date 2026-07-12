@@ -31,3 +31,18 @@ eport.md) menyoroti dua masalah stabilitas:
          // ...
      }
      ```
+
+
+### ADR-022: Relaksasi Filter 	arget_status Sensor ToF (Toleransi Outdoor)
+- **Status:** Diterapkan (12 Juli 2026)
+- **Konteks:** Meskipun telah menggunakan lensa *IR Narrow Bandpass Filter 940nm*, antarmuka VNetra sering menampilkan simbol -- (data tidak valid) di luar ruangan. Investigasi menunjukkan bahwa firmware (ESP32) membuang data yang sebenarnya valid karena terlalu kaku dalam membaca 	arget_status dari sensor VL53L5CX. Cahaya matahari memicu *ambient noise* yang merubah status pembacaan menjadi tipe 13, 12, atau 10, yang sebelumnya tidak diizinkan.
+- **Keputusan:** Melonggarkan filter pengecekan kewajaran (*sanity check*) pada pengemasan data UDP untuk menerima status yang memiliki tingkat *noise* lebih tinggi namun jaraknya tetap terkalibrasi (*Target Valid with High Ambient Noise*).
+- **Mekanisme Perbaikan:**
+  - Menambahkan pengecekan status 10, 12, dan 13 pada fungsi TOF_Task di irmware-vnetra.ino. 
+  - Sinyal pinggiran yang benar-benar rusak/hancur (status 1, 2, atau 4) tetap akan diblokir menjadi -1 demi menjaga kestabilan *Terrain Detector*.
+  `cpp
+  // Perbaikan di firmware-vnetra.ino
+  // Terima status 5 (valid), 6 (wrap-around), 9 (merged pulse)
+  // + 10 (target close), 12 (no wrap check), 13 (high ambient noise - sering terjadi outdoor!)
+  bool statusOk = (st == 5 || st == 6 || st == 9 || st == 10 || st == 12 || st == 13);
+  `
