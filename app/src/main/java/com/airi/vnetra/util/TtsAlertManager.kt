@@ -190,6 +190,14 @@ class TtsAlertManager(private val context: Context) {
                     var vRaw = ((dPrev - dObj) / dt) - vHead
                     if (vRaw < 0f) vRaw = 0f
                     
+                    // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
+                    val aLin = imuData[5]
+                    val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
+                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPavingObj
+                    if (isStaticObject && aLin < 0.3f) {
+                        vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
+                    }
+                    
                     // G.2b: Moving Average 3-frame
                     val history = vRawHistory.getOrPut(trackingId) { FloatArray(3) }
                     history[2] = history[1]
@@ -203,7 +211,8 @@ class TtsAlertManager(private val context: Context) {
                     
                     // G.3: Threshold Adaptif (T)
                     val tR = 2.0f // Waktu reaksi manusia 2 detik
-                    T = (D_W0 + (vAvg * tR)).toInt()
+                    val momentumBuffer = imuData[5] * 200f // Tambahan jarak berdasarkan akselerasi linear tubuh
+                    T = (D_W0 + (vAvg * tR) + momentumBuffer).toInt()
                     if (T > 4000) T = 4000
                     
                     Log.v(TAG, "Formula G [id=$trackingId]: dt=${String.format("%.3f", dt)} vRaw=${String.format("%.1f", vRaw)} vAvg=${String.format("%.1f", vAvg)} T=$T")
@@ -322,6 +331,14 @@ class TtsAlertManager(private val context: Context) {
                     var vRaw = ((dPrev - dObj) / dt) - vHead
                     if (vRaw < 0f) vRaw = 0f
                     
+                    // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
+                    val aLin = imuData[5]
+                    val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
+                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPavingObj
+                    if (isStaticObject && aLin < 0.3f) {
+                        vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
+                    }
+                    
                     // G.2b: Moving Average 3-frame
                     val history = vRawHistory.getOrPut(trackingId) { FloatArray(3) }
                     history[2] = history[1]
@@ -335,7 +352,8 @@ class TtsAlertManager(private val context: Context) {
                     
                     // G.3: Threshold Adaptif (T)
                     val tR = 2.0f // Waktu reaksi manusia 2 detik
-                    T = (D_W0 + (vAvg * tR)).toInt()
+                    val momentumBuffer = imuData[5] * 200f // Tambahan jarak berdasarkan akselerasi linear tubuh
+                    T = (D_W0 + (vAvg * tR) + momentumBuffer).toInt()
                     if (T > 4000) T = 4000
                     
                     Log.v(TAG, "Formula G [id=$trackingId]: dt=${String.format("%.3f", dt)} vRaw=${String.format("%.1f", vRaw)} vAvg=${String.format("%.1f", vAvg)} T=$T")
@@ -493,6 +511,14 @@ class TtsAlertManager(private val context: Context) {
                     var vRaw = ((dPrev - dObj) / dt) - vHead
                     if (vRaw < 0f) vRaw = 0f
                     
+                    // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
+                    val aLin = imuData[5]
+                    val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
+                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPavingObj
+                    if (isStaticObject && aLin < 0.3f) {
+                        vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
+                    }
+                    
                     // G.2b: Moving Average 3-frame
                     val history = vRawHistory.getOrPut(trackingId) { FloatArray(3) }
                     history[2] = history[1]
@@ -506,7 +532,8 @@ class TtsAlertManager(private val context: Context) {
                     
                     // G.3: Threshold Adaptif (T)
                     val tR = 2.0f // Waktu reaksi manusia 2 detik
-                    T = (D_W0 + (vAvg * tR)).toInt()
+                    val momentumBuffer = imuData[5] * 200f // Tambahan jarak berdasarkan akselerasi linear tubuh
+                    T = (D_W0 + (vAvg * tR) + momentumBuffer).toInt()
                     if (T > 4000) T = 4000
                     
                     Log.v(TAG, "Formula G [id=$trackingId]: dt=${String.format("%.3f", dt)} vRaw=${String.format("%.1f", vRaw)} vAvg=${String.format("%.1f", vAvg)} T=$T")
