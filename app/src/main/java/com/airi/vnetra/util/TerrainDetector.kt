@@ -156,16 +156,7 @@ class TerrainDetector {
         // Digunakan sebagai modifier confidence HOLE (J.6 post-audit C5)
         val dzT = zLow - prevZLowSafe
 
-        // Fitur 3: Std dev per kolom di zona rLow (σ_j)
-        val sigmaJ = FloatArray(8)
-        for (c in 0..7) {
-            val vals = rLowRows.map { r -> filtered(r, c) }.filter { it < D_MAX }
-            if (vals.isEmpty()) { sigmaJ[c] = 0f; continue }
-            val mean = vals.average().toFloat()
-            val variance = vals.map { (it - mean) * (it - mean) }.average().toFloat()
-            sigmaJ[c] = sqrt(variance)
-        }
-
+        // Fitur 3: Evaluasi Anomali Kolom (Selisih Absolut thd zMid)
         // Fitur 4: Depth ratio R = z̄_low / z̄_mid
         // Tinggi → z_low >> z_mid → kemungkinan terrain drop
         val R = if (zMid > 0f && zMid < D_MAX) (zLow / zMid) else 0f
@@ -178,8 +169,11 @@ class TerrainDetector {
             if (diff > xi) xi = diff
         }
 
-        // Fitur 6: Pattern distribusi anomali (berdasarkan kolom yang melebihi σ_col_th)
-        val anomalyCols = (0..7).filter { c -> sigmaJ[c] > SIGMA_COL_TH }
+        // Fitur 6: Pattern distribusi anomali kolom
+        val anomalyCols = (0..7).filter { c -> 
+            val v = filtered(rLowRows[0], c)
+            v < D_MAX && abs(v - zMid) > SIGMA_COL_TH 
+        }
         val pattern = when {
             anomalyCols.isEmpty()  -> "SAFE"
             anomalyCols.size >= 4  -> "UNIFORM"    // anomali menyebar luas → STAIR_DOWN
@@ -298,16 +292,16 @@ class TerrainDetector {
         val zLow  = avg(rLowRows)
         val dzV = zHigh - zLow
         val dzT = zLow - prevZLowSafe
-        val sigmaJ4 = FloatArray(N)
-        for (c in 0 until N) {
-            val vals = rLowRows.map { r -> f(r, c) }.filter { it < D_MAX }
-            if (vals.isEmpty()) continue
-            val mean = vals.average().toFloat()
-            sigmaJ4[c] = sqrt(vals.map { (it - mean) * (it - mean) }.average().toFloat())
-        }
         val R  = if (zHigh > 0f && zHigh < D_MAX) zLow / zHigh else 0f
         val xi = abs(zHigh - zLow)
-        val anomalyCols4 = (0 until N).filter { c -> sigmaJ4[c] > SIGMA_COL_TH }
+        val anomalyCols4 = (0 until N).filter { c -> 
+            val vals = rLowRows.map { r -> f(r, c) }.filter { it < D_MAX }
+            if (vals.isEmpty()) false
+            else {
+                val colAvg = vals.average().toFloat()
+                abs(colAvg - zHigh) > SIGMA_COL_TH
+            }
+        }
         val pattern4 = when {
             anomalyCols4.isEmpty() -> "SAFE"
             anomalyCols4.size >= 2 -> "UNIFORM"
