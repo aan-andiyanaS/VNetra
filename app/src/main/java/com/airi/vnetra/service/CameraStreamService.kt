@@ -92,6 +92,7 @@ class CameraStreamService : Service() {
     private val binder       = LocalBinder()
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var streamJob: Job?             = null
+    private var pingJob: Job?               = null
     private var watchdogJob: Job?           = null
     private var udpReceiverJob: Job?        = null
     private var activeUdpSocket: java.net.DatagramSocket? = null
@@ -198,6 +199,7 @@ class CameraStreamService : Service() {
 
     fun stopStreamAndRelease() {
         runCatching { streamJob?.cancel() };       streamJob = null
+        runCatching { pingJob?.cancel() };         pingJob = null
         runCatching { watchdogJob?.cancel() };     watchdogJob = null
         runCatching { udpReceiverJob?.cancel() };  udpReceiverJob = null
         runCatching { activeUdpSocket?.close() };  activeUdpSocket = null
@@ -271,7 +273,8 @@ class CameraStreamService : Service() {
                             }
                             
                             // Mulai mengirim PING setiap 1 detik
-                            serviceScope.launch {
+                            pingJob?.cancel()
+                            pingJob = serviceScope.launch {
                                 while (isActive && activeWebSocket == ws) {
                                     runCatching { ws.send("PING:${System.currentTimeMillis()}") }
                                     delay(1000)
@@ -373,6 +376,7 @@ class CameraStreamService : Service() {
                         }
 
                         override fun onFailure(ws: WebSocket, t: Throwable, r: Response?) {
+                            runCatching { pingJob?.cancel(); pingJob = null }
                             runCatching {
                                 Log.e(TAG, "WS failure: ${t.message}")
                                 activeWebSocket = null
@@ -386,6 +390,7 @@ class CameraStreamService : Service() {
                         }
 
                         override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                            runCatching { pingJob?.cancel(); pingJob = null }
                             runCatching {
                                 activeWebSocket = null
                                 setConnectionState(ConnectionState.DISCONNECTED)

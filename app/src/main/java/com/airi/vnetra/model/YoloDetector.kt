@@ -252,8 +252,7 @@ class YoloDetector(
         if (interpreter == null) return emptyList()
 
         // 1. Preprocess
-        val resizedBitmap = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
-        convertBitmapToByteBuffer(resizedBitmap)
+        convertBitmapToByteBuffer(bitmap)
 
         // 2. Inference
         try {
@@ -283,7 +282,7 @@ class YoloDetector(
         inputBuffer.rewind()
         
         // Use Letterbox padding to preserve aspect ratio
-        val scale = Math.min(INPUT_SIZE.toFloat() / bitmap.width, INPUT_SIZE.toFloat() / bitmap.height)
+        val scale = minOf(INPUT_SIZE.toFloat() / bitmap.width, INPUT_SIZE.toFloat() / bitmap.height)
         val newWidth = (bitmap.width * scale).toInt()
         val newHeight = (bitmap.height * scale).toInt()
         
@@ -316,9 +315,9 @@ class YoloDetector(
 
     private fun postprocessBoxes(originalWidth: Int, originalHeight: Int): List<DetectionResult> {
         val results = mutableListOf<DetectionResult>()
-        val scale = Math.min(INPUT_SIZE.toFloat() / originalWidth, INPUT_SIZE.toFloat() / originalHeight)
-        val padX = (INPUT_SIZE - originalWidth * scale) / 2f
-        val padY = (INPUT_SIZE - originalHeight * scale) / 2f
+        val scale = minOf(INPUT_SIZE.toFloat() / originalWidth, INPUT_SIZE.toFloat() / originalHeight)
+        val padX = (INPUT_SIZE - (originalWidth * scale).toInt()) / 2f
+        val padY = (INPUT_SIZE - (originalHeight * scale).toInt()) / 2f
         val scaleY = originalHeight.toFloat() / INPUT_SIZE
 
         if (isTransposedOutput && outputBufferTransposed != null) {
@@ -446,10 +445,10 @@ class YoloDetector(
 
     private fun calculateIoU(box1: RectF, box2: RectF): Float {
         val intersection = RectF(
-            Math.max(box1.left, box2.left),
-            Math.max(box1.top, box2.top),
-            Math.min(box1.right, box2.right),
-            Math.min(box1.bottom, box2.bottom)
+            maxOf(box1.left, box2.left),
+            maxOf(box1.top, box2.top),
+            minOf(box1.right, box2.right),
+            minOf(box1.bottom, box2.bottom)
         )
 
         if (intersection.width() <= 0 || intersection.height() <= 0) return 0f

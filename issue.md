@@ -1,17 +1,23 @@
-## ADR-026: Pembersihan Variabel Lama `TARGET_FRAME_MS`, `last_frame_time`, `last_ack_time`
+## ADR-027: Penyelesaian Bug & Optimasi Kotlin (Report Points 4-9)
 - **Status:** Dieksekusi (12 Juli 2026)
 
 ### 1. Konteks
-Pada laporan *code review* (poin 3 di `report.md`), ditemukan tiga variabel di tingkat global dalam `firmware-vnetra.ino` yang kini menjadi yatim piatu (*orphaned*):
-1. `TARGET_FRAME_MS` (konstanta)
-2. `last_frame_time` (variabel penyimpan *timestamp*)
-3. `last_ack_time` (variabel penyimpan *timestamp* balasan ACK)
-
-Ketiga *state* ini dulunya digunakan oleh fungsi pembatas FPS internal serta sistem *acknowledgement* (pengiriman frame berdasar balasan Android). Sejak diimplementasikannya ADR-023 (penyerahan aliran kontrol ke mekanisme antrean *native* jaringan TCP LwIP dan loop waktu utama), variabel-variabel ini sama sekali tidak digunakan (*dead code*).
+Berdasarkan hasil laporan *code review* (`report.md`), terdapat serangkaian masalah performa dan potensi bug di sisi Android (Kotlin) yang perlu dituntaskan:
+1. **(Point 4)** Double resize bitmap di `YoloDetector.kt` yang membuang alokasi memori.
+2. **(Point 5)** Potensi *race condition* pada state `isInferencing` di `CameraStreamActivity.kt`.
+3. **(Point 6)** Potensi `IndexOutOfBoundsException` saat array `tofViews` di-*rebuild* secara asinkron.
+4. **(Point 7)** Kalkulasi *padding* YOLO yang kurang akurat untuk rasio gambar non-persegi.
+5. **(Point 8)** Coroutine `PING` di `CameraStreamService.kt` yang tidak dilacak pembatalannya.
+6. **(Point 9)** Penggunaan `Math.*` Java yang tidak idiomatis di Kotlin.
 
 ### 2. Keputusan (Incremental Implementation & Ponytail)
-Menggunakan filosofi *ponytail* (bersihkan yang memang tidak dipakai, sekecil apapun), kita menghapus deklarasi ketiga variabel ini secara langsung di *global scope*.
+Untuk meminimalisir interupsi dan memaksimalkan efisiensi, kita menggabungkan seluruh optimasi Kotlin ini dalam satu eksekusi sapu jagat (*batch processing*):
+- **YoloDetector.kt**: Menghapus `Bitmap.createScaledBitmap` awal yang tak terpakai, memperbaiki kalkulasi `padX/padY` dengan nilai sesudah *scaling*, dan mengganti `Math.min/max` dengan `minOf/maxOf`.
+- **CameraStreamActivity.kt**: Mengganti `isInferencing` menjadi `AtomicBoolean`, menambahkan pengaman batas index `if (i >= tofViews.size)` pada perulangan ToF, dan mengganti `Math.abs` dengan ekstensi `.absoluteValue`.
+- **CameraStreamService.kt**: Menyimpan referensi `pingJob` dan membatalkannya secara eksplisit saat koneksi terputus.
+- Mengganti seluruh sisa fungsi `Math.*` Java dengan fungsi Kotlin *native* di class-class utility.
 
 ### 3. Konsekuensi
-- **Positif:** Menghemat sedikit ruang memori dan merapikan kode *firmware* tanpa memengaruhi logika aplikasi atau akurasi sistem.
-- **Positif:** Menghilangkan kebingungan (*cognitive load*) bagi pengembang di masa mendatang ketika membaca alur waktu pengambilan gambar.
+- **Positif:** Beban CPU & alokasi memori (terutama saat pemrosesan *frame* 10 FPS) berkurang secara terukur.
+- **Positif:** Aplikasi kebal terhadap potensi *crash* konkurensi (rebuild ToF dan thread inferensi YOLO).
+- **Positif:** *Bounding box* YOLO lebih presisi di perangkat layar panjang.

@@ -265,7 +265,7 @@ class TtsAlertManager(private val context: Context) {
                 val lastSpoken = lastSpokenTime[trackingId] ?: 0L
                 
                 // Formula H Asli: Reset jika bergerak signifikan (ADR-018)
-                val deltaD = Math.abs((dObjPrev[trackingId] ?: dObj) - dObj)
+                val deltaD = kotlin.math.abs((dObjPrev[trackingId] ?: dObj) - dObj)
                 val isMoving = deltaD > 30 // epsilon_noise
                 
                 // Jika bergerak dan sudah 2 detik sejak peringatan terakhir (Ponytail Cooldown)

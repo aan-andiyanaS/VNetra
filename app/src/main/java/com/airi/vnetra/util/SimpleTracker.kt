@@ -115,10 +115,10 @@ class SimpleTracker(
 
     private fun calculateIoU(box1: RectF, box2: RectF): Float {
         val intersection = RectF(
-            Math.max(box1.left, box2.left),
-            Math.max(box1.top, box2.top),
-            Math.min(box1.right, box2.right),
-            Math.min(box1.bottom, box2.bottom)
+            maxOf(box1.left, box2.left),
+            maxOf(box1.top, box2.top),
+            minOf(box1.right, box2.right),
+            minOf(box1.bottom, box2.bottom)
         )
         if (intersection.width() <= 0 || intersection.height() <= 0) return 0f
         

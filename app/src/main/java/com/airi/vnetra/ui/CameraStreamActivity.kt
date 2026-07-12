@@ -153,7 +153,7 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var latestDetections: List<DetectionResult> = emptyList()
     @Volatile private var latestFrameWidth: Int = 640
     @Volatile private var latestFrameHeight: Int = 480
-    private var isInferencing = false
+    private val isInferencing = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private val exitReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -402,7 +402,7 @@ class CameraStreamActivity : AppCompatActivity() {
                     velocityX: Float, velocityY: Float
                 ): Boolean {
                     val diffX = e2.x - (e1?.x ?: e2.x)
-                    return if (Math.abs(diffX) > 80f && Math.abs(velocityX) > 100f) {
+                    return if (kotlin.math.abs(diffX) > 80f && kotlin.math.abs(velocityX) > 100f) {
                         badgeSwipeRevealed = !badgeSwipeRevealed
                         if (!isDestroyed && !isFinishing) {
                             binding.btnAkhiriBadge.visibility =
@@ -496,8 +496,7 @@ class CameraStreamActivity : AppCompatActivity() {
                             updateFpsCounter(jpegBytes.size)
 
                             // AI Inference
-                            if (!isInferencing && yoloDetector?.modelStatus != ModelStatus.NONE) {
-                                isInferencing = true
+                            if (yoloDetector?.modelStatus != ModelStatus.NONE && isInferencing.compareAndSet(false, true)) {
                                 val detector = yoloDetector
                                 if (detector != null) {
                                     lifecycleScope.launch(Dispatchers.Default) {
@@ -526,12 +525,12 @@ class CameraStreamActivity : AppCompatActivity() {
                                             // 3. Pastikan flag selalu direset apapun yang terjadi
                                             // Gunakan NonCancellable agar flag tetap di-reset meskipun parent job di-cancel
                                             withContext(Dispatchers.Main + kotlinx.coroutines.NonCancellable) {
-                                                isInferencing = false
+                                                isInferencing.set(false)
                                             }
                                         }
                                     }
                                 } else {
-                                    isInferencing = false
+                                    isInferencing.set(false)
                                 }
                             }
                         }
@@ -649,6 +648,7 @@ class CameraStreamActivity : AppCompatActivity() {
                             val alpha = 0.3f // Faktor smoothing EMA
 
                             for (i in tofData.indices) {
+                                if (i >= tofViews.size) continue // Pengaman batas index array
                                 val rawDistance = tofData[i]
 
                                 if (rawDistance <= 0) {
@@ -695,7 +695,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
                     val yawRate = latestImuData?.getOrElse(4) { 0f } ?: 0f
                     val aLinMag = latestImuData?.getOrElse(5) { 0f } ?: 0f
-                    val isTurning = Math.abs(yawRate) > 30f // deg/s
+                    val isTurning = kotlin.math.abs(yawRate) > 30f // deg/s
                     val isMovingForward = aLinMag > 0.3f    // m/s^2 (terdeteksi ada langkah/guncangan maju)
 
                     var hasCloseYoloThreat = false
