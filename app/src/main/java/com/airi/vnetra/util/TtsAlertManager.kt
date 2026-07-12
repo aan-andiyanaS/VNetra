@@ -51,6 +51,16 @@ class TtsAlertManager(private val context: Context) {
     // Waktu terakhir setiap tracking ID diucapkan (diperingatkan)
     private val lastSpokenTime = ConcurrentHashMap<Int, Long>()
 
+    // State Formula G (Per Tracking ID)
+    private val dObjPrev = ConcurrentHashMap<Int, Int>()
+    private val tsEspPrev = ConcurrentHashMap<Int, Float>()
+    private val vRawHistory = ConcurrentHashMap<Int, FloatArray>()
+    private val lastCalculatedT = ConcurrentHashMap<Int, Int>()
+
+    fun getAdaptiveThreshold(trackingId: Int): Int = lastCalculatedT[trackingId] ?: D_W0
+
+
+
     // TTS Engine
     private var tts: TextToSpeech? = null
     private val ttsReady = AtomicBoolean(false)
@@ -147,10 +157,69 @@ class TtsAlertManager(private val context: Context) {
         dObj: Int,
         clockDirection: Int,
         objectLabel: String = "rintangan",
-        isMovingForward: Boolean = true
+        isMovingForward: Boolean = true,
+        imuData: FloatArray? = null
     ): String? {
         val alreadyAlerted = alertFlags[trackingId] ?: false
         val now = System.currentTimeMillis()
+
+        // =================================================================
+        // FORMULA G: Adaptive Threshold & Approach Velocity (v9.4)
+        // =================================================================
+        var T = D_W0 // Default threshold
+        
+        if (imuData != null && imuData.size >= 9) {
+            val tsEsp = imuData[6]
+            val vHeadBase = imuData[7]
+            val isConverged = imuData[8] > 0.5f
+            
+            if (isConverged) {
+                val dPrev = dObjPrev[trackingId]
+                val tsPrev = tsEspPrev[trackingId]
+                
+                if (dPrev != null && tsPrev != null && tsEsp != tsPrev) {
+                    // G.0: Guard Interval Waktu (Δt)
+                    var dt = (tsEsp - tsPrev) / 1000f
+                    if (dt < 0.001f) dt = 0.001f
+                    if (dt > 0.5f) dt = 0.5f
+                    
+                    // G.1b: Kecepatan semu (v_head)
+                    val vHead = vHeadBase * dObj
+                    
+                    // G.2: Kecepatan pendekatan bersih (v_raw)
+                    var vRaw = ((dPrev - dObj) / dt) - vHead
+                    if (vRaw < 0f) vRaw = 0f
+                    
+                    // G.2b: Moving Average 3-frame
+                    val history = vRawHistory.getOrPut(trackingId) { FloatArray(3) }
+                    history[2] = history[1]
+                    history[1] = history[0]
+                    history[0] = vRaw
+                    
+                    val validCount = history.count { it > 0f } // simplified check for initialized
+                    val vAvg = if (validCount > 0) {
+                        (history[0] + (if (history[1] > 0f) history[1] else history[0]) + (if (history[2] > 0f) history[2] else history[0])) / 3f
+                    } else vRaw
+                    
+                    // G.3: Threshold Adaptif (T)
+                    val tR = 2.0f // Waktu reaksi manusia 2 detik
+                    T = (D_W0 + (vAvg * tR)).toInt()
+                    if (T > 4000) T = 4000
+                    
+                    Log.v(TAG, "Formula G [id=$trackingId]: dt=${String.format("%.3f", dt)} vRaw=${String.format("%.1f", vRaw)} vAvg=${String.format("%.1f", vAvg)} T=$T")
+                }
+                
+                // Update State Formula G
+                dObjPrev[trackingId] = dObj
+                tsEspPrev[trackingId] = tsEsp
+            } else {
+                // EKF belum konvergen, lewati kalkulasi G (T = D_W0)
+                Log.v(TAG, "Formula G [id=$trackingId]: EKF warming up, T=$D_W0")
+            }
+        }
+        lastCalculatedT[trackingId] = T
+        // =================================================================
+
 
         // Aturan khusus untuk Paving (Guiding Block)
         val isPaving = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
@@ -158,10 +227,10 @@ class TtsAlertManager(private val context: Context) {
         
         val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
         
-        // Konversi jarak ke kategori sederhana
+        // Konversi jarak ke kategori adaptif (proporsional terhadap T Formula G)
         val distText = when {
-            dObj < 500 -> "jarak dekat"
-            dObj < 1500 -> "jarak sedang"
+            dObj < T * 0.5 -> "jarak dekat"
+            dObj < T * 1.5 -> "jarak sedang"
             else -> "jarak jauh"
         }
 
@@ -173,7 +242,7 @@ class TtsAlertManager(private val context: Context) {
         }
 
         return when {
-            dObj < D_W0 && !alreadyAlerted -> {
+            dObj < T && !alreadyAlerted -> {
                 // Kondisi: masuk zona bahaya, belum pernah diperingatkan → one-shot
                 alertFlags[trackingId] = true
                 lastSeenTime[trackingId] = now
@@ -181,7 +250,7 @@ class TtsAlertManager(private val context: Context) {
                 Log.d(TAG, "One-shot triggered: id=$trackingId d=${dObj}mm dir=$clockDirection")
                 textToSpeak
             }
-            dObj < D_W0 && alreadyAlerted -> {
+            dObj < T && alreadyAlerted -> {
                 // Objek masih di zona bahaya
                 lastSeenTime[trackingId] = now
                 
@@ -225,6 +294,64 @@ class TtsAlertManager(private val context: Context) {
      */
     fun postProcessDetections(activeClasses: Set<Int>) {
         val now = System.currentTimeMillis()
+
+        // =================================================================
+        // FORMULA G: Adaptive Threshold & Approach Velocity (v9.4)
+        // =================================================================
+        var T = D_W0 // Default threshold
+        
+        if (imuData != null && imuData.size >= 9) {
+            val tsEsp = imuData[6]
+            val vHeadBase = imuData[7]
+            val isConverged = imuData[8] > 0.5f
+            
+            if (isConverged) {
+                val dPrev = dObjPrev[trackingId]
+                val tsPrev = tsEspPrev[trackingId]
+                
+                if (dPrev != null && tsPrev != null && tsEsp != tsPrev) {
+                    // G.0: Guard Interval Waktu (Δt)
+                    var dt = (tsEsp - tsPrev) / 1000f
+                    if (dt < 0.001f) dt = 0.001f
+                    if (dt > 0.5f) dt = 0.5f
+                    
+                    // G.1b: Kecepatan semu (v_head)
+                    val vHead = vHeadBase * dObj
+                    
+                    // G.2: Kecepatan pendekatan bersih (v_raw)
+                    var vRaw = ((dPrev - dObj) / dt) - vHead
+                    if (vRaw < 0f) vRaw = 0f
+                    
+                    // G.2b: Moving Average 3-frame
+                    val history = vRawHistory.getOrPut(trackingId) { FloatArray(3) }
+                    history[2] = history[1]
+                    history[1] = history[0]
+                    history[0] = vRaw
+                    
+                    val validCount = history.count { it > 0f } // simplified check for initialized
+                    val vAvg = if (validCount > 0) {
+                        (history[0] + (if (history[1] > 0f) history[1] else history[0]) + (if (history[2] > 0f) history[2] else history[0])) / 3f
+                    } else vRaw
+                    
+                    // G.3: Threshold Adaptif (T)
+                    val tR = 2.0f // Waktu reaksi manusia 2 detik
+                    T = (D_W0 + (vAvg * tR)).toInt()
+                    if (T > 4000) T = 4000
+                    
+                    Log.v(TAG, "Formula G [id=$trackingId]: dt=${String.format("%.3f", dt)} vRaw=${String.format("%.1f", vRaw)} vAvg=${String.format("%.1f", vAvg)} T=$T")
+                }
+                
+                // Update State Formula G
+                dObjPrev[trackingId] = dObj
+                tsEspPrev[trackingId] = tsEsp
+            } else {
+                // EKF belum konvergen, lewati kalkulasi G (T = D_W0)
+                Log.v(TAG, "Formula G [id=$trackingId]: EKF warming up, T=$D_W0")
+            }
+        }
+        lastCalculatedT[trackingId] = T
+        // =================================================================
+
         for (classId in activeClasses) {
             lastSeenTime[classId] = now
         }
@@ -236,7 +363,11 @@ class TtsAlertManager(private val context: Context) {
                 val lastSeen = lastSeenTime[trackingId] ?: 0L
                 if (now - lastSeen > 3000L) {
                     alertFlags[trackingId] = false
-                    Log.d(TAG, "Reset flag untuk trackingId=$trackingId karena absensi (>3s)")
+                    dObjPrev.remove(trackingId)
+                    tsEspPrev.remove(trackingId)
+                    vRawHistory.remove(trackingId)
+                    lastCalculatedT.remove(trackingId)
+                    Log.d(TAG, "Reset flag & Formula G state untuk trackingId=$trackingId karena absensi (>3s)")
                 }
             }
         }
@@ -334,6 +465,64 @@ class TtsAlertManager(private val context: Context) {
          */
         fun processNavigationState(isDanger: Boolean, isMovingForward: Boolean, isTurning: Boolean) {
             val now = System.currentTimeMillis()
+
+        // =================================================================
+        // FORMULA G: Adaptive Threshold & Approach Velocity (v9.4)
+        // =================================================================
+        var T = D_W0 // Default threshold
+        
+        if (imuData != null && imuData.size >= 9) {
+            val tsEsp = imuData[6]
+            val vHeadBase = imuData[7]
+            val isConverged = imuData[8] > 0.5f
+            
+            if (isConverged) {
+                val dPrev = dObjPrev[trackingId]
+                val tsPrev = tsEspPrev[trackingId]
+                
+                if (dPrev != null && tsPrev != null && tsEsp != tsPrev) {
+                    // G.0: Guard Interval Waktu (Δt)
+                    var dt = (tsEsp - tsPrev) / 1000f
+                    if (dt < 0.001f) dt = 0.001f
+                    if (dt > 0.5f) dt = 0.5f
+                    
+                    // G.1b: Kecepatan semu (v_head)
+                    val vHead = vHeadBase * dObj
+                    
+                    // G.2: Kecepatan pendekatan bersih (v_raw)
+                    var vRaw = ((dPrev - dObj) / dt) - vHead
+                    if (vRaw < 0f) vRaw = 0f
+                    
+                    // G.2b: Moving Average 3-frame
+                    val history = vRawHistory.getOrPut(trackingId) { FloatArray(3) }
+                    history[2] = history[1]
+                    history[1] = history[0]
+                    history[0] = vRaw
+                    
+                    val validCount = history.count { it > 0f } // simplified check for initialized
+                    val vAvg = if (validCount > 0) {
+                        (history[0] + (if (history[1] > 0f) history[1] else history[0]) + (if (history[2] > 0f) history[2] else history[0])) / 3f
+                    } else vRaw
+                    
+                    // G.3: Threshold Adaptif (T)
+                    val tR = 2.0f // Waktu reaksi manusia 2 detik
+                    T = (D_W0 + (vAvg * tR)).toInt()
+                    if (T > 4000) T = 4000
+                    
+                    Log.v(TAG, "Formula G [id=$trackingId]: dt=${String.format("%.3f", dt)} vRaw=${String.format("%.1f", vRaw)} vAvg=${String.format("%.1f", vAvg)} T=$T")
+                }
+                
+                // Update State Formula G
+                dObjPrev[trackingId] = dObj
+                tsEspPrev[trackingId] = tsEsp
+            } else {
+                // EKF belum konvergen, lewati kalkulasi G (T = D_W0)
+                Log.v(TAG, "Formula G [id=$trackingId]: EKF warming up, T=$D_W0")
+            }
+        }
+        lastCalculatedT[trackingId] = T
+        // =================================================================
+
 
             if (isDanger) {
                 // KONDISI: Deteksi Tembok (WARNING)

@@ -736,11 +736,12 @@ class CameraStreamActivity : AppCompatActivity() {
                                 // Catatan: ttsAlertManager.process untuk YOLO kini ditangani penuh secara instan
                                 // oleh triggerInstantYoloTts. Di sini kita hanya mengupdate state deteksi ancaman.
 
-                                if (dObj < TtsAlertManager.D_W0) {
+                                val adaptiveT = ttsAlertManager.getAdaptiveThreshold(det.classId)
+                                if (dObj < adaptiveT) {
                                     hasCloseYoloThreat = true
                                     closeThreatExists  = true
                                 }
-                                if (dObj < TtsAlertManager.D_RESET) {
+                                if (dObj < adaptiveT + TtsAlertManager.EPS_NOISE) {
                                     allClear = false
                                 }
                             }
@@ -756,16 +757,18 @@ class CameraStreamActivity : AppCompatActivity() {
                                 dObj            = wallDistance,
                                 clockDirection  = 12,    // tembok selalu didepan
                                 objectLabel     = "tembok",
-                                isMovingForward = isMovingForward
+                                isMovingForward = isMovingForward,
+                                imuData         = latestImuData
                             )
                             if (wallAlert != null) {
                                 ttsAlertManager.speak(wallAlert)
                             }
 
-                            if (wallDistance < TtsAlertManager.D_W0) {
+                            val adaptiveT = ttsAlertManager.getAdaptiveThreshold(SpatialMappingUtils.WALL_TRACKING_ID)
+                            if (wallDistance < adaptiveT) {
                                 closeThreatExists = true
                             }
-                            if (wallDistance < TtsAlertManager.D_RESET) {
+                            if (wallDistance < adaptiveT + TtsAlertManager.EPS_NOISE) {
                                 allClear = false
                             }
                         } else {
@@ -776,7 +779,8 @@ class CameraStreamActivity : AppCompatActivity() {
                                 dObj            = 2000, // jarak aman > D_RESET
                                 clockDirection  = 12,
                                 objectLabel     = "tembok",
-                                isMovingForward = isMovingForward
+                                isMovingForward = isMovingForward,
+                                imuData         = latestImuData
                             )
                         }
 
@@ -958,7 +962,8 @@ class CameraStreamActivity : AppCompatActivity() {
                 dObj           = dObj,
                 clockDirection = arahJam,
                 objectLabel    = label,
-                isMovingForward = isMovingForward
+                isMovingForward = isMovingForward,
+                imuData         = latestImuData
             )
             if (alertMsg != null) {
                 val isPaving = label in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
