@@ -17,11 +17,11 @@ eport.md) menyoroti dua masalah stabilitas:
 - **Keputusan:** Meningkatkan ambang batas toleransi pembacaan ToF dan menerapkan *graceful shutdown* pada soket jaringan ESP32.
 - **Mekanisme Perbaikan:**
   1. **Aplikasi VNetra (CameraStreamActivity.kt)**: Mengubah toleransi kegagalan pembacaan dari 5 frame menjadi 15 frame (~1.5 detik).
-     `kotlin
+     ```kotlin
      private val HOLDOVER_FRAMES = 15 // Naik dari 5 frame
-     `
-  2. **Firmware ESP32 (irmware-vnetra.ino)**: Menambahkan instruksi pembongkaran port pada awal siklus inisialisasi server untuk menjamin tidak ada port yang bertabrakan.
-     `cpp
+     ```
+  2. **Firmware ESP32 (firmware-vnetra.ino)**: Menambahkan instruksi pembongkaran port pada awal siklus inisialisasi server untuk menjamin tidak ada port yang bertabrakan.
+     ```cpp
      void startCameraServer() {
          // Graceful shutdown untuk mencegah crash (LoadStoreError)
          server.end();
@@ -30,4 +30,4 @@ eport.md) menyoroti dua masalah stabilitas:
          ws.onEvent(onWsEvent);
          // ...
      }
-     `
+     ```
