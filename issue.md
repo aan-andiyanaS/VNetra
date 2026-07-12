@@ -1,39 +1,23 @@
-# Laporan ADR: VNetra (ADR-022 - Toleransi ToF Outdoor)
 
-## ADR-022: Relaksasi Filter `target_status` Sensor ToF untuk Toleransi Lingkungan Outdoor
 
-- **Status:** Diterapkan (12 Juli 2026)
+## ADR-023: Optimalisasi Jaringan Kamera & Penghapusan Bottleneck WebSocket (Report-Camera.md)
+
+- **Status:** Direncanakan (12 Juli 2026)
 
 ### 1. Konteks
-Sistem VNetra sangat bergantung pada sensor Time-of-Flight (VL53L5CX) untuk mendeteksi rintangan dan meraba bentuk permukaan jalan (*Terrain Detector*). Untuk meminimalisir gangguan cahaya matahari, perangkat keras telah dilengkapi dengan **IR Narrow Bandpass Filter 940nm**. 
-
-Meski demikian, ketika diuji di luar ruangan (*outdoor*) di bawah sinar matahari langsung, aplikasi Android masih sering mendadak menampilkan simbol `--` (data jarak tidak valid). Hasil investigasi menunjukkan bahwa masalah ini bukan berasal dari sensor yang gagal membaca jarak, melainkan dari logika *sanity check* di dalam fungsi pengemasan UDP pada *firmware* ESP32 yang terlalu agresif.
-
-Cahaya matahari secara drastis meningkatkan *ambient noise* pada foton inframerah yang dipancarkan. Sensor VL53L5CX sebenarnya masih berhasil menghitung jarak objek dengan tepat, namun ia memberikan label `target_status` yang berbeda untuk memperingatkan adanya *noise* tinggi, yakni:
-- `13`: *Target Valid with High Ambient Noise* (Khas kondisi *outdoor* siang hari).
-- `12`: *Target Valid, No Wrap Around Check*.
-- `10`: *Target Close*.
-
-Kode sebelumnya secara eksplisit menolak status-status ini dan membuang datanya (menggantinya dengan `-1`), menyebabkan aplikasi menganggap bahwa sensor sedang buta, padahal jarak yang terdeteksi valid.
+Kamera VNetra sering mengalami patah-patah (*stuttering*) dan lonjakan latensi (ping tinggi). Berdasarkan 
+eport-camera.md, hal ini disebabkan oleh tiga *bottleneck* arsitektural pada *firmware* ESP32:
+1. **Double FPS Limiter:** Fungsi captureAndSend() dan loop() sama-sama membatasi FPS menggunakan timer yang berbeda (millis() vs esp_timer_get_time()), menyebabkan balapan kondisi (*race condition*) yang membuang frame secara acak.
+2. **ACK Flow Control Kuno:** Penggunaan variabel unacked_frames yang membatasi maksimal 4 frame *in-flight* terlalu ketat. Jika Android telat membalas *ACK*, ESP32 langsung berhenti mengirim frame, mengabaikan buffer asli bawaan TCP.
+3. **Semaphore yang Mubazir:** Variabel ws_mutex dan wsQueue digunakan untuk melindungi pengiriman WebSocket antar-*thread*. Namun, karena sensor IMU dan ToF sudah bermigrasi ke UDP, WebSocket kini 100% dimonopoli oleh kamera di Core 1, sehingga *mutex* hanya menjadi beban eksekusi (menahan CPU).
 
 ### 2. Keputusan
-Kita melonggarkan batas filter `target_status` pada rutin pengiriman data UDP di dalam ESP32 (`firmware-vnetra.ino`).
-
-**Mekanisme Perbaikan:**
-Kita memperluas daftar status yang diterima (*whitelisted statuses*) untuk mengakomodasi degradasi sinyal yang wajar (*graceful degradation*) di lingkungan luar ruangan.
-Status `10`, `12`, dan `13` kini secara resmi diterima dan diteruskan ke *client* Android sebagai data valid.
-
-```cpp
-// Sebelum: Terlalu kaku, membuang data yang mengandung noise matahari
-bool statusOk = (st == 5 || st == 6 || st == 9);
-
-// Sesudah: Toleransi terhadap noise outdoor
-// Terima status 5 (valid), 6 (wrap-around), 9 (merged pulse)
-// + 10 (target close), 12 (no wrap check), 13 (high ambient noise - ciri khas outdoor)
-bool statusOk = (st == 5 || st == 6 || st == 9 || st == 10 || st == 12 || st == 13);
-```
+Kita akan memangkas semua batasan statis ini dan bergantung sepenuhnya pada arsitektur asinkron *native*:
+1. Menghapus batasan FPS di captureAndSend() dan menyerahkan ritme waktu sepenuhnya pada loop().
+2. Menghapus logika unacked_frames dan mekanisme pemrosesan pesan ACK:CAM. Pengiriman frame akan menggunakan pengecekan *native* dari pustaka WebSocket (memastikan antrean TCP tidak penuh).
+3. Menghapus total ws_mutex dan wsQueue.
 
 ### 3. Konsekuensi
-- **Positif:** Ketersediaan data ToF (*uptime*) di bawah sinar matahari terik meningkat drastis. Simbol `--` akan jarang muncul karena aplikasi tidak lagi menolak pengukuran valid yang hanya memiliki skor *confidence* lebih rendah akibat cahaya luar.
-- **Positif (Stabilitas Keamanan):** Sistem *Terrain Detector* tetap aman dari *false-positive*. Sel sensor yang benar-benar rusak (misal akibat *multipath* optik) akan menghasilkan status `1` (Sigma Fail), `2` (Signal Fail), atau `4` (Phase Fail). Status cacat fatal ini tetap **tidak dimasukkan** ke dalam *whitelist*, sehingga data halusinasi tetap diganti dengan `-1`.
-- **Negatif:** Resolusi kepastian absolut sedikit berkurang pada kondisi *outdoor*, namun hal ini dapat diatasi oleh *Momentum Buffer* dan interpolasi pada aplikasi Android.
+- **Positif:** Aliran *video stream* akan jauh lebih mulus (*smooth*), latensi turun drastis, dan CPU ESP32 lebih lega.
+- **Positif:** Beban aplikasi Android untuk terus mengirim balik pesan *ACK* hilang.
+- **Negatif:** Jika koneksi Wi-Fi tiba-tiba sangat buruk, buffer TCP LwIP internal bisa penuh (namun kita akan menanganinya dengan pengecekan ketersediaan buffer sebelum fungsi *send* dipanggil).
