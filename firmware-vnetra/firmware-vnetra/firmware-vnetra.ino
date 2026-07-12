@@ -98,7 +98,6 @@
 // ---------------------------------------------------------
 
 SemaphoreHandle_t i2c_mutex;
-SemaphoreHandle_t ws_mutex;   // Proteksi ws.binaryAll() dari multiple FreeRTOS tasks
 Adafruit_MPU6050 mpu;
 
 // ======== CONFIG ORIENTASI MPU6050 ========
