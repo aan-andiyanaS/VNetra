@@ -189,7 +189,6 @@ static constexpr size_t   WS_BUF_MAX        = 130*1024;
 static constexpr uint32_t HEAP_GUARD_BYTES  = 30000;
 
 // Dynamic QoS & Frame Dropping
-static constexpr unsigned long TARGET_FRAME_MS = 100;     // Target 10 FPS
 static constexpr float         MOTION_THRESHOLD = 1.5f;   // Threshold pergerakan IMU (rad/s)
 static constexpr uint8_t       QUALITY_STILL    = 12;     // Kualitas saat diam (tajam)
 static constexpr uint8_t       QUALITY_MOTION   = 30;     // Kualitas saat bergerak (buram)
@@ -201,9 +200,7 @@ static constexpr uint32_t POWER_SAVE_TIMEOUT = 30000;  // 30 detik tanpa client 
 // ======== GLOBAL STATE ========
 
 volatile int unacked_frames = 0;
-uint32_t last_ack_time = 0;
 volatile bool is_moving_fast = false;
-unsigned long last_frame_time = 0;
 volatile unsigned long last_motion_time = 0;
 
 volatile uint32_t stat_frames_cam = 0;
