@@ -21,3 +21,24 @@ Kita akan memangkas semua batasan statis ini dan bergantung sepenuhnya pada arsi
 - **Positif:** Aliran *video stream* akan jauh lebih mulus (*smooth*), latensi turun drastis, dan CPU ESP32 lebih lega.
 - **Positif:** Beban aplikasi Android untuk terus mengirim balik pesan *ACK* hilang.
 - **Negatif:** Jika koneksi Wi-Fi tiba-tiba sangat buruk, buffer TCP LwIP internal bisa penuh (namun kita akan menanganinya dengan pengecekan ketersediaan buffer sebelum fungsi *send* dipanggil).
+
+## ADR-024: Perbaikan Deklarasi Ganda `isCameraActive`
+- **Status:** Dieksekusi (12 Juli 2026)
+
+### 1. Konteks
+Dari hasil inspeksi menyeluruh pada codebase (poin 1 di `report.md`), ditemukan *bug* deklarasi ganda pada variabel global `isCameraActive` di `firmware-vnetra.ino`. Ini terjadi karena sisa-sisa refaktor ADR-023.
+```cpp
+// Baris 99:
+volatile bool isCameraActive = true;
+
+// Baris 244:
+bool isCameraActive = true;
+```
+Deklarasi ganda ini akan memicu error kompilasi `"redefinition of isCameraActive"`.
+
+### 2. Keputusan (Incremental Implementation & Ponytail)
+Menggunakan pendekatan *ponytail* (solusi paling sederhana yang langsung bekerja), kita akan menghapus deklarasi baru yang salah (baris 99) dan mempertahankan deklarasi aslinya di baris 244. Tidak perlu membongkar ulang seluruh file, cukup menghapus satu baris bermasalah.
+
+### 3. Konsekuensi
+- **Positif:** Kompilasi *firmware* kembali berhasil tanpa error.
+- **Positif:** Menjaga kebersihan *global scope*.

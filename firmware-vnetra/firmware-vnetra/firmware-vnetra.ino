@@ -96,7 +96,6 @@
 // ---------------------------------------------------------
 // SYNCHRONIZATION & CONFIG
 // ---------------------------------------------------------
-volatile bool isCameraActive = true;
 
 SemaphoreHandle_t i2c_mutex;
 SemaphoreHandle_t ws_mutex;   // Proteksi ws.binaryAll() dari multiple FreeRTOS tasks
