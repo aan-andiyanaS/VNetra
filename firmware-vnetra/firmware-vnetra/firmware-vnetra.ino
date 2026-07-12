@@ -93,6 +93,11 @@
 #define SCL_PIN 2
 #define LPN_PIN 14 // VL53L5CX enable pin
 
+// ---------------------------------------------------------
+// SYNCHRONIZATION & CONFIG
+// ---------------------------------------------------------
+volatile bool isCameraActive = true;
+
 SemaphoreHandle_t i2c_mutex;
 SemaphoreHandle_t ws_mutex;   // Proteksi ws.binaryAll() dari multiple FreeRTOS tasks
 Adafruit_MPU6050 mpu;
@@ -154,10 +159,10 @@ static const float       DEG2RAD_F = 0.01745329252f;  // π/180, lebih portabel 
 // ======== TOF RESOLUTION MODE ========
 // Resolusi aktif VL53L5CX: 8 (mode 8x8, 64 cell) atau 4 (mode 4x4, 16 cell)
 // Diubah via WebSocket command: SET_TOF_MODE:4 / SET_TOF_MODE:8
-volatile uint8_t  tofResolution     = 8;   // Default 8x8
-volatile bool     tofModeChangePending = false; // Flag: perlu restart ranging
+volatile uint8_t tofResolution = 4;           // Awalnya 4x4 untuk kecepatan
+bool tofModeChangePending = false;   // Flag untuk meminta perubahan resolusi di thread TOF
 
-// ======== RESET BUTTON — GPIO 0 (BOOT) ========
+// ======== DEKLARASI FUNGSI ========— GPIO 0 (BOOT) ========
 #define RESET_BUTTON_PIN 0
 #define RESET_HOLD_TIME  5000   // ms — tahan 5 detik untuk reset
 #define RESET_PHASE1_MS  1667   // 0     – 1.6 s → LED Orange
@@ -426,8 +431,6 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             udpClientReady = true;
             wsClientConnected = true;
             hadClientBefore   = true;
-            last_ack_time     = millis();
-            unacked_frames    = 0;
             // Keluar dari power save mode saat client baru connect
             if (powerSaveMode) {
                 powerSaveMode = false;
@@ -441,7 +444,6 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             wsClientConnected = (ws.count() > 0);
             if (!wsClientConnected) {
                 udpClientReady = false;
-                unacked_frames = 0; // reset
             }
             if (!wsClientConnected && hadClientBefore) {
                 // Semua client disconnect — catat waktu untuk timer power save
@@ -471,9 +473,6 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                 if (cmd.startsWith("PING:")) {
                     String pongReply = "PONG:" + cmd.substring(5);
                     client->text(pongReply);
-                } else if (cmd == "ACK:CAM") {
-                    last_ack_time = millis();
-                    if (unacked_frames > 0) unacked_frames--;
                 } else if (cmd == "SET_TOF_MODE:4") {
                     if (tofResolution != 4) {
                         tofResolution = 4;
@@ -498,29 +497,6 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 
 // ======== CAPTURE & SEND via WebSocket ========
 void captureAndSend() {
-    // 3A: Frame Dropping cerdas dengan Fallback
-    // last_ack_time diupdate di WS_EVT_DATA setiap menerima ACK:CAM
-    extern uint32_t last_ack_time; 
-    
-    if (millis() - last_ack_time > 3000) {
-        // Fallback: Jika tidak ada ACK selama 3 detik, asumsi Android menggunakan app versi lama
-        // atau koneksi lag parah. Reset unacked_frames agar video tidak mati total (kembali ke perilaku awal).
-        unacked_frames = 0;
-    } else if (unacked_frames >= 4) {
-        // Flow control ketat: max 4 frame in-flight (~400ms buffer)
-        // Jika penuh, DROP frame seketika tanpa delay (agar tidak patah-patah).
-        // Jangan di-return di sini karena kita butuh ngecek heap & memori buffer di bawah
-        // Tapi untuk performa, return di sini paling hemat CPU. Pastikan fb & jpg_buf belum dialokasi!
-        Serial.println("[CAM] Buffer penuh (max 4). Frame didrop.");
-        return; 
-    }
-
-    // FPS Limiter
-    if (millis() - last_frame_time < TARGET_FRAME_MS) {
-        return;
-    }
-    last_frame_time = millis();
-
     // Skip jika kamera dinonaktifkan sementara
     if (!isCameraActive) return;
     // Skip jika tidak ada client atau dalam mode hemat daya
@@ -595,19 +571,11 @@ void captureAndSend() {
     if (fb)             esp_camera_fb_return(fb);
     else if (converted) free(jpg_buf);
 
-    // KRITIS: ws.binaryAll() dipanggil dari loop() DAN dari IMU_Task/TOF_Task
-    // ESPAsyncWebServer TIDAK thread-safe — gunakan mutex untuk cegah korupsi
-    if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        unacked_frames++; // Tandai frame in-flight
-        for (auto& client : ws.getClients()) {
-            if (client.status() == WS_CONNECTED) {
-                // Jangan check queueIsFull lagi, kita sudah limit max 2 frame in-flight di atas
-                client.binary(g_wsBuf, total);
-            }
+    // Kirim via WebSocket (menggunakan native TCP backpressure)
+    for (auto& client : ws.getClients()) {
+        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+            client.binary(g_wsBuf, total);
         }
-        xSemaphoreGive(ws_mutex);
-    } else {
-        Serial.println("[CAM] Gagal take ws_mutex, frame didrop.");
     }
 }
 
@@ -1390,9 +1358,7 @@ void handleButton() {
                 ledMagenta();
                 clearWiFiCredentials();
                 wifiConnected = false; deviceIP = "";
-                if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                    ws.closeAll(); xSemaphoreGive(ws_mutex);
-                }
+                ws.closeAll();
                 wsClientConnected = false;
                 delay(500);
                 WiFi.disconnect(true); WiFi.mode(WIFI_OFF);
@@ -1527,11 +1493,8 @@ void handleStatsAndHeartbeat(uint32_t nowMs) {
             const uint64_t ts = esp_timer_get_time();
             hbeat[0] = FRAME_TYPE_HBEAT;
             memcpy(hbeat + 1, &ts, 8);
-            if (xSemaphoreTake(ws_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-                for (auto& client : ws.getClients()) {
-                    if (client.status() == WS_CONNECTED && !client.queueIsFull()) client.binary(hbeat, FRAME_HEADER_SZ);
-                }
-                xSemaphoreGive(ws_mutex);
+            for (auto& client : ws.getClients()) {
+                if (client.status() == WS_CONNECTED && !client.queueIsFull()) client.binary(hbeat, FRAME_HEADER_SZ);
             }
         }
     }
@@ -1549,8 +1512,6 @@ void setup() {
     Serial.println("\n===== ESP32-S3 CAM BLE Provisioning + WebSocket =====");
 
     i2c_mutex = xSemaphoreCreateMutex();
-    ws_mutex  = xSemaphoreCreateMutex();
-    // wsQueue dihapus
 
     // Initialize UDP Sensor Server (ditunda hingga WiFi connected)
     // udpSensor.listen(8081);

@@ -314,7 +314,6 @@ class CameraStreamService : Service() {
                                     when (type) {
                                         FRAME_TYPE_JPEG -> {
                                             _frameFlow.emit(payload)
-                                            runCatching { activeWebSocket?.send("ACK:CAM") }
                                         }
                                         FRAME_TYPE_IMU  -> {
                             // Payload v2: 9 float × 4B = 36B (firmware baru)
