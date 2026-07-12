@@ -72,7 +72,8 @@ class TerrainDetector {
         val type:       TerrainType = TerrainType.SAFE,
         val confidence: Float       = 0f,
         val hEst:       Float       = 0f,
-        val direction:  Int         = 12
+        val direction:  Int         = 12,
+        val distance:   Float       = 0f
     )
 
     // State temporal: riwayat tipe per frame untuk C_temporal
@@ -269,7 +270,8 @@ class TerrainDetector {
             type       = type,
             confidence = confidence,
             hEst       = hEst,
-            direction  = direction
+            direction  = direction,
+            distance   = zLow
         )
     }
 
@@ -348,6 +350,6 @@ class TerrainDetector {
             else                 -> 0.5f
         }
         val confidence = (0.40f * cR + 0.30f * cSpatial + 0.20f * cTemporal + 0.10f * cEdge).coerceIn(0f, 1f)
-        return TerrainResult(type = type, confidence = confidence, hEst = hEst, direction = direction)
+        return TerrainResult(type = type, confidence = confidence, hEst = hEst, direction = direction, distance = zLow)
     }
 }

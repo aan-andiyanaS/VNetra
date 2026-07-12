@@ -125,10 +125,10 @@ class CameraStreamActivity : AppCompatActivity() {
 
     // ── Formula J — Terrain Detector (P6) ───────────────────────
     private val terrainDetector = TerrainDetector()
-    private var lastTerrainAlertTime  = 0L
+    
     @Volatile private var isBlockedState = false
     // Cooldown: cegah terrain alert flood (min. 3 detik antar peringatan, kecuali HIGH yang selalu langsung)
-    private val TERRAIN_ALERT_COOLDOWN_MS = 3000L
+    
 
     // Temporal holdover: tahan nilai terakhir yang valid selama N frame sebelum tampil "—".
     // Ini mencegah cell terluar (yang memiliki SNR lebih rendah) flicker antara angka dan "—"
@@ -824,52 +824,40 @@ class CameraStreamActivity : AppCompatActivity() {
                                 terrainResult.type != TerrainDetector.TerrainType.OPEN &&
                                 terrainResult.confidence >= 0.55f) {
                                 
-                                val nowMs = System.currentTimeMillis()
-                                val cooldown = (nowMs - lastTerrainAlertTime) > TERRAIN_ALERT_COOLDOWN_MS
-                                val isHigh = terrainResult.confidence >= 0.70f
-                                // Validasi: Prioritaskan YOLO. Jika YOLO mendeteksi rintangan dekat, bisukan peringatan Terrain.
-                                var yoloValidated = false
-                                
-                                if (!hasCloseYoloThreat) {
+                                val typeText = when (terrainResult.type) {
+                                    TerrainDetector.TerrainType.STAIR_DOWN -> "tangga turun"
+                                    TerrainDetector.TerrainType.STAIR_UP   -> "tangga naik"
+                                    TerrainDetector.TerrainType.HOLE       -> "lubang"
+                                    TerrainDetector.TerrainType.CONTAMINATED -> "objek dekat"
+                                    else -> ""
+                                }
+
+                                if (typeText.isNotEmpty()) {
                                     // Validasi YOLO khusus untuk Tangga (HOLE, CONTAMINATED bypass YOLO)
-                                    val isStair = terrainResult.type == TerrainDetector.TerrainType.STAIR_DOWN || 
-                                                  terrainResult.type == TerrainDetector.TerrainType.STAIR_UP
-                                    yoloValidated = !isStair
+                                    var yoloValidated = true
+                                    val isStair = terrainResult.type == TerrainDetector.TerrainType.STAIR_DOWN || terrainResult.type == TerrainDetector.TerrainType.STAIR_UP
                                     
                                     if (isStair) {
                                         val currentDetections = latestDetections
-                                        yoloValidated = currentDetections.any { 
-                                            it.className == "tangga naik" || it.className == "tangga turun" 
+                                        yoloValidated = currentDetections.any { it.className == "tangga naik" || it.className == "tangga turun" }
+                                    }
+
+                                    if (yoloValidated) {
+                                        // Lempar ke TtsAlertManager agar mematuhi Formula G (Adaptive Threshold) & Formula H (Reset Cooldown)
+                                        val alertMsg = ttsAlertManager.process(
+                                            trackingId = SpatialMappingUtils.TERRAIN_TRACKING_ID,
+                                            dObj = terrainResult.distance,
+                                            clockDirection = terrainResult.direction,
+                                            objectLabel = typeText,
+                                            isMovingForward = isMovingForward,
+                                            imuData = latestImuData
+                                        )
+                                        
+                                        if (alertMsg != null) {
+                                            val isHigh = terrainResult.confidence >= 0.70f
+                                            if (isHigh) ttsAlertManager.speak(alertMsg)
+                                            else ttsAlertManager.speakAdd(alertMsg)
                                         }
-                                    }
-                                }
-
-                                if (yoloValidated && (isHigh || cooldown)) {
-                                    lastTerrainAlertTime = nowMs
-
-                                    val hCm      = (terrainResult.hEst / 10).toInt()
-                                    val dirText  = when (terrainResult.direction) {
-                                        11 -> "kiri depan"
-                                         1 -> "kanan depan"
-                                        else -> "depan"
-                                    }
-                                    val typeText = when (terrainResult.type) {
-                                        TerrainDetector.TerrainType.STAIR_DOWN -> "tangga turun"
-                                        TerrainDetector.TerrainType.STAIR_UP   -> "tangga naik"
-                                        TerrainDetector.TerrainType.HOLE       -> "lubang"
-                                        TerrainDetector.TerrainType.CONTAMINATED -> "objek dekat"
-                                        else -> ""
-                                    }
-
-                                    if (typeText.isNotEmpty()) {
-                                        val msg = if (isHigh) {
-                                            "Awas! $typeText, sekitar $hCm cm, $dirText!"
-                                        } else {
-                                            "Perhatian, $typeText, $hCm cm, $dirText"
-                                        }
-
-                                        if (isHigh) ttsAlertManager.speak(msg)
-                                        else ttsAlertManager.speakAdd(msg)
                                     }
                                 }
                             }
@@ -1169,7 +1157,7 @@ class CameraStreamActivity : AppCompatActivity() {
             ttsAlertManager.stopSpeaking()    // hentikan TTS yang mungkin sedang berjalan
             ttsAlertManager.resetAllFlags()   // siap diperingatkan lagi saat reconnect
         }
-        lastTerrainAlertTime = 0L      // reset cooldown terrain
+        
         isBlockedState = false         // reset status terhalang
 
         pingCamera = 0

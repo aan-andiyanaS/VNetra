@@ -193,7 +193,7 @@ class TtsAlertManager(private val context: Context) {
                     // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
                     val aLin = imuData[5]
                     val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPavingObj
+                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
                     if (isStaticObject && aLin < 0.3f) {
                         vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
                     }
@@ -275,7 +275,7 @@ class TtsAlertManager(private val context: Context) {
                     return null
                 }
                 
-                val isWall = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
+                val isWall = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID
                 
                 if (isWall && isMovingForward) {
                     val lastSpoken = lastSpokenTime[trackingId] ?: 0L
@@ -346,7 +346,7 @@ class TtsAlertManager(private val context: Context) {
                     // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
                     val aLin = imuData[5]
                     val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPavingObj
+                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
                     if (isStaticObject && aLin < 0.3f) {
                         vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
                     }
@@ -526,7 +526,7 @@ class TtsAlertManager(private val context: Context) {
                     // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
                     val aLin = imuData[5]
                     val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPavingObj
+                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
                     if (isStaticObject && aLin < 0.3f) {
                         vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
                     }
