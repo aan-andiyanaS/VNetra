@@ -613,6 +613,10 @@ void captureAndSend() {
 
 // ======== START WEBSOCKET SERVER ========
 void startCameraServer() {
+    // Graceful shutdown untuk mencegah crash (LoadStoreError) jika fungsi ini dipanggil ulang
+    server.end();
+    udpSensor.close();
+    
     ws.onEvent(onWsEvent);
     server.addHandler(&ws);
     server.begin();

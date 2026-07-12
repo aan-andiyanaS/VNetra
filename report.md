@@ -32,7 +32,7 @@ Laporan ini merangkum hasil pemeriksaan komprehensif terhadap seluruh struktur p
 * **Dampak jika tidak diperbaiki**: Mekanisme meminta-hapus-minta-hapus memori secara terus menerus (puluhan kali per detik) akan menyebabkan **Heap Fragmentation** (memori berlubang-lubang seperti keju Swiss). Jika perangkat VNetra digunakan selama lebih dari 1 jam tanpa henti, memori tidak akan bisa menemukan blok kosong yang berurutan. ESP32 akan kehabisan memori (_Out of Memory_), gagal mengirim gambar, dan akhirnya akan mengalami **Kernel Panic / Restart otomatis**. Disarankan untuk langsung mengalokasikan ukuran absolut (misal 150KB) sejak ESP32 menyala, tanpa pernah membebaskannya.
 
 ## 4. [Sedang] Potensi Kebocoran / Tabrakan Port UDP
-* **Status**: 🔴 Perlu diperbaiki jika ada _reconnect logic_.
+* **Status**: 🟢 **Sudah Diperbaiki** (Ditambahkan `server.end()` dan `udpSensor.close()`).
 * **Lokasi**: `firmware-vnetra.ino` (Fungsi `startCameraServer()`)
 * **Penjelasan**: Anda memulai server sensor UDP menggunakan perintah `udpSensor.listen(8081)`. Perintah ini dipanggil di dalam fungsi `startCameraServer()`. Walaupun saat ini dipanggil satu kali setelah koneksi WiFi (via BLE), namun jika kelak Anda menambahkan fitur "Auto Reconnect WiFi" pada Firmware ESP32 yang memanggil ulang server, perintah `listen(8081)` akan dijalankan dua kali.
 * **Dampak jika tidak diperbaiki**: Sistem AsyncUDP akan _crash_ (LoadStoreError) karena sistem mencoba memaksa membuka port 8081 yang sedang aktif/menggantung. ESP32 akan _Boot Loop_ (Mati hidup terus menerus).
@@ -48,4 +48,5 @@ Laporan ini merangkum hasil pemeriksaan komprehensif terhadap seluruh struktur p
 * Masalah poin ke-1 (Shape Mismatch) yang dapat membuat aplikasi _Force Close_ seketika **sudah diselesaikan**.
 * Masalah poin ke-2 (AI Macet / Deadlock Inference) **sudah diperbaiki** menggunakan pengaman `try...catch...finally` dan `NonCancellable` coroutine context untuk memastikan stabilitas sistem asisten tunanetra.
 * Masalah poin ke-3 (Fragmentasi Heap PSRAM) **sudah diperbaiki** dengan menerapkan pre-alokasi buffer statis absolut untuk performa optimal dan stabilitas jangka panjang.
+* Masalah poin ke-4 (AsyncUDP Bind Error) **sudah diperbaiki** dengan menerapkan penutupan port secara aman sebelum memulainya kembali.
 * Masalah poin ke-5 (Holdover Frame Singkat) **sudah diperbaiki** dengan menaikkan nilai holdover menjadi `15` frame agar pembacaan ToF stabil di luar ruangan yang silau.
