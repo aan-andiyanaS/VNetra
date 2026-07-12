@@ -38,8 +38,8 @@ Laporan ini merangkum hasil pemeriksaan komprehensif terhadap seluruh struktur p
 * **Dampak jika tidak diperbaiki**: Sistem AsyncUDP akan _crash_ (LoadStoreError) karena sistem mencoba memaksa membuka port 8081 yang sedang aktif/menggantung. ESP32 akan _Boot Loop_ (Mati hidup terus menerus).
 
 ## 5. [Rendah] _Holdover Frame_ Sensor ToF Terlalu Singkat
-* **Status**: 🟡 Cukup direkomendasikan untuk diubah nilainya.
-* **Lokasi**: `app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt` (Variabel `HOLDOVER_FRAMES = 5`)
+* **Status**: 🟢 **Sudah Diperbaiki** (Diubah menjadi `15` frame).
+* **Lokasi**: `app/src/main/java/com/airi/vnetra/ui/CameraStreamActivity.kt` (Variabel `HOLDOVER_FRAMES = 15`)
 * **Penjelasan**: VNetra membaca sensor jarak ToF pada ~10 FPS. Jika sebuah kotak (cell) gagal menangkap inframerah (karena aspal yang terlalu gelap/berair menyerap cahaya), sistem akan menahannya selama 5 frame (0.5 detik) sebelum mengubah layar menjadi "—" (tidak valid).
 * **Dampak jika tidak diperbaiki**: Saat tunanetra berjalan cepat di luar ruangan yang aspalnya panas atau memantulkan silau matahari, sensor ToF sering mengalami gagal baca selama 1 hingga 2 detik. Karena nilai _holdover_ hanya 0.5 detik, suara TTS peringatan "Lubang!" atau "Turunan" akan tiba-tiba terputus karena Android langsung menganggap rintangan tersebut hilang seketika, padahal itu hanya kegagalan sensor membaca data. (Saran: Naikkan menjadi `10` atau `15` frame).
 
@@ -48,3 +48,4 @@ Laporan ini merangkum hasil pemeriksaan komprehensif terhadap seluruh struktur p
 * Masalah poin ke-1 (Shape Mismatch) yang dapat membuat aplikasi _Force Close_ seketika **sudah diselesaikan**.
 * Masalah poin ke-2 (AI Macet / Deadlock Inference) **sudah diperbaiki** menggunakan pengaman `try...catch...finally` dan `NonCancellable` coroutine context untuk memastikan stabilitas sistem asisten tunanetra.
 * Masalah poin ke-3 (Fragmentasi Heap PSRAM) **sudah diperbaiki** dengan menerapkan pre-alokasi buffer statis absolut untuk performa optimal dan stabilitas jangka panjang.
+* Masalah poin ke-5 (Holdover Frame Singkat) **sudah diperbaiki** dengan menaikkan nilai holdover menjadi `15` frame agar pembacaan ToF stabil di luar ruangan yang silau.

@@ -134,7 +134,7 @@ class CameraStreamActivity : AppCompatActivity() {
     // Ini mencegah cell terluar (yang memiliki SNR lebih rendah) flicker antara angka dan "—"
     // karena status sensor (9/255) kadang muncul selang-seling antar frame.
     // Nilai 5 frame @ 10Hz = 0.5 detik toleransi sebelum cell dianggap benar-benar kosong.
-    private val HOLDOVER_FRAMES = 5
+    private val HOLDOVER_FRAMES = 15
     private var holdoverCount: IntArray? = null  // countdown per cell; -1 = sudah ditampilkan "—"
 
     // FPS counter
