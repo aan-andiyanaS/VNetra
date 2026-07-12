@@ -1045,7 +1045,9 @@ void IMU_Task(void *pvParameters) {
     static float a_lin_smooth = 0.0f;
     static float a_lin_dc_bias = 0.0f;
     
-    a_lin_smooth = (0.1f * a_lin_mag_raw) + (0.9f * a_lin_smooth);
+    // Peningkatan Sensitivitas (Realisme Fisika): 
+    // Bobot pembacaan baru dinaikkan dari 0.1 menjadi 0.4 agar pergerakan terasa instan dan tidak lagging.
+    a_lin_smooth = (0.4f * a_lin_mag_raw) + (0.6f * a_lin_smooth);
     
     // Hanya tangkap bias saat relatif diam (cegah goncangan berjalan merusak titik 0)
     if (a_lin_smooth < 1.5f) {
@@ -1053,12 +1055,11 @@ void IMU_Task(void *pvParameters) {
     }
     
     float a_lin_dynamic = a_lin_smooth - a_lin_dc_bias;
-    if (a_lin_dynamic < 0.0f) a_lin_dynamic = 0.0f; // Clamp lantai
+    if (a_lin_dynamic < 0.0f) a_lin_dynamic = 0.0f; // Clamp lantai (Magnitudo Skalar tidak bisa negatif)
     
     float a_lin_mag = a_lin_dynamic;
-    if (a_lin_mag < 0.2f) {
-        a_lin_mag = 0.0f; // Noise gate final
-    }
+    // Deadzone/Noise Gate (a_lin_mag < 0.2f) telah DICABUT agar pergerakan mikro terdeteksi layaknya kecepatan dunia nyata.
+
 
     last_ts_esp = current_ts_esp;
 
