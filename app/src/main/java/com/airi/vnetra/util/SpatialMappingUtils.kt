@@ -44,6 +44,7 @@ object SpatialMappingUtils {
     const val H_CAM   = 480   // px — tinggi gambar kamera OV2640 (VGA)
 
     const val WALL_TRACKING_ID = 999  // ID unik global untuk asisten TTS tembok
+    const val TERRAIN_TRACKING_ID = 998  // ID unik untuk asisten medan jalan
 
     // Fraksi grid ToF terhadap lebar kamera (dari XML: width_percent="0.69")
     const val TOF_GRID_FRAC = 0.69f  // gridTof.width / ivCameraFrame.width
@@ -77,10 +78,10 @@ object SpatialMappingUtils {
     // Batas zona arah jam — diderivasi dari Konstanta Sistem, bukan angka arbitrer
     // b_k = D_left + k × W_z,  k ∈ {0, 1, 2, 3}
     // Dengan D_LEFT=99 dan W_Z=147:
-    val B0 = D_LEFT               // 99  — batas kiri zona JAM 11
-    val B1 = D_LEFT + W_Z         // 246 — batas kiri zona JAM 12
-    val B2 = D_LEFT + 2 * W_Z    // 393 — batas kiri zona JAM 1
-    val B3 = D_LEFT + 3 * W_Z    // 540 — batas kanan zona JAM 1 (= batas kiri dead zone kanan)
+    const val B0 = D_LEFT               // 99  — batas kiri zona JAM 11
+    const val B1 = D_LEFT + W_Z         // 246 — batas kiri zona JAM 12
+    const val B2 = D_LEFT + 2 * W_Z    // 393 — batas kiri zona JAM 1
+    const val B3 = D_LEFT + 3 * W_Z    // 540 — batas kanan zona JAM 1 (= batas kiri dead zone kanan)
 
     // ── Formula B: Centroid bounding box ─────────────────────────────────────
     /**

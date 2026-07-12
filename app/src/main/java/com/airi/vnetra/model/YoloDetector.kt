@@ -100,10 +100,6 @@ class YoloDetector(
             val options = Interpreter.Options()
 
             val supportNpu = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1
-            // Flutter sering kali langsung menginisiasi GPU tanpa mengecek CompatibilityList,
-            // sehingga device yang sebenarnya mampu (namun tidak di-whitelist) tetap bisa pakai GPU.
-            // Kita bypass pengecekan ini dan biarkan try-catch yang menangani kegagalan.
-            val supportGpu = true
 
             var targetDelegate = delegateMode
             var finalModelName = ""
@@ -114,7 +110,7 @@ class YoloDetector(
                     targetDelegate = DelegateMode.NPU
                     finalModelName = MODEL_INT8
                     Log.i(TAG, "Mode AUTO: Memprioritaskan NPU dengan model INT8.")
-                } else if (hasFp32 && supportGpu && modelPreference != ModelPreference.INT8) {
+                } else if (hasFp32 && modelPreference != ModelPreference.INT8) {
                     targetDelegate = DelegateMode.GPU
                     finalModelName = MODEL_FP32
                     Log.i(TAG, "Mode AUTO: Memprioritaskan GPU dengan model FP32.")
@@ -155,12 +151,7 @@ class YoloDetector(
 
                 if (targetDelegate == DelegateMode.NPU && !supportNpu) {
                     Log.w(TAG, "NPU dipilih tetapi API < 27. Fallback ke GPU/CPU.")
-                    targetDelegate = if (supportGpu && finalModelName == MODEL_FP32) DelegateMode.GPU else DelegateMode.CPU
-                }
-                
-                if (targetDelegate == DelegateMode.GPU && !supportGpu) {
-                    Log.w(TAG, "GPU dipilih tetapi tidak didukung perangkat ini. Fallback ke CPU.")
-                    targetDelegate = DelegateMode.CPU
+                    targetDelegate = if (finalModelName == MODEL_FP32) DelegateMode.GPU else DelegateMode.CPU
                 }
             }
 
@@ -318,7 +309,6 @@ class YoloDetector(
         val scale = minOf(INPUT_SIZE.toFloat() / originalWidth, INPUT_SIZE.toFloat() / originalHeight)
         val padX = (INPUT_SIZE - (originalWidth * scale).toInt()) / 2f
         val padY = (INPUT_SIZE - (originalHeight * scale).toInt()) / 2f
-        val scaleY = originalHeight.toFloat() / INPUT_SIZE
 
         if (isTransposedOutput && outputBufferTransposed != null) {
             val output = outputBufferTransposed!![0]
@@ -342,22 +332,7 @@ class YoloDetector(
                     val w = output[i][2]
                     val h = output[i][3]
 
-                    val cxAbsolute = if (cx < 2.0f) cx * INPUT_SIZE else cx
-                    val cyAbsolute = if (cy < 2.0f) cy * INPUT_SIZE else cy
-                    val wAbsolute = if (w < 2.0f) w * INPUT_SIZE else w
-                    val hAbsolute = if (h < 2.0f) h * INPUT_SIZE else h
-
-                    val left = (cxAbsolute - wAbsolute / 2 - padX) / scale
-                    val top = (cyAbsolute - hAbsolute / 2 - padY) / scale
-                    val right = (cxAbsolute + wAbsolute / 2 - padX) / scale
-                    val bottom = (cyAbsolute + hAbsolute / 2 - padY) / scale
-
-                    val rect = RectF(
-                        left.coerceAtLeast(0f),
-                        top.coerceAtLeast(0f),
-                        right.coerceAtMost(originalWidth.toFloat()),
-                        bottom.coerceAtMost(originalHeight.toFloat())
-                    )
+                    val rect = buildDetectionRect(cx, cy, w, h, padX, padY, scale, originalWidth, originalHeight)
 
                     val className = if (classId in CLASSES.indices) CLASSES[classId] else "obj_$classId"
                     results.add(DetectionResult(classId, className, maxClassConf, rect))
@@ -391,29 +366,14 @@ class YoloDetector(
                     val h = output[3][i]
 
                     // Log the first confident box's raw coordinates
-                    if (results.size == 0) {
+                    if (results.isEmpty()) {
                         Log.i(TAG, "Raw Box: cx=$cx, cy=$cy, w=$w, h=$h (classId=$classId, conf=$maxClassConf)")
                     }
 
                     // Convert from Letterbox coords back to original image coords
                     // If coordinates are normalized (0..1), multiply them by INPUT_SIZE first!
                     // Let's dynamically handle normalized vs absolute
-                    val cxAbsolute = if (cx < 2.0f) cx * INPUT_SIZE else cx
-                    val cyAbsolute = if (cy < 2.0f) cy * INPUT_SIZE else cy
-                    val wAbsolute = if (w < 2.0f) w * INPUT_SIZE else w
-                    val hAbsolute = if (h < 2.0f) h * INPUT_SIZE else h
-
-                    val left = (cxAbsolute - wAbsolute / 2 - padX) / scale
-                    val top = (cyAbsolute - hAbsolute / 2 - padY) / scale
-                    val right = (cxAbsolute + wAbsolute / 2 - padX) / scale
-                    val bottom = (cyAbsolute + hAbsolute / 2 - padY) / scale
-
-                    val rect = RectF(
-                        left.coerceAtLeast(0f),
-                        top.coerceAtLeast(0f),
-                        right.coerceAtMost(originalWidth.toFloat()),
-                        bottom.coerceAtMost(originalHeight.toFloat())
-                    )
+                    val rect = buildDetectionRect(cx, cy, w, h, padX, padY, scale, originalWidth, originalHeight)
 
                     val className = if (classId in CLASSES.indices) CLASSES[classId] else "obj_$classId"
                     results.add(DetectionResult(classId, className, maxClassConf, rect))
@@ -422,6 +382,30 @@ class YoloDetector(
         }
 
         return applyNMS(results)
+    }
+
+
+    private fun buildDetectionRect(
+        cx: Float, cy: Float, w: Float, h: Float,
+        padX: Float, padY: Float, scale: Float,
+        originalWidth: Int, originalHeight: Int
+    ): RectF {
+        val cxAbsolute = if (cx < 2.0f) cx * INPUT_SIZE else cx
+        val cyAbsolute = if (cy < 2.0f) cy * INPUT_SIZE else cy
+        val wAbsolute = if (w < 2.0f) w * INPUT_SIZE else w
+        val hAbsolute = if (h < 2.0f) h * INPUT_SIZE else h
+
+        val left = (cxAbsolute - wAbsolute / 2 - padX) / scale
+        val top = (cyAbsolute - hAbsolute / 2 - padY) / scale
+        val right = (cxAbsolute + wAbsolute / 2 - padX) / scale
+        val bottom = (cyAbsolute + hAbsolute / 2 - padY) / scale
+
+        return RectF(
+            left.coerceAtLeast(0f),
+            top.coerceAtLeast(0f),
+            right.coerceAtMost(originalWidth.toFloat()),
+            bottom.coerceAtMost(originalHeight.toFloat())
+        )
     }
 
     private fun applyNMS(boxes: List<DetectionResult>): List<DetectionResult> {

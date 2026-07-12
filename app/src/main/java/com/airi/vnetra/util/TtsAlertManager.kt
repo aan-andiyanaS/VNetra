@@ -316,71 +316,7 @@ class TtsAlertManager(private val context: Context) {
     fun postProcessDetections(activeClasses: Set<Int>) {
         val now = System.currentTimeMillis()
 
-        // =================================================================
-        // FORMULA G: Adaptive Threshold & Approach Velocity (v9.4)
-        // =================================================================
-        var T = D_W0 // Default threshold
-        
-        if (imuData != null && imuData.size >= 9) {
-            val tsEsp = imuData[6]
-            val vHeadBase = imuData[7]
-            val isConverged = imuData[8] > 0.5f
-            
-            if (isConverged) {
-                val dPrev = dObjPrev[trackingId]
-                val tsPrev = tsEspPrev[trackingId]
-                
-                if (dPrev != null && tsPrev != null && tsEsp != tsPrev) {
-                    // G.0: Guard Interval Waktu (Δt)
-                    var dt = (tsEsp - tsPrev) / 1000f
-                    if (dt < 0.001f) dt = 0.001f
-                    if (dt > 0.5f) dt = 0.5f
-                    
-                    // G.1b: Kecepatan semu (v_head)
-                    val vHead = vHeadBase * dObj
-                    
-                    // G.2: Kecepatan pendekatan bersih (v_raw)
-                    var vRaw = ((dPrev - dObj) / dt) - vHead
-                    if (vRaw < 0f) vRaw = 0f
-                    
-                    // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
-                    val aLin = imuData[5]
-                    val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
-                    if (isStaticObject && aLin < 0.3f) {
-                        vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
-                    }
-                    
-                    // G.2b: Moving Average 3-frame
-                    val history = vRawHistory.getOrPut(trackingId) { FloatArray(3) }
-                    history[2] = history[1]
-                    history[1] = history[0]
-                    history[0] = vRaw
-                    
-                    val validCount = history.count { it > 0f } // simplified check for initialized
-                    val vAvg = if (validCount > 0) {
-                        (history[0] + (if (history[1] > 0f) history[1] else history[0]) + (if (history[2] > 0f) history[2] else history[0])) / 3f
-                    } else vRaw
-                    
-                    // G.3: Threshold Adaptif (T)
-                    val tR = 2.0f // Waktu reaksi manusia 2 detik
-                    val momentumBuffer = imuData[5] * 200f // Tambahan jarak berdasarkan akselerasi linear tubuh
-                    T = (D_W0 + (vAvg * tR) + momentumBuffer).toInt()
-                    if (T > 4000) T = 4000
-                    
-                    Log.v(TAG, "Formula G [id=$trackingId]: dt=${String.format("%.3f", dt)} vRaw=${String.format("%.1f", vRaw)} vAvg=${String.format("%.1f", vAvg)} T=$T")
-                }
-                
-                // Update State Formula G
-                dObjPrev[trackingId] = dObj
-                tsEspPrev[trackingId] = tsEsp
-            } else {
-                // EKF belum konvergen, lewati kalkulasi G (T = D_W0)
-                Log.v(TAG, "Formula G [id=$trackingId]: EKF warming up, T=$D_W0")
-            }
-        }
-        lastCalculatedT[trackingId] = T
-        // =================================================================
+
 
         for (classId in activeClasses) {
             lastSeenTime[classId] = now
@@ -496,71 +432,7 @@ class TtsAlertManager(private val context: Context) {
         fun processNavigationState(isDanger: Boolean, isMovingForward: Boolean, isTurning: Boolean) {
             val now = System.currentTimeMillis()
 
-        // =================================================================
-        // FORMULA G: Adaptive Threshold & Approach Velocity (v9.4)
-        // =================================================================
-        var T = D_W0 // Default threshold
-        
-        if (imuData != null && imuData.size >= 9) {
-            val tsEsp = imuData[6]
-            val vHeadBase = imuData[7]
-            val isConverged = imuData[8] > 0.5f
-            
-            if (isConverged) {
-                val dPrev = dObjPrev[trackingId]
-                val tsPrev = tsEspPrev[trackingId]
-                
-                if (dPrev != null && tsPrev != null && tsEsp != tsPrev) {
-                    // G.0: Guard Interval Waktu (Δt)
-                    var dt = (tsEsp - tsPrev) / 1000f
-                    if (dt < 0.001f) dt = 0.001f
-                    if (dt > 0.5f) dt = 0.5f
-                    
-                    // G.1b: Kecepatan semu (v_head)
-                    val vHead = vHeadBase * dObj
-                    
-                    // G.2: Kecepatan pendekatan bersih (v_raw)
-                    var vRaw = ((dPrev - dObj) / dt) - vHead
-                    if (vRaw < 0f) vRaw = 0f
-                    
-                    // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
-                    val aLin = imuData[5]
-                    val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
-                    if (isStaticObject && aLin < 0.3f) {
-                        vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
-                    }
-                    
-                    // G.2b: Moving Average 3-frame
-                    val history = vRawHistory.getOrPut(trackingId) { FloatArray(3) }
-                    history[2] = history[1]
-                    history[1] = history[0]
-                    history[0] = vRaw
-                    
-                    val validCount = history.count { it > 0f } // simplified check for initialized
-                    val vAvg = if (validCount > 0) {
-                        (history[0] + (if (history[1] > 0f) history[1] else history[0]) + (if (history[2] > 0f) history[2] else history[0])) / 3f
-                    } else vRaw
-                    
-                    // G.3: Threshold Adaptif (T)
-                    val tR = 2.0f // Waktu reaksi manusia 2 detik
-                    val momentumBuffer = imuData[5] * 200f // Tambahan jarak berdasarkan akselerasi linear tubuh
-                    T = (D_W0 + (vAvg * tR) + momentumBuffer).toInt()
-                    if (T > 4000) T = 4000
-                    
-                    Log.v(TAG, "Formula G [id=$trackingId]: dt=${String.format("%.3f", dt)} vRaw=${String.format("%.1f", vRaw)} vAvg=${String.format("%.1f", vAvg)} T=$T")
-                }
-                
-                // Update State Formula G
-                dObjPrev[trackingId] = dObj
-                tsEspPrev[trackingId] = tsEsp
-            } else {
-                // EKF belum konvergen, lewati kalkulasi G (T = D_W0)
-                Log.v(TAG, "Formula G [id=$trackingId]: EKF warming up, T=$D_W0")
-            }
-        }
-        lastCalculatedT[trackingId] = T
-        // =================================================================
+
 
 
             if (isDanger) {

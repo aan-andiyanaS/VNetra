@@ -322,52 +322,10 @@ class CameraStreamService : Service() {
                             // Payload v2: 9 float × 4B = 36B (firmware baru)
                             // [0]=θ  [1]=φ  [2]=ωx_corr  [3]=ωy_corr  [4]=ωz_corr
                             // [5]=‖a_lin‖  [6]=ts_esp_ms  [7]=v_head_base  [8]=is_converged
-                            when {
-                                payload.size >= 36 -> {
-                                    // Firmware baru: 9 field penuh
-                                    val floats = FloatArray(9)
-                                    java.nio.ByteBuffer.wrap(payload)
-                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                        .asFloatBuffer().get(floats)
-                                    _imuFlow.emit(floats)
-                                }
-                                payload.size >= 24 -> {
-                                    // Backward-compat: firmware lama 6 field
-                                    // Field 6-8 diisi 0f → is_converged=0 → G tidak aktif
-                                    val floats = FloatArray(9)
-                                    java.nio.ByteBuffer.wrap(payload, 0, 24)
-                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                        .asFloatBuffer().get(floats, 0, 6)
-                                    _imuFlow.emit(floats)
-                                }
-                                // payload < 24B: frame corrupt, abaikan
-                            }
+                            emitImuPayload(payload)
                         }
                                         FRAME_TYPE_TOF  -> {
-                                            // Format baru: [0]=resolusi, [1..]= distance_mm, [1+distSize..]= target_status
-                                            if (payload.size >= 2) {
-                                                val resMode = payload[0].toInt() and 0xFF  // 4 atau 8
-                                                val numCells = resMode * resMode           // 16 atau 64
-                                                val distSize = numCells * 2                // bytes jarak
-
-                                                if (payload.size >= 1 + distSize) {
-                                                    val ints = IntArray(numCells)
-                                                    val buf  = java.nio.ByteBuffer.wrap(payload, 1, distSize)
-                                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                                        .asShortBuffer()
-
-                                                    for (i in 0 until numCells) {
-                                                        // Gunakan .toInt() tanpa `and 0xFFFF` agar
-                                                        // sentinel -1 (0xFFFF sebagai int16) tetap -1.
-                                                        ints[i] = buf.get(i).toInt()
-                                                    }
-                                                    _tofFlow.emit(ints)
-                                                } else {
-                                                    Log.e(TAG, "TOF payload terlalu kecil untuk ${resMode}x${resMode}: ${payload.size}B < ${1 + distSize}B")
-                                                }
-                                            } else {
-                                                Log.e(TAG, "TOF payload terlalu kecil: ${payload.size}B < 2B!")
-                                            }
+                                            emitTofPayload(payload)
                                         }
                                         // FRAME_TYPE_HBEAT (0x03) diabaikan — sudah cukup sebagai keepalive
                                     }
@@ -465,22 +423,7 @@ class CameraStreamService : Service() {
                     // Process sensor data
                     when (type) {
                         FRAME_TYPE_IMU -> {
-                            when {
-                                payload.size >= 36 -> {
-                                    val floats = FloatArray(9)
-                                    java.nio.ByteBuffer.wrap(payload)
-                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                        .asFloatBuffer().get(floats)
-                                    _imuFlow.emit(floats)
-                                }
-                                payload.size >= 24 -> {
-                                    val floats = FloatArray(9)
-                                    java.nio.ByteBuffer.wrap(payload, 0, 24)
-                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                        .asFloatBuffer().get(floats, 0, 6)
-                                    _imuFlow.emit(floats)
-                                }
-                            }
+                            emitImuPayload(payload)
                         }
                         FRAME_TYPE_TOF -> {
                             if (payload.size >= 2) {
@@ -696,6 +639,50 @@ class CameraStreamService : Service() {
         super.onTaskRemoved(rootIntent)
         // App di-swipe dari recent: service tetap jalan (notifikasi masih ada)
         Log.d(TAG, "Task removed — service tetap jalan di background")
+    }
+
+
+    private suspend fun emitImuPayload(payload: ByteArray) {
+        when {
+            payload.size >= 36 -> {
+                val floats = FloatArray(9)
+                java.nio.ByteBuffer.wrap(payload)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    .asFloatBuffer().get(floats)
+                _imuFlow.emit(floats)
+            }
+            payload.size >= 24 -> {
+                val floats = FloatArray(9)
+                java.nio.ByteBuffer.wrap(payload, 0, 24)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    .asFloatBuffer().get(floats, 0, 6)
+                _imuFlow.emit(floats)
+            }
+        }
+    }
+
+    private suspend fun emitTofPayload(payload: ByteArray) {
+        if (payload.size >= 2) {
+            val resMode = payload[0].toInt() and 0xFF
+            val numCells = resMode * resMode
+            val distSize = numCells * 2
+
+            if (payload.size >= 1 + distSize) {
+                val ints = IntArray(numCells)
+                val buf = java.nio.ByteBuffer.wrap(payload, 1, distSize)
+                    .order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    .asShortBuffer()
+
+                for (i in 0 until numCells) {
+                    ints[i] = buf.get(i).toInt()
+                }
+                _tofFlow.emit(ints)
+            } else {
+                Log.e(TAG, "TOF payload terlalu kecil untuk ${resMode}x${resMode}: ${payload.size}B < ${1 + distSize}B")
+            }
+        } else {
+            Log.e(TAG, "TOF payload terlalu kecil: ${payload.size}B < 2B!")
+        }
     }
 
     override fun onDestroy() {

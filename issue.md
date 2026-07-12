@@ -1,23 +1,34 @@
-## ADR-027: Penyelesaian Bug & Optimasi Kotlin (Report Points 4-9)
-- **Status:** Dieksekusi (12 Juli 2026)
+﻿## ADR-028: Resolusi Bug Kritis & Optimasi Lanjutan (Putaran 2)
+- **Status:** Proposed
+- **Tanggal:** 12 Juli 2026
 
 ### 1. Konteks
-Berdasarkan hasil laporan *code review* (`report.md`), terdapat serangkaian masalah performa dan potensi bug di sisi Android (Kotlin) yang perlu dituntaskan:
-1. **(Point 4)** Double resize bitmap di `YoloDetector.kt` yang membuang alokasi memori.
-2. **(Point 5)** Potensi *race condition* pada state `isInferencing` di `CameraStreamActivity.kt`.
-3. **(Point 6)** Potensi `IndexOutOfBoundsException` saat array `tofViews` di-*rebuild* secara asinkron.
-4. **(Point 7)** Kalkulasi *padding* YOLO yang kurang akurat untuk rasio gambar non-persegi.
-5. **(Point 8)** Coroutine `PING` di `CameraStreamService.kt` yang tidak dilacak pembatalannya.
-6. **(Point 9)** Penggunaan `Math.*` Java yang tidak idiomatis di Kotlin.
+Berdasarkan `report_pt2.md`, terdapat 10 temuan baru setelah implementasi ADR-027. Temuan ini berkisar dari bug kritis (potensi *compile error* / *undefined reference*) hingga duplikasi kode yang memperbesar ukuran file tanpa alasan kuat.
 
-### 2. Keputusan (Incremental Implementation & Ponytail)
-Untuk meminimalisir interupsi dan memaksimalkan efisiensi, kita menggabungkan seluruh optimasi Kotlin ini dalam satu eksekusi sapu jagat (*batch processing*):
-- **YoloDetector.kt**: Menghapus `Bitmap.createScaledBitmap` awal yang tak terpakai, memperbaiki kalkulasi `padX/padY` dengan nilai sesudah *scaling*, dan mengganti `Math.min/max` dengan `minOf/maxOf`.
-- **CameraStreamActivity.kt**: Mengganti `isInferencing` menjadi `AtomicBoolean`, menambahkan pengaman batas index `if (i >= tofViews.size)` pada perulangan ToF, dan mengganti `Math.abs` dengan ekstensi `.absoluteValue`.
-- **CameraStreamService.kt**: Menyimpan referensi `pingJob` dan membatalkannya secara eksplisit saat koneksi terputus.
-- Mengganti seluruh sisa fungsi `Math.*` Java dengan fungsi Kotlin *native* di class-class utility.
+### 2. Breakdown Penyelesaian (Task Breakdown)
+Sesuai prinsip **Ponytail** (simplifikasi maksimal, hapus dead code) dan **Incremental Implementation**, kita akan membagi eksekusi ini menjadi beberapa tahap:
+
+#### Tahap 1: Perbaikan Bug Kritis (Poin 1 & 2)
+Ini wajib dilakukan segera karena kode saat ini mengandung referensi ke variabel yang tidak terdefinisi (*broken scope*).
+- **[ ] `TtsAlertManager.kt`**: Hapus blok duplikat Formula G (sekitar 60 baris) di dalam `postProcessDetections()` dan `SmartNavigationTts.processNavigationState()`. Kedua fungsi ini tidak perlu menghitung ulang *threshold* adaptif (T), dan referensi ke `imuData`, `trackingId`, `dObj` di dalamnya adalah *broken code*.
+- **[ ] `SpatialMappingUtils.kt`**: Tambahkan konstanta yang hilang agar kompilasi tidak gagal:
+  ```kotlin
+  const val TERRAIN_TRACKING_ID = 998
+  ```
+
+#### Tahap 2: Refactoring Duplikasi (Poin 3 & 4)
+Menghilangkan duplikasi blok logika yang rentan terhadap inkonsistensi jika diubah di masa depan.
+- **[ ] `YoloDetector.kt`**: Ekstrak blok kalkulasi `left, top, right, bottom` dari *standard* dan *transposed* output menjadi satu *helper function* privat `buildDetectionRect()`.
+- **[ ] `CameraStreamService.kt`**: Ekstrak blok parsing *byte array* IMU (v1/v2) dan ToF menjadi dua fungsi privat: `emitImuPayload(payload: ByteArray)` dan `emitTofPayload(payload: ByteArray)`. Ganti blok duplikat di WebSocket `onMessage` dan UDP `startUdpReceiver` dengan pemanggilan fungsi ini.
+
+#### Tahap 3: Perbaikan Stabilitas & Kebersihan (Poin 5, 7, 8, 9, 10)
+- **[ ] `CameraStreamActivity.kt`**: Ganti `while (true)` menjadi `while (isActive)` pada `latencyMonitorJob` agar coroutine bisa dihentikan dengan bersih.
+- **[ ] `YoloDetector.kt`**: Hapus deklarasi *dead variable* `scaleY`. Hapus bypass `val supportGpu = true` beserta blok kondisional matinya. Ubah `results.size == 0` menjadi `results.isEmpty()`.
+- **[ ] `SpatialMappingUtils.kt`**: Ubah `val B0`, `B1`, `B2`, `B3` menjadi `const val` agar di-*inline* saat kompilasi.
+
+> **Catatan (Poin 6):** Dekomposisi `CameraStreamActivity.kt` (1389 baris) ditunda dan tidak dimasukkan ke ADR ini agar tidak menimbulkan *merge conflict* besar atau mematahkan fitur yang sedang stabil, mengingat batas waktu pengembangan.
 
 ### 3. Konsekuensi
-- **Positif:** Beban CPU & alokasi memori (terutama saat pemrosesan *frame* 10 FPS) berkurang secara terukur.
-- **Positif:** Aplikasi kebal terhadap potensi *crash* konkurensi (rebuild ToF dan thread inferensi YOLO).
-- **Positif:** *Bounding box* YOLO lebih presisi di perangkat layar panjang.
+- **Positif:** Mengurangi potensi *crash* di *runtime* atau kesalahan kompilasi karena variabel yang tidak di-import/didefinisikan.
+- **Positif:** Ukuran file lebih ringkas (berkurang ~150 baris duplikasi, pembacaan lebih mudah).
+- **Positif:** Mencegah *coroutine leak* saat terjadi putus-nyambung jaringan pada `latencyMonitorJob`.

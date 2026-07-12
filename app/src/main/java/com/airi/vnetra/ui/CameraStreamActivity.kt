@@ -36,6 +36,8 @@ import com.airi.vnetra.util.CameraDepthEstimator
 import com.airi.vnetra.util.SimpleTracker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.airi.vnetra.model.YoloDetector
@@ -567,7 +569,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
         // Start latency monitor polling job (5Hz = 200ms)
         latencyMonitorJob = lifecycleScope.launch {
-            while (true) {
+            while (isActive) {
                 kotlinx.coroutines.delay(200)
                 updateLatencyMonitorUi()
             }
@@ -846,7 +848,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                         // Lempar ke TtsAlertManager agar mematuhi Formula G (Adaptive Threshold) & Formula H (Reset Cooldown)
                                         val alertMsg = ttsAlertManager.process(
                                             trackingId = SpatialMappingUtils.TERRAIN_TRACKING_ID,
-                                            dObj = terrainResult.distance,
+                                            dObj = terrainResult.distance.toInt(),
                                             clockDirection = terrainResult.direction,
                                             objectLabel = typeText,
                                             isMovingForward = isMovingForward,
