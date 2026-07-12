@@ -43,13 +43,13 @@ class YoloDetector(
         private const val MODEL_FP32 = "best_fp32.tflite"
         private const val MODEL_INT8 = "best_int8.tflite"
         private const val INPUT_SIZE = 640
-        private const val NUM_CLASSES = 14
+        private const val NUM_CLASSES = 13
         private const val OUTPUT_BOXES = 8400
         private const val CONFIDENCE_THRESHOLD = 0.30f
         private const val IOU_THRESHOLD = 0.45f
 
         val CLASSES = arrayOf(
-            "orang", "mobil", "motor", "bus", "tiang",
+            "mobil", "motor", "bus", "tiang",
             "lurus", "belok", 
             "simpang 3", "simpang 4", "stop", 
             "tangga naik", "tangga turun", "zebra cross", "pohon"

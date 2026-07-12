@@ -92,3 +92,22 @@ Selain itu, pengguna meminta agar pengaturan (*config*) terkait batas dan ukuran
 ## Consequences
 - **Positif:** Mengamankan akurasi model dari racun *False Negatives*. Memberikan pengalaman pengguna yang sangat ringkas dan intuitif (satu sel penuh kendali limit, batas ukuran, dan eksekusi gabungan).
 - **Negatif:** Batasan `GLOBAL_CLASS_LIMITS` tidak lagi bersifat kaku (*strict*). Jika limit adalah 6000, hasil akhir mungkin 6010 atau 6015 (sangat tidak masalah dalam konteks *Machine Learning* skala besar).
+
+# ADR-014: Pencabutan Kelas "Person" dari Arsitektur Sistem VNetra
+## Status
+Proposed
+
+## Date
+2026-07-12
+
+## Context
+Aplikasi VNetra merupakan asisten tunanetra yang bertugas mendeteksi rintangan dan marka jalan. Pada versi sebelumnya, kelas `person` (manusia) disertakan sebagai salah satu objek yang dideteksi. Pengguna secara spesifik meminta eksperimen (*Doubt-Driven Development*) untuk menghilangkan sama sekali kelas `person` dari deteksi, karena sistem yang terus-menerus memberikan peringatan "ada orang" bisa menyebabkan *information overload* (kebisingan peringatan) saat pengguna berada di area publik yang ramai.
+
+## Decision (Ponytail Approach)
+Kita mengambil langkah paling minimalis namun ekstrem:
+1. **Dataset Pipeline:** Menghapus string `"person"` dari `master_classes`, serta seluruh filter kepadatan dan ukuran yang berkaitan dengan kelas tersebut dari notebook pembuatan dataset (`dataset_vnetra_yolov11n_colab-FIX.ipynb`). Hal ini otomatis menurunkan total kelas dari 14 menjadi 13.
+2. **Android App (YoloDetector.kt):** Karena `person` (dengan nama ID "orang") dulunya menempati indeks ke-0, penghapusan ini mengakibatkan kelas `car` (mobil) naik menempati indeks ke-0. Jika kode Android tidak disesuaikan, deteksi YOLOv11 yang baru akan menghasilkan *out-of-bounds error* atau misklasifikasi parah. Oleh karena itu, kita mengubah konstan `NUM_CLASSES = 13` dan menghapus `"orang"` dari _array_ `CLASSES` di `YoloDetector.kt`.
+
+## Consequences
+- **Positif:** Mengurangi beban komputasi secara minor. Membebaskan pengguna tunanetra dari *spam* peringatan keberadaan pejalan kaki di sekitarnya. Arsitektur tetap sinkron antara *backend* pelatih (Colab) dan *frontend* (Android).
+- **Negatif:** VNetra kini sama sekali buta terhadap rintangan berupa manusia (meskipun manusia tersebut berada tepat di depan pengguna).
