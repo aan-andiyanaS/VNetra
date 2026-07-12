@@ -262,6 +262,18 @@ class TtsAlertManager(private val context: Context) {
             dObj < T && alreadyAlerted -> {
                 // Objek masih di zona bahaya
                 lastSeenTime[trackingId] = now
+                val lastSpoken = lastSpokenTime[trackingId] ?: 0L
+                
+                // Formula H Asli: Reset jika bergerak signifikan (ADR-018)
+                val deltaD = Math.abs((dObjPrev[trackingId] ?: dObj) - dObj)
+                val isMoving = deltaD > 30 // epsilon_noise
+                
+                // Jika bergerak dan sudah 2 detik sejak peringatan terakhir (Ponytail Cooldown)
+                if (isMoving && (now - lastSpoken > 2000L)) {
+                    alertFlags[trackingId] = false // Trigger reset!
+                    Log.d(TAG, "Formula H Reset: Objek $trackingId bergerak (delta=$deltaD)")
+                    return null
+                }
                 
                 val isWall = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
                 
