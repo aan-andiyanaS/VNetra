@@ -44,3 +44,51 @@ Saya akan menghapus keseluruhan logika **SPATIAL PASSENGER FILTER** dari skrip G
 ## Consequences
 - **Positif:** Peningkatan akurasi (*Recall*) untuk kelas *person* dan kendaraan. Model YOLO tidak akan lagi kebingungan saat melihat manusia yang berkerumun dengan atau berada di dalam kendaraan.
 - **Negatif:** Kelas *person* akan sedikit bertambah ke dalam total kuota dataset, namun batasan keras (`max_samples_per_class`) yang ada di dalam skrip akan tetap menjaga keseluruhan dataset *balanced*.
+
+# ADR-012: Penggantian Sumber Dataset Kelas Person & Konfigurasi Global
+## Status
+Proposed
+
+## Date
+2026-07-11
+
+## Context
+Pada `dataset_vnetra_yolov11n_colab-FIX.ipynb`, kelas `person` sebelumnya didapatkan langsung dari dataset Microsoft COCO. Pengguna meminta agar sumber untuk kelas `person` dipisahkan menggunakan dataset spesifik dari `yolov8segworkspace/person-mfa1g` untuk mendapatkan representasi data yang lebih baik. Selain itu, parameter penyaringan (`MAX_INSTANCES` dan `MIN_PIXEL_SIZE`) masih tertanam (*hardcoded*) di dalam fungsi, sehingga menyulitkan *tuning* eksperimen yang cepat.
+
+## Decision (Doubt-Driven & Ponytail)
+*Ponytail approach:* Alih-alih membuat fungsi baru yang kompleks untuk mengunduh dataset secara paralel, kita cukup:
+1. Menambahkan 1 baris sintaks unduhan Roboflow untuk `person-mfa1g` di *cell* pengunduhan.
+2. Menghapus *mapping* `"person": "person"` dari bagian COCO, dan memanggil fungsi `merge_dataset()` yang sudah ada secara khusus untuk hasil unduhan `person-mfa1g`.
+3. Menarik variabel `MAX_INSTANCES_GLOBAL` dan `MIN_PIXEL_SIZE_GLOBAL` ke atas (bagian *Konfigurasi*) lalu menggunakan variabel tersebut pada fungsi utama. Solusi paling minim baris, paling cepat dimodifikasi, dan paling rendah risiko.
+
+## Proposed Changes
+### `notebooks/dataset_vnetra_yolov11n_colab-FIX.ipynb`
+- **Cell 2 (Konfigurasi):** Menambahkan variabel global `MAX_INSTANCES_GLOBAL = 10` dan `MIN_PIXEL_SIZE_GLOBAL = {'person': 139, 'motorcycle': 30, 'car': 50, 'bus': 50}`.
+- **Cell 3 (Download):** Menambahkan `dataset_person = rf.workspace("yolov8segworkspace").project("person-mfa1g").version(1).download("yolov11")`.
+- **Cell 5 (Merge):**
+  - Mengubah nilai fungsi *filtering* agar merujuk ke variabel global yang baru.
+  - Membuang pemrosesan `"person"` dari `coco_rf_mapping`.
+  - Menambahkan blok pemrosesan mandiri: `merge_dataset(dataset_person.location, {"person": "person"}, max_instances_per_class=MAX_INSTANCES_GLOBAL)`.
+
+## Consequences
+- **Positif:** Konfigurasi parameter ukuran objek (piksel) dan kepadatan instans sangat mudah diakses (berada di atas notebook). Kualitas dataset `person` dapat diganti secara independen tanpa memengaruhi sisa dataset COCO.
+- **Negatif:** Waktu *download* awal di Colab akan bertambah beberapa detik untuk menarik dataset `person` baru.
+
+# ADR-013: Pencegahan False Negatives dengan Image-Based Soft-Limit & Sentralisasi Konfigurasi
+## Status
+Proposed
+
+## Date
+2026-07-12
+
+## Context
+Pada `dataset_vnetra_yolov11n_colab-FIX.ipynb`, terdapat bug arsitektural pada implementasi *Global Class Limits*. Skrip versi awal menghentikan injeksi label (`dropped = True`) jika kuota batas suatu kelas (misal: `person`: 6000) tercapai di tengah-tengah pemrosesan suatu gambar. Akibatnya, gambar tersebut tetap disimpan demi kelas lain (misal: `car`), tetapi objek `person` di dalamnya tidak memiliki kotak pembatas. Hal ini berpotensi membingungkan model YOLO (menciptakan *False Negatives*) karena bentuk manusia secara visual diajarkan sebagai *background*.
+Selain itu, pengguna meminta agar pengaturan (*config*) terkait batas dan ukuran diletakkan di sel (*cell*) yang sama persis dengan blok proses *merging* agar tidak perlu *scroll* jauh ke atas, dan menginginkan agar tidak ada lagi logika `max_samples` yang tercecer.
+
+## Decision (Doubt-Driven & Ponytail)
+1. **Doubt-Driven (Soft-Limit):** Skrip diubah agar melakukan pengecekan limit pada level gambar (bukan per objek individual). Jika gambar tersebut memiliki **minimal 1 kelas** yang masih butuh kuota, gambar tersebut diselamatkan dan **SELURUH LABEL** valid di dalam gambar tersebut (meskipun kelasnya sudah melampaui limit) akan disimpan. Ini memastikan nol (*zero*) *False Negatives*, dengan kompensasi batas kelas mungkin "kebablasan" sedikit (menjadi *Soft-Limit*).
+2. **Ponytail (Sentralisasi):** Membuang seluruh argumen `max_samples` dari pemanggilan fungsi di bawah. Membuat `GLOBAL_CLASS_LIMITS` komprehensif yang mendaftar ke-14 *master class*. Memindahkan seluruh blok konfigurasi (`MAX_INSTANCES_GLOBAL`, `MIN_PIXEL_SIZE_GLOBAL`, `GLOBAL_CLASS_LIMITS`) langsung ke bagian teratas Cell 5 (sel fungsi *merging*).
+
+## Consequences
+- **Positif:** Mengamankan akurasi model dari racun *False Negatives*. Memberikan pengalaman pengguna yang sangat ringkas dan intuitif (satu sel penuh kendali limit, batas ukuran, dan eksekusi gabungan).
+- **Negatif:** Batasan `GLOBAL_CLASS_LIMITS` tidak lagi bersifat kaku (*strict*). Jika limit adalah 6000, hasil akhir mungkin 6010 atau 6015 (sangat tidak masalah dalam konteks *Machine Learning* skala besar).

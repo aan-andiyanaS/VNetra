@@ -1056,13 +1056,16 @@ class CameraStreamActivity : AppCompatActivity() {
     private fun updateAiIndicator() {
         val statusText = when (yoloDetector?.modelStatus) {
             ModelStatus.NONE -> "Model: NONE"
-            ModelStatus.FP16 -> "Model: FP16"
+            ModelStatus.FP32 -> "Model: FP32"
             ModelStatus.INT8 -> "Model: INT8"
             ModelStatus.FULL -> "Model: FULL"
             null -> "Model: NONE"
         }
         
-        binding.tvAiModelStatus.text = statusText
+        val delegateText = yoloDetector?.activeDelegate?.name ?: "NONE"
+        val finalText = "$statusText | Mesin: $delegateText"
+        
+        binding.tvAiModelStatus.text = finalText
         if (yoloDetector?.modelStatus == ModelStatus.NONE || yoloDetector == null) {
             binding.tvAiModelStatus.setTextColor(android.graphics.Color.parseColor("#FF5252"))
         } else {

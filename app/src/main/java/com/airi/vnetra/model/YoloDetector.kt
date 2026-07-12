@@ -22,7 +22,7 @@ data class DetectionResult(
 )
 
 enum class ModelStatus {
-    NONE, FP16, INT8, FULL
+    NONE, FP32, INT8, FULL
 }
 
 enum class DelegateMode {
@@ -30,7 +30,7 @@ enum class DelegateMode {
 }
 
 enum class ModelPreference {
-    AUTO, FP16, INT8
+    AUTO, FP32, INT8
 }
 
 class YoloDetector(
@@ -40,7 +40,7 @@ class YoloDetector(
 ) {
     companion object {
         private const val TAG = "YoloDetector"
-        private const val MODEL_FP16 = "best_fp16.tflite"
+        private const val MODEL_FP32 = "best_fp32.tflite"
         private const val MODEL_INT8 = "best_int8.tflite"
         private const val INPUT_SIZE = 640
         private const val NUM_CLASSES = 14
@@ -57,6 +57,9 @@ class YoloDetector(
     }
 
     var modelStatus: ModelStatus = ModelStatus.NONE
+        private set
+
+    var activeDelegate: DelegateMode? = null
         private set
 
     private var interpreter: Interpreter? = null
@@ -80,11 +83,11 @@ class YoloDetector(
     }
 
     private fun setupModel() {
-        val hasFp16 = hasAsset(MODEL_FP16)
+        val hasFp32 = hasAsset(MODEL_FP32)
         val hasInt8 = hasAsset(MODEL_INT8)
 
-        if (hasFp16 && hasInt8) modelStatus = ModelStatus.FULL
-        else if (hasFp16) modelStatus = ModelStatus.FP16
+        if (hasFp32 && hasInt8) modelStatus = ModelStatus.FULL
+        else if (hasFp32) modelStatus = ModelStatus.FP32
         else if (hasInt8) modelStatus = ModelStatus.INT8
         else modelStatus = ModelStatus.NONE
 
@@ -97,55 +100,72 @@ class YoloDetector(
             val options = Interpreter.Options()
 
             val supportNpu = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1
-            val supportGpu = CompatibilityList().isDelegateSupportedOnThisDevice
+            // Flutter sering kali langsung menginisiasi GPU tanpa mengecek CompatibilityList,
+            // sehingga device yang sebenarnya mampu (namun tidak di-whitelist) tetap bisa pakai GPU.
+            // Kita bypass pengecekan ini dan biarkan try-catch yang menangani kegagalan.
+            val supportGpu = true
 
             var targetDelegate = delegateMode
+            var finalModelName = ""
             
-            // 1. Logika awal mode AUTO untuk Hardware
             if (targetDelegate == DelegateMode.AUTO) {
-                targetDelegate = if (supportGpu) DelegateMode.GPU else DelegateMode.CPU
-                Log.i(TAG, "Mode AUTO dideteksi, mengevaluasi dukungan GPU: ${if (supportGpu) "Didukung" else "Tidak Didukung"}")
-            }
-
-            // 2. Pemilihan Model (Mempertimbangkan preferensi manual pengguna)
-            val finalModelName = if (modelStatus == ModelStatus.FULL) {
-                if (modelPreference == ModelPreference.FP16) {
-                    Log.i(TAG, "Kondisi FULL Model: Pengguna memaksa pilihan FP16.")
-                    MODEL_FP16
-                } else if (modelPreference == ModelPreference.INT8) {
-                    Log.i(TAG, "Kondisi FULL Model: Pengguna memaksa pilihan INT8.")
-                    MODEL_INT8
+                // Logika Mode AUTO: Prioritas NPU(INT8) > GPU(FP32) > CPU
+                if (hasInt8 && supportNpu && modelPreference != ModelPreference.FP32) {
+                    targetDelegate = DelegateMode.NPU
+                    finalModelName = MODEL_INT8
+                    Log.i(TAG, "Mode AUTO: Memprioritaskan NPU dengan model INT8.")
+                } else if (hasFp32 && supportGpu && modelPreference != ModelPreference.INT8) {
+                    targetDelegate = DelegateMode.GPU
+                    finalModelName = MODEL_FP32
+                    Log.i(TAG, "Mode AUTO: Memprioritaskan GPU dengan model FP32.")
                 } else {
-                    // Jika preferensi model AUTO, pilih berdasarkan hardware
-                    if (targetDelegate == DelegateMode.NPU || targetDelegate == DelegateMode.CPU) {
-                        Log.i(TAG, "Kondisi FULL Model: Mengutamakan INT8 karena eksekutor adalah $targetDelegate.")
-                        MODEL_INT8
-                    } else {
-                        Log.i(TAG, "Kondisi FULL Model: Mengutamakan FP16 karena eksekutor adalah GPU.")
-                        MODEL_FP16
-                    }
+                    targetDelegate = DelegateMode.CPU
+                    finalModelName = if (hasInt8 && modelPreference != ModelPreference.FP32) MODEL_INT8 else (if (hasFp32) MODEL_FP32 else MODEL_INT8)
+                    Log.i(TAG, "Mode AUTO: Fallback ke CPU dengan model $finalModelName.")
                 }
             } else {
-                if (hasFp16) MODEL_FP16 else MODEL_INT8
-            }
+                // Logika Mode MANUAL (NPU / GPU / CPU sudah ditentukan)
+                // 1. Pemilihan Model (Mempertimbangkan preferensi manual pengguna)
+                finalModelName = if (modelStatus == ModelStatus.FULL) {
+                    if (modelPreference == ModelPreference.FP32) {
+                        Log.i(TAG, "Kondisi FULL Model: Pengguna memaksa pilihan FP32.")
+                        MODEL_FP32
+                    } else if (modelPreference == ModelPreference.INT8) {
+                        Log.i(TAG, "Kondisi FULL Model: Pengguna memaksa pilihan INT8.")
+                        MODEL_INT8
+                    } else {
+                        // Jika preferensi model AUTO, pilih berdasarkan hardware
+                        if (targetDelegate == DelegateMode.NPU || targetDelegate == DelegateMode.CPU) {
+                            Log.i(TAG, "Kondisi FULL Model: Mengutamakan INT8 karena eksekutor adalah $targetDelegate.")
+                            MODEL_INT8
+                        } else {
+                            Log.i(TAG, "Kondisi FULL Model: Mengutamakan FP32 karena eksekutor adalah GPU.")
+                            MODEL_FP32
+                        }
+                    }
+                } else {
+                    if (hasFp32) MODEL_FP32 else MODEL_INT8
+                }
 
-            // 3. Evaluasi akhir Hardware vs Model yang terpilih
-            if (targetDelegate == DelegateMode.GPU && finalModelName == MODEL_INT8) {
-                Log.w(TAG, "GPU tidak bisa dipilih untuk model INT8. Fallback ke NPU/CPU.")
-                targetDelegate = if (supportNpu) DelegateMode.NPU else DelegateMode.CPU
-            }
+                // 2. Evaluasi akhir Hardware vs Model yang terpilih
+                if (targetDelegate == DelegateMode.GPU && finalModelName == MODEL_INT8) {
+                    Log.w(TAG, "GPU tidak bisa dipilih untuk model INT8. Fallback ke NPU/CPU.")
+                    targetDelegate = if (supportNpu) DelegateMode.NPU else DelegateMode.CPU
+                }
 
-            if (targetDelegate == DelegateMode.NPU && !supportNpu) {
-                Log.w(TAG, "NPU dipilih tetapi API < 27. Fallback ke GPU/CPU.")
-                targetDelegate = if (supportGpu && finalModelName == MODEL_FP16) DelegateMode.GPU else DelegateMode.CPU
-            }
-            
-            if (targetDelegate == DelegateMode.GPU && !supportGpu) {
-                Log.w(TAG, "GPU dipilih tetapi tidak didukung perangkat ini. Fallback ke CPU.")
-                targetDelegate = DelegateMode.CPU
+                if (targetDelegate == DelegateMode.NPU && !supportNpu) {
+                    Log.w(TAG, "NPU dipilih tetapi API < 27. Fallback ke GPU/CPU.")
+                    targetDelegate = if (supportGpu && finalModelName == MODEL_FP32) DelegateMode.GPU else DelegateMode.CPU
+                }
+                
+                if (targetDelegate == DelegateMode.GPU && !supportGpu) {
+                    Log.w(TAG, "GPU dipilih tetapi tidak didukung perangkat ini. Fallback ke CPU.")
+                    targetDelegate = DelegateMode.CPU
+                }
             }
 
             // 4. Menerapkan opsi TFLite sesuai target delegate akhir
+            activeDelegate = targetDelegate
             when (targetDelegate) {
                 DelegateMode.NPU -> {
                     options.setUseNNAPI(true)
@@ -159,6 +179,7 @@ class YoloDetector(
                     } catch (e: Throwable) {
                         Log.w(TAG, "Gagal inisialisasi GPU Delegate: ${e.message}. Fallback ke CPU.")
                         options.setNumThreads(4)
+                        activeDelegate = DelegateMode.CPU
                     }
                 }
                 DelegateMode.CPU -> {
