@@ -1206,8 +1206,9 @@ void TOF_Task(void *pvParameters) {
           for (uint16_t ci = 0; ci < numCells; ci++) {
             uint8_t  st   = measurementData.target_status[ci];
             int16_t  dist = measurementData.distance_mm[ci];
-            // Terima status 5 (valid), 6 (wrap-around), 9 (merged pulse – cell pinggir)
-            bool statusOk = (st == 5 || st == 6 || st == 9);
+            // Terima status 5 (valid), 6 (wrap-around), 9 (merged pulse)
+            // + 10 (target close), 12 (no wrap check), 13 (high ambient noise - sering terjadi outdoor!)
+            bool statusOk = (st == 5 || st == 6 || st == 9 || st == 10 || st == 12 || st == 13);
             // Validasi range: dist harus positif dan dalam batas sensor
             bool rangeOk  = (dist >= (int16_t)TOF_MIN_DIST_MM && dist <= (int16_t)TOF_MAX_DIST_MM);
             if (statusOk && rangeOk) {
