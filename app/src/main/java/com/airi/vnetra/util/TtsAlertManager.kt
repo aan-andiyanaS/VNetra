@@ -258,6 +258,18 @@ class TtsAlertManager(private val context: Context) {
 
         return when {
             dObj < T && !alreadyAlerted -> {
+                // ADR-035 (Ponytail): Blokir peringatan BARU apa pun saat kepala berotasi.
+                // Jika user menunduk, lantai akan terbaca < T. Jika user menoleh, objek di pinggir
+                // akan masuk. Semua ini memicu TTS palsu. Blokir sejak dini.
+                val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f
+                val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f
+                val yawRateImu = imuData?.getOrElse(4) { 0f } ?: 0f
+                val isHeadRotatingNow = kotlin.math.abs(pitchRate) > 10f ||
+                    kotlin.math.abs(yawRateImu) > 10f ||
+                    kotlin.math.abs(rollRate) > 10f
+                
+                if (isHeadRotatingNow) return null
+                
                 // ADR-035: Cooldown minimum antar re-trigger untuk tracking ID yang sama.
                 // Mencegah siklus rapid-fire: nod-down (fake close) → nod-up (flag reset) → nod-down lagi.
                 val lastSpokenMs = lastSpokenTime[trackingId] ?: 0L
@@ -298,7 +310,7 @@ class TtsAlertManager(private val context: Context) {
                 
                 if (isWall && isMovingForward) {
                     val lastSpoken = lastSpokenTime[trackingId] ?: 0L
-                    if (now - lastSpoken > 1500L) { // Spam tiap 1.5 detik jika terus bergerak maju ke tembok
+                    if (now - lastSpoken > 1000L) { // Spam tiap 1 detik jika terus bergerak maju ke tembok
                         lastSpokenTime[trackingId] = now
                         Log.d(TAG, "Wall Spam (Moving Forward): id=$trackingId")
                         return textToSpeak
@@ -500,8 +512,8 @@ class TtsAlertManager(private val context: Context) {
                 } else {
                     // Tetap di WALL_WARNING — peringatan keselamatan tetap aktif walau kepala bergerak
                     if (isMovingForward && !isTurning) {
-                        // User memaksakan maju ke arah tembok → Beri peringatan berulang (tiap 3 detik)
-                        if (now - lastWarningTime > 3000L) {
+                        // User memaksakan maju ke arah tembok → Beri peringatan berulang (tiap 1 detik)
+                        if (now - lastWarningTime > 1000L) {
                             speak("Awas, masih ada tembok")
                             lastWarningTime = now
                         }
@@ -520,7 +532,7 @@ class TtsAlertManager(private val context: Context) {
                     // IMPLEMENTASI DELAY (ADR-031):
                     if (clearCandidateTime == 0L) {
                         clearCandidateTime = now // Mulai menghitung durasi jalan kosong
-                    } else if (now - clearCandidateTime > 500L) { // Harus konstan 0.5 detik
+                    } else if (now - clearCandidateTime > 100L) { // Sangat responsif (0.1 detik)
                         currentState = NavState.PATH_CLEAR
                         lastClearTime = now
                         hasGivenSecondClearWarning = false
