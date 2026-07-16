@@ -167,6 +167,7 @@ class TtsAlertManager(private val context: Context) {
         // FORMULA G: Adaptive Threshold & Approach Velocity (v9.4)
         // =================================================================
         var T = D_W0 // Default threshold
+        var vAvg = 0f 
         
         if (imuData != null && imuData.size >= 9) {
             val tsEsp = imuData[6]
@@ -205,7 +206,7 @@ class TtsAlertManager(private val context: Context) {
                     history[0] = vRaw
                     
                     val validCount = history.count { it > 0f } // simplified check for initialized
-                    val vAvg = if (validCount > 0) {
+                    vAvg = if (validCount > 0) {
                         (history[0] + (if (history[1] > 0f) history[1] else history[0]) + (if (history[2] > 0f) history[2] else history[0])) / 3f
                     } else vRaw
                     
@@ -268,10 +269,15 @@ class TtsAlertManager(private val context: Context) {
                 val deltaD = kotlin.math.abs((dObjPrev[trackingId] ?: dObj) - dObj)
                 var isMoving = deltaD > 30 // epsilon_noise
                 
-                // Mencegah ToF noise mereset one-shot saat pengguna diam (ADR-030 revision)
+                // Mencegah rotasi kepala dan noise mereset one-shot saat pengguna diam (ADR-032)
                 val isStaticObjectH = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPaving
-                if (isStaticObjectH && imuData != null && imuData[5] < 2.94f) {
-                    isMoving = false
+                if (imuData != null && imuData[5] < 2.94f) {
+                    if (isStaticObjectH) {
+                        isMoving = false
+                    } else if (vAvg <= 50f) {
+                        // Objek YOLO tidak mendekat secara nyata, gerakan semu akibat rotasi kepala
+                        isMoving = false
+                    }
                 }
                 
                 // Jika bergerak dan sudah 2 detik sejak peringatan terakhir (Ponytail Cooldown)
