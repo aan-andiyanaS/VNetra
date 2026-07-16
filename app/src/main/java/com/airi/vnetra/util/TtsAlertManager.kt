@@ -465,16 +465,17 @@ class TtsAlertManager(private val context: Context) {
         ) {
             val now = System.currentTimeMillis()
 
-            // ADR-035: Jika kepala sedang berotasi (mengangguk/menoleh), lewati semua transisi state.
-            // Mengangguk menyebabkan ToF menyapu lantai → isDanger=true palsu → spam "Awas tembok".
-            // Kepala lurus kembali → isDanger=false → spam "Jalan kosong".
-            if (isHeadRotating) return
-
             if (isDanger) {
                 clearCandidateTime = 0L // Reset candidate timer jika halangan muncul lagi
                 
                 // KONDISI: Deteksi Tembok (WARNING)
                 if (currentState == NavState.PATH_CLEAR) {
+                    // ADR-035: Blokir transisi BARU PATH_CLEAR→WALL_WARNING saat kepala berotasi.
+                    // Ini mencegah false-alarm "Awas tembok" akibat floor-sweep (lantai terbaca
+                    // sebagai rintangan saat sensor menyapu saat mengangguk/menoleh).
+                    // Jika kepala diam sebentar dan tembok masih ada, transisi akan terjadi normal.
+                    if (isHeadRotating) return
+                    
                     // Transisi dari CLEAR ke WARNING
                     currentState = NavState.WALL_WARNING
                     lastWarningTime = now
@@ -486,20 +487,25 @@ class TtsAlertManager(private val context: Context) {
                         // Jika sedang menengok mencari jalan, tetap diam agar tidak spam
                     }
                 } else {
-                    // Tetap di WALL_WARNING
+                    // Tetap di WALL_WARNING — peringatan keselamatan tetap aktif walau kepala bergerak
                     if (isMovingForward && !isTurning) {
-                        // User memaksakan maju ke arah tembok -> Beri peringatan berulang (tiap 3 detik)
+                        // User memaksakan maju ke arah tembok → Beri peringatan berulang (tiap 3 detik)
                         if (now - lastWarningTime > 3000L) {
                             speak("Awas, masih ada tembok")
                             lastWarningTime = now
                         }
                     }
-                    // Jika user diam atau sedang menengok -> Diam (tidak ada bahaya mendesak / sedang proses cari jalan)
+                    // Jika user diam atau sedang menengok → Diam (tidak ada bahaya mendesak / sedang proses cari jalan)
                 }
             } else {
                 // KONDISI: Jalan Kosong (CLEAR)
+                // ADR-035: Blokir transisi CLEAR saat kepala berotasi.
+                // Saat menunduk, lantai menghilang → dObj naik → isDanger=false palsu
+                // → "Jalan di depan kosong" padahal masih ada tembok nyata.
+                if (isHeadRotating) return
+                
                 if (currentState == NavState.WALL_WARNING) {
-                    // Transisi dari WARNING ke CLEAR (user berhasil menemukan jalan kosong saat menengok)
+                    // Transisi dari WARNING ke CLEAR (user berhasil menemukan jalan kosong)
                     // IMPLEMENTASI DELAY (ADR-031):
                     if (clearCandidateTime == 0L) {
                         clearCandidateTime = now // Mulai menghitung durasi jalan kosong
@@ -523,8 +529,7 @@ class TtsAlertManager(private val context: Context) {
                             hasGivenSecondClearWarning = true // Jaminan tidak ada spam lagi selama user diam
                         }
                     } else {
-                        // User sedang maju di jalan kosong -> Diam (kondisi ideal, no spam)
-                        // Perbarui waktu clear dan reset flag agar siap memperingatkan lagi jika user tiba-tiba berhenti lama
+                        // User sedang maju di jalan kosong → Diam (kondisi ideal, no spam)
                         lastClearTime = now
                         hasGivenSecondClearWarning = false
                     }
