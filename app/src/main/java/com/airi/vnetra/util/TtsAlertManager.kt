@@ -253,6 +253,11 @@ class TtsAlertManager(private val context: Context) {
 
         return when {
             dObj < T && !alreadyAlerted -> {
+                // ADR-035: Cooldown minimum antar re-trigger untuk tracking ID yang sama.
+                // Mencegah siklus rapid-fire: nod-down (fake close) → nod-up (flag reset) → nod-down lagi.
+                val lastSpokenMs = lastSpokenTime[trackingId] ?: 0L
+                if (now - lastSpokenMs < 3000L) return null
+                
                 // Kondisi: masuk zona bahaya, belum pernah diperingatkan → one-shot
                 alertFlags[trackingId] = true
                 lastSeenTime[trackingId] = now
@@ -269,24 +274,12 @@ class TtsAlertManager(private val context: Context) {
                 val deltaD = kotlin.math.abs((dObjPrev[trackingId] ?: dObj) - dObj)
                 var isMoving = deltaD > 30 // epsilon_noise
                 
-                // Mencegah rotasi kepala dan noise mereset one-shot saat pengguna diam (ADR-032 & ADR-033)
-                val isStaticObjectH = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPaving
-                if (imuData != null) {
-                    val pitchRate = imuData[2]
-                    val rollRate  = imuData[3]
-                    val yawRate   = imuData[4]
-                    val aLinMag   = imuData[5]
-                    
-                    val isHeadRotating = kotlin.math.abs(pitchRate) > 20f || kotlin.math.abs(yawRate) > 20f || kotlin.math.abs(rollRate) > 20f
-                    
-                    if (aLinMag < 2.94f || isHeadRotating) {
-                        if (isStaticObjectH) {
-                            isMoving = false
-                        } else if (vAvg <= 50f) {
-                            // Objek YOLO tidak mendekat secara nyata, gerakan semu akibat rotasi kepala
-                            isMoving = false
-                        }
-                    }
+                // PONYTAIL FIX (ADR-034):
+                // Jika pengguna secara fisik TIDAK sedang berjalan maju, JANGAN pernah me-reset peringatan.
+                // Ini secara tuntas mencegah false-positive saat mengangguk/mendongak (rotasi kepala)
+                // yang memicu sweeping proyektif pada jarak absolut ToF dan mengorupsi kecepatan sintetis (vAvg).
+                if (!isMovingForward) {
+                    isMoving = false
                 }
                 
                 // Jika bergerak dan sudah 2 detik sejak peringatan terakhir (Ponytail Cooldown)
@@ -319,8 +312,20 @@ class TtsAlertManager(private val context: Context) {
                 null
             }
             dObj > D_RESET && alreadyAlerted -> {
-                // Kondisi: objek pergi dari zona bahaya → reset flag (siap diperingatkan lagi)
-                alertFlags[trackingId] = false
+                // ADR-035: Jangan reset flag saat kepala sedang berotasi.
+                // Saat menunduk, lantai menciptakan jarak palsu yang kemudian naik melewati D_RESET
+                // saat kepala diluruskan kembali, memicu siklus re-trigger yang berulang-ulang.
+                val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f
+                val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f
+                val yawRateImu = imuData?.getOrElse(4) { 0f } ?: 0f
+                val isHeadRotatingNow = kotlin.math.abs(pitchRate) > 10f ||
+                    kotlin.math.abs(yawRateImu) > 10f ||
+                    kotlin.math.abs(rollRate) > 10f
+                if (!isHeadRotatingNow) {
+                    // Kepala diam dan objek benar-benar menjauh → reset normal
+                    alertFlags[trackingId] = false
+                    Log.d(TAG, "Flag reset (D_RESET): id=$trackingId d=${dObj}mm")
+                }
                 null
             }
             else -> null
@@ -450,9 +455,20 @@ class TtsAlertManager(private val context: Context) {
          * @param isDanger true jika ToF mendeteksi halangan signifikan (Kuning/Merah)
          * @param isMovingForward true jika kecepatan maju (v_head_base) cukup besar
          * @param isTurning true jika kecepatan menengok (yaw rate) cukup besar
+         * @param isHeadRotating true jika kepala sedang berotasi (pitch/yaw/roll > 10 deg/s)
          */
-        fun processNavigationState(isDanger: Boolean, isMovingForward: Boolean, isTurning: Boolean) {
+        fun processNavigationState(
+            isDanger: Boolean,
+            isMovingForward: Boolean,
+            isTurning: Boolean,
+            isHeadRotating: Boolean = false
+        ) {
             val now = System.currentTimeMillis()
+
+            // ADR-035: Jika kepala sedang berotasi (mengangguk/menoleh), lewati semua transisi state.
+            // Mengangguk menyebabkan ToF menyapu lantai → isDanger=true palsu → spam "Awas tembok".
+            // Kepala lurus kembali → isDanger=false → spam "Jalan kosong".
+            if (isHeadRotating) return
 
             if (isDanger) {
                 clearCandidateTime = 0L // Reset candidate timer jika halangan muncul lagi

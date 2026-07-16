@@ -836,7 +836,8 @@ class CameraStreamActivity : AppCompatActivity() {
                             ttsAlertManager.smartNavigation.processNavigationState(
                                 isDanger = isDanger,
                                 isMovingForward = isMovingForward,
-                                isTurning = isTurning
+                                isTurning = isTurning,
+                                isHeadRotating = isHeadRotating  // ADR-035: blokir transisi state saat mengangguk
                             )
                         }
                         
