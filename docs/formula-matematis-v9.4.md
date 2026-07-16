@@ -1591,19 +1591,18 @@ $$f_{obj} := \begin{cases} 1, & \text{jika } \delta_H = 1 \quad \text{(set: suda
 
 dengan $\Delta d = d_{obj}^{(t-1)} - d_{obj}^{(t)}$ dan $\varepsilon_{noise} = 30$ mm.
 
-> **[DIPERBARUI ADR-032 & ADR-033]** Penambahan Noise Gate Akselerometer dan Gyroscope Guard pada kondisi reset.
+> **[DIPERBARUI ADR-035 (Debounced Ponytail Fix)]** Penambahan *Temporal Debounce* dan *Sensitivitas Gyroscope*.
 >
-> **Masalah:** Mengangguk atau berputar di tempat (diam namun berotasi) menyebabkan jarak absolut pancaran ToF berubah $>30\text{mm}$ karena *sweeping* proyektif, yang memicu reset palsu dan *spam* peringatan.
+> **Masalah Sebelumnya (ADR-034):** Meskipun kita sudah memakai guard `isMovingForward`, akselerasi sentripetal dari poros leher saat pengguna mengangguk lambat (< 20°/s) terbaca sebagai akselerasi linear (`aLinMag > 2.94`). Ini kembali mereset *guard* secara keliru.
 >
 > **Kondisi Reset Baru:**
-> $$f_{obj} := 0, \quad \text{jika objek hilang, atau } \left( |\Delta d| > \varepsilon_{noise}\ \wedge\ \text{isMoving} \right)$$
+> $$f_{obj} := 0, \quad \text{jika objek hilang, atau } \left( |\Delta d| > \varepsilon_{noise}\ \wedge\ \text{isMovingForward}_{debounce} \right)$$
 >
-> dengan $\text{isMoving}$ dikendalikan oleh gerbang keamanan (*Noise Gate*):
-> $$\text{isMoving} = \mathbf{1}\!\left[\|a_{lin}\| > a_{th}\right] \wedge \neg\, \text{isHeadRotating}$$
+> dengan $\text{isMovingForward}_{debounce}$ divalidasi oleh integrasi akselerometer, *gyroscope* yang lebih peka, dan *temporal persistence* (3 frame):
+> $$\text{isAccelerating} = \mathbf{1}\!\left[\|a_{lin}\| > a_{th}\right] \wedge \neg\, \text{isHeadRotating}_{10^\circ/s}$$
+> $$\text{isMovingForward}_{debounce} = \sum_{k=0}^{2} \text{isAccelerating}^{(t-k)} == 3$$
 >
-> $$\text{isHeadRotating} = \mathbf{1}\!\left[|\omega_{x}^{corr}| > 20\right] \vee \mathbf{1}\!\left[|\omega_{y}^{corr}| > 20\right] \vee \mathbf{1}\!\left[|\omega_{z}^{corr}| > 20\right]$$
->
-> **Artinya:** Sistem menolak me-reset status peringatan jika pengguna terdeteksi diam ($\|a_{lin}\| < 2.94\ \text{m/s}^2$) **ATAU** sedang merotasikan kepalanya secara sadar ($\omega > 20\ ^\circ/\text{s}$). Ini mematikan *spam* peringatan objek statis saat mengangguk/mendongak.
+> **Artinya:** Jika pengguna secara fisik **tidak sedang melangkah maju selama minimal 300ms konstan**, sistem **tidak akan pernah** me-reset peringatan *one-shot*. Ini secara elegan memblokir entakan akselerasi bocor sesaat akibat pergerakan kepala statis.
 
 **Domain:** $\delta_H \in \{0, 1\}$, $f_{obj} \in \{0, 1\}$
 
@@ -1655,9 +1654,9 @@ yang dalam Formula H menjadi (sebelum revisi ADR):
 
 $$S_0 \xrightarrow{\left[d_{obj} < d_{w0}\ \wedge\ f_{obj}=0\right]/\text{TTS}} S_1 \xrightarrow{\left[|\Delta d| > \varepsilon_{noise}\ \vee\ \text{obj hilang}\right]} S_0$$
 
-Dan setelah ADR-032 & ADR-033 (Penambahan Guard Gyro-Accel):
+Dan setelah ADR-035 (Debounced Ponytail Guard):
 
-$$S_0 \xrightarrow{\left[d_{obj} < d_{w0}\ \wedge\ f_{obj}=0\right]/\text{TTS}} S_1 \xrightarrow{\left[(\,|\Delta d| > \varepsilon_{noise}\ \wedge\ \text{isMoving}\,)\ \vee\ \text{obj hilang}\right]} S_0$$
+$$S_0 \xrightarrow{\left[d_{obj} < d_{w0}\ \wedge\ f_{obj}=0\right]/\text{TTS}} S_1 \xrightarrow{\left[(\,|\Delta d| > \varepsilon_{noise}\ \wedge\ \text{isMovingForward}_{debounce}\,)\ \vee\ \text{obj hilang}\right]} S_0$$
 
 Dalam konteks **embedded systems dan IoT**, pola ini adalah standar universal untuk mencegah *alert fatigue* — dijelaskan dalam IEC 62682:2014 (*Management of Alarms in the Process Industries*) yang mendefinisikan prinsip "alarm hanya berbunyi ketika kondisi pertama kali muncul, bukan terus-menerus".
 
@@ -1688,7 +1687,7 @@ Saat YOLO kehilangan tracking satu frame (tracking ID hilang lalu muncul kembali
     TTS: "Objek dekat"      Diam
     f_obj := 1
               │
-    Reset jika ( |Δd| > 30mm AND isMoving ) atau objek hilang
+    Reset jika ( |Δd| > 30mm AND isMovingForward ) atau objek hilang
 ```
 
 ---

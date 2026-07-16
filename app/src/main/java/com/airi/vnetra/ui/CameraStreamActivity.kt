@@ -155,6 +155,9 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var latestDetections: List<DetectionResult> = emptyList()
     @Volatile private var latestFrameWidth: Int = 640
     @Volatile private var latestFrameHeight: Int = 480
+    
+    // ADR-035: Debounce state for forward movement validation
+    private var movingForwardConsecutiveFrames = 0
     private val isInferencing = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private val exitReceiver = object : android.content.BroadcastReceiver() {
@@ -702,9 +705,21 @@ class CameraStreamActivity : AppCompatActivity() {
                     
                     val isTurning = kotlin.math.abs(yawRate) > 30f // deg/s
                     
-                    // ADR-033: Guard against false positive walking when head is rotating (nodding/turning)
-                    val isHeadRotating = kotlin.math.abs(pitchRate) > 20f || kotlin.math.abs(yawRate) > 20f || kotlin.math.abs(rollRate) > 20f
-                    val isMovingForward = (aLinMag > 2.94f) && !isHeadRotating    // m/s^2 (a_th=0.3g)
+                    // ADR-035: Guard against false positive walking when head is rotating (nodding/turning)
+                    // Sensitivitas dinaikkan ke 10f agar "nodding" pelan (yang menimbulkan akselerasi sentripetal)
+                    // terdeteksi sebagai rotasi kepala dan bukan langkah kaki.
+                    val isHeadRotating = kotlin.math.abs(pitchRate) > 10f || kotlin.math.abs(yawRate) > 10f || kotlin.math.abs(rollRate) > 10f
+                    
+                    val isAccelerating = (aLinMag > 2.94f) && !isHeadRotating    // m/s^2 (a_th=0.3g)
+                    
+                    // Temporal Debounce: Akselerasi harus bertahan selama beberapa frame beruntun (misal 3 frame)
+                    // untuk membedakan antara entakan bocor sesaat dan gaya melangkah yang konstan.
+                    if (isAccelerating) {
+                        movingForwardConsecutiveFrames++
+                    } else {
+                        movingForwardConsecutiveFrames = 0
+                    }
+                    val isMovingForward = movingForwardConsecutiveFrames >= 3
 
 
                     var hasCloseYoloThreat = false
@@ -924,7 +939,10 @@ class CameraStreamActivity : AppCompatActivity() {
         val imuSnap = latestImuData
         val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
         val aLinMag = imuSnap?.getOrElse(5) { 0f } ?: 0f
-        val isMovingForward = aLinMag > 2.94f // 0.3g sesuai Formula G (a_th)
+        // ADR-035: Gunakan state debounce kelas (movingForwardConsecutiveFrames) agar konsisten
+        // dengan perhitungan di tofCollectJob. JANGAN hitung ulang secara instan di sini
+        // karena tidak ada filter isHeadRotating dan temporal debounce.
+        val isMovingForward = movingForwardConsecutiveFrames >= 3
         val thetaDeg = rawTheta - 20f
         val frameWidth = latestFrameWidth
 
