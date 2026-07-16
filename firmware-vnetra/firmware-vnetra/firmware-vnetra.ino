@@ -146,12 +146,12 @@ const float twoKp = 2.5f; // 2 * proportional gain (Kp)
 const float twoKi = 0.0f; // 2 * integral gain (Ki)
 float gyro_bias_x = 0.0f, gyro_bias_y = 0.0f, gyro_bias_z = 0.0f;
 
-TaskHandle_t EKF_TaskHandle; // Tetap nama ini agar tidak ubah fungsi lain
+TaskHandle_t IMU_TaskHandle;
 TaskHandle_t TOF_TaskHandle;
 
 // ======== MAHONY TRACKING ========
-static volatile uint32_t ekf_frame_count = 0;
-static const uint32_t    EKF_WARMUP_FRAMES = 100;  // 100 × 50ms = 5 detik
+static volatile uint32_t imu_frame_count = 0;
+static const uint32_t    IMU_WARMUP_FRAMES = 100;  // 100 × 50ms = 5 detik
 static const float       DEG2RAD_F = 0.01745329252f;  // π/180, lebih portabel dari M_PI
 
 // ======== TOF RESOLUTION MODE ========
@@ -175,7 +175,7 @@ bool tofModeChangePending = false;   // Flag untuk meminta perubahan resolusi di
 // ======== WebSocket FRAME PROTOCOL ========
 // Tipe frame — extensible untuk sensor masa depan
 #define FRAME_TYPE_JPEG  0x01  // Kamera JPEG
-#define FRAME_TYPE_IMU   0x02  // IMU/EKF (MPU6050) — aktif, 9 float × 4B = 36B payload (v2)
+#define FRAME_TYPE_IMU   0x02  // IMU/Mahony (MPU6050) — aktif, 9 float × 4B = 36B payload (v2)
 #define FRAME_TYPE_HBEAT 0x03  // Heartbeat / keepalive
 #define FRAME_TYPE_TOF   0x04  // ToF sensor (VL53L5CX) — aktif, 64 int16_t × 2B = 128B payload
 #define FRAME_TYPE_CTRL  0x05  // Control / config command
@@ -568,7 +568,9 @@ void captureAndSend() {
 
     // Kirim via WebSocket (menggunakan native TCP backpressure)
     for (auto& client : ws.getClients()) {
-        if (client.status() == WS_CONNECTED && !client.queueIsFull()) {
+        // QoS Anti-Jitter: Mengizinkan maks 1 frame ngantre agar Pipa TCP tidak kosong
+        // Ini mencegah OS Android menahan TCP ACK (Delayed ACK Deadlock) selama 300ms.
+        if (client.status() == WS_CONNECTED && client.queueLen() <= 1) {
             client.binary(g_wsBuf, total);
         }
     }
@@ -880,7 +882,7 @@ void calibrateAccelBias(int n_samples = 200) {
     saveAccelBias(accel_bias);
 }
 
-void initEKFState(float ax, float ay, float az) {
+void initMahonyState(float ax, float ay, float az) {
   float theta0 = atan2(ay, sqrt(ax*ax + az*az));
   float phi0   = atan2(-ax, az);
   float cp = cos(theta0 / 2.0f); float sp = sin(theta0 / 2.0f);
@@ -1030,7 +1032,7 @@ void IMU_Task(void *pvParameters) {
 
     last_ts_esp = current_ts_esp;
 
-    // ── A.EKF.5: Pra-komputasi v_head_base ─────────────────────
+    // ── Pra-komputasi v_head_base ─────────────────────
     const float OMEGA_X_LIM_DEG = 5.0f;  
     float k_damp     = (fabsf(wx_corr_deg) > OMEGA_X_LIM_DEG) ? 0.5f : 1.0f;
     float v_head_base = k_damp * (fabsf(wx_corr_deg) * DEG2RAD_F) * cosf(theta * DEG2RAD_F);
@@ -1039,9 +1041,9 @@ void IMU_Task(void *pvParameters) {
     static uint8_t imu_send_tick = 0;
     if (udpClientReady && !powerSaveMode && (++imu_send_tick >= 10)) {
       imu_send_tick = 0;
-      ekf_frame_count++;  // Hitung paket IMU dikirim
+      imu_frame_count++;  // Hitung paket IMU dikirim
       
-      bool frm_ok = (ekf_frame_count >= EKF_WARMUP_FRAMES);
+      bool frm_ok = (imu_frame_count >= IMU_WARMUP_FRAMES);
       float is_converged = frm_ok ? 1.0f : 0.0f;
 
       // ── Payload v2: 9 float × 4B = 36B → total frame = 9B header + 36B = 45B ─
@@ -1092,7 +1094,7 @@ void TOF_Task(void *pvParameters) {
         //   IMU_Task  : butuh mutex setiap 5ms (200Hz)
         //   TOF_Task  : butuh mutex setiap isDataReady() check = setiap 10ms
         //   Integration time 80ms pada 8Hz → sensor "sibuk" 64% cycle time
-        //   → IMU_Task terpaksa menunggu → EKF tertunda → WebSocket queue menumpuk
+        //   → IMU_Task terpaksa menunggu → Mahony tertunda → WebSocket queue menumpuk
         //
         // Default aman: 4x4=15Hz, 8x8=10Hz, integration time minimal (auto)
         myImager.setRangingFrequency(newRes == 4 ? 15 : 10);
@@ -1560,10 +1562,10 @@ void setup() {
         calibrateAccelBias();
         sensors_event_t a, g, temp;
         getMpuEvent(&a, &g, &temp);
-        initEKFState(a.acceleration.x - accel_bias[0], a.acceleration.y - accel_bias[1], a.acceleration.z - accel_bias[2]);
+        initMahonyState(a.acceleration.x - accel_bias[0], a.acceleration.y - accel_bias[1], a.acceleration.z - accel_bias[2]);
         last_ts_esp = millis();
-        xTaskCreatePinnedToCore(IMU_Task, "IMU_Task", 12288, NULL, 2, &EKF_TaskHandle, 1);
-        Serial.println("[OK] MPU6050 & EKF Started.");
+        xTaskCreatePinnedToCore(IMU_Task, "IMU_Task", 12288, NULL, 2, &IMU_TaskHandle, 1);
+        Serial.println("[OK] MPU6050 & Mahony Started.");
     }
 
     Serial.println("[CAM] Initializing camera...");

@@ -597,12 +597,12 @@ class CameraStreamActivity : AppCompatActivity() {
                         if (!isDestroyed && !isFinishing && !isAkhiring && imuData.size >= 6) {
                             binding.tvImuPitch.text = "Pitch: %.1f°".format(imuData[0])
                             binding.tvImuRoll.text  = "Roll: %.1f°".format(imuData[1])
-                            // Tampilkan status EKF: "warming up" selama 5 detik pertama
+                            // Tampilkan status Mahony: "warming up" selama 5 detik pertama
                             val converged = imuData.getOrElse(8) { 0f } > 0.5f
                             if (converged) {
                                 binding.tvImuAccel.text = "Accel: %.2f m/s²".format(imuData[5])
                             } else {
-                                binding.tvImuAccel.text = "EKF: warming up..."
+                                binding.tvImuAccel.text = "Mahony: warming up..."
                             }
                         }
                     }

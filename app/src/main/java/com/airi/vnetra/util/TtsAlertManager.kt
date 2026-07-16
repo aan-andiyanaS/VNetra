@@ -222,8 +222,8 @@ class TtsAlertManager(private val context: Context) {
                 dObjPrev[trackingId] = dObj
                 tsEspPrev[trackingId] = tsEsp
             } else {
-                // EKF belum konvergen, lewati kalkulasi G (T = D_W0)
-                Log.v(TAG, "Formula G [id=$trackingId]: EKF warming up, T=$D_W0")
+                // Mahony filter belum konvergen, lewati kalkulasi G (T = D_W0)
+                Log.v(TAG, "Formula G [id=$trackingId]: Mahony warming up, T=$D_W0")
             }
         }
         lastCalculatedT[trackingId] = T
