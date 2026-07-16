@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Logika one-shot per tracking ID:
  *   - Kondisi trigger: d_obj < D_W0 (1000 mm) DAN flag[id] == false
  *     → suarakan peringatan, set flag[id] = true
- *   - Kondisi reset: d_obj > D_RESET (1030 mm) DAN flag[id] == true
+ *   - Kondisi reset: d_obj > D_RESET (1500 mm) DAN flag[id] == true
  *     → reset flag[id] = false (objek sudah pergi dari zona bahaya)
  *
  * Hysteresis D_RESET = D_W0 + EPS_NOISE mencegah flag reset-set-reset
@@ -37,8 +37,13 @@ class TtsAlertManager(private val context: Context) {
 
         // Konstanta Sistem (§H + §G)
         const val D_W0      = 1000  // mm — threshold jarak aman minimum
-        const val EPS_NOISE = 150   // mm — noise floor ToF untuk hysteresis reset (diperlebar untuk stabilitas)
-        const val D_RESET   = D_W0 + EPS_NOISE  // 1150 mm — batas reset flag
+        // ADR-035 (Hysteresis): EPS_NOISE diperlebar ke 500mm berdasarkan literatur mekatronika.
+        // Margin 500mm >> noise ToF (±5–15% ≈ ±50–150mm pada jarak 1000mm), sehingga
+        // bacaan sensor yang berosilasi di sekitar threshold tidak dapat mereset flag peringatan.
+        // Referensi: VL53L1X App Note, PMC8196976 (hysteresis dual-threshold recommendation).
+        const val EPS_NOISE      = 500   // mm — hysteresis margin untuk D_RESET (noise ToF guard)
+        const val EPS_CLEAR_ZONE = 150   // mm — zona abu-abu untuk allClear (terpisah dari D_RESET)
+        const val D_RESET        = D_W0 + EPS_NOISE  // 1500 mm — batas reset flag
     }
 
     // State one-shot per tracking ID (atau kolom ToF sebagai proxy di Tahap 1).

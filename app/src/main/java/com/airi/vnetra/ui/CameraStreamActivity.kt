@@ -765,7 +765,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                     hasCloseYoloThreat = true
                                     closeThreatExists  = true
                                 }
-                                if (dObj < adaptiveT + TtsAlertManager.EPS_NOISE) {
+                                if (dObj < adaptiveT + TtsAlertManager.EPS_CLEAR_ZONE) {
                                     allClear = false
                                 }
                             }
@@ -807,7 +807,7 @@ class CameraStreamActivity : AppCompatActivity() {
                             if (obstacleDist < adaptiveT) {
                                 closeThreatExists = true
                             }
-                            if (obstacleDist < adaptiveT + TtsAlertManager.EPS_NOISE) {
+                            if (obstacleDist < adaptiveT + TtsAlertManager.EPS_CLEAR_ZONE) {
                                 allClear = false
                             }
                         } else {
