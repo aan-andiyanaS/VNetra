@@ -194,7 +194,7 @@ class TtsAlertManager(private val context: Context) {
                     val aLin = imuData[5]
                     val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
                     val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
-                    if (isStaticObject && aLin < 0.3f) {
+                    if (isStaticObject && aLin < 2.94f) {
                         vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
                     }
                     
@@ -266,7 +266,13 @@ class TtsAlertManager(private val context: Context) {
                 
                 // Formula H Asli: Reset jika bergerak signifikan (ADR-018)
                 val deltaD = kotlin.math.abs((dObjPrev[trackingId] ?: dObj) - dObj)
-                val isMoving = deltaD > 30 // epsilon_noise
+                var isMoving = deltaD > 30 // epsilon_noise
+                
+                // Mencegah ToF noise mereset one-shot saat pengguna diam (ADR-030 revision)
+                val isStaticObjectH = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPaving
+                if (isStaticObjectH && imuData != null && imuData[5] < 2.94f) {
+                    isMoving = false
+                }
                 
                 // Jika bergerak dan sudah 2 detik sejak peringatan terakhir (Ponytail Cooldown)
                 if (isMoving && (now - lastSpoken > 2000L)) {
@@ -420,7 +426,7 @@ class TtsAlertManager(private val context: Context) {
         private var currentState = NavState.PATH_CLEAR
         private var lastWarningTime = 0L
         private var lastClearTime = System.currentTimeMillis()
-        private var hasGivenSecondClearWarning = false
+        private var hasGivenSecondClearWarning = true
 
         /**
          * Panggil setiap kali ada pembaruan data ToF dan IMU.
@@ -491,7 +497,7 @@ class TtsAlertManager(private val context: Context) {
             currentState = NavState.PATH_CLEAR
             lastWarningTime = 0L
             lastClearTime = System.currentTimeMillis()
-            hasGivenSecondClearWarning = false
+            hasGivenSecondClearWarning = true
         }
     }
 

@@ -698,7 +698,7 @@ class CameraStreamActivity : AppCompatActivity() {
                     val yawRate = latestImuData?.getOrElse(4) { 0f } ?: 0f
                     val aLinMag = latestImuData?.getOrElse(5) { 0f } ?: 0f
                     val isTurning = kotlin.math.abs(yawRate) > 30f // deg/s
-                    val isMovingForward = aLinMag > 0.3f    // m/s^2 (terdeteksi ada langkah/guncangan maju)
+                    val isMovingForward = aLinMag > 2.94f    // m/s^2 (terdeteksi ada langkah/guncangan maju, a_th=0.3g)
 
                     var hasCloseYoloThreat = false
                     if (::ttsAlertManager.isInitialized) {
@@ -750,27 +750,42 @@ class CameraStreamActivity : AppCompatActivity() {
                         }
 
                         // Jika tidak ada deteksi YOLO yang berada di dekat (< D_W0),
-                        // cek apakah ToF mendeteksi tembok di depannya.
+                        // cek apakah ToF mendeteksi tembok datar ATAU halangan umum di depannya.
                         val wallDetected = SpatialMappingUtils.isWall(tofData, currentTofMode)
-                        if (!hasCloseYoloThreat && wallDetected) {
-                            val wallDistance = tofData.filter { it in 30..1500 }.average().toInt()
-                            val wallAlert = ttsAlertManager.process(
+                        
+                        var genericObstacleDistance = Int.MAX_VALUE
+                        val centerCols = SpatialMappingUtils.centerColumns(currentTofMode)
+                        for (c in centerCols) {
+                            val d = TofDepthEstimator.calculate(tofData, c, thetaDeg, currentTofMode)
+                            if (d < genericObstacleDistance) {
+                                genericObstacleDistance = d
+                            }
+                        }
+
+                        if (!hasCloseYoloThreat && (wallDetected || genericObstacleDistance < 2000)) {
+                            val obstacleDist = if (wallDetected) {
+                                tofData.filter { it in 30..1500 }.average().toInt()
+                            } else {
+                                genericObstacleDistance
+                            }
+                            
+                            val obstacleAlert = ttsAlertManager.process(
                                 trackingId      = SpatialMappingUtils.WALL_TRACKING_ID,
-                                dObj            = wallDistance,
-                                clockDirection  = 12,    // tembok selalu didepan
-                                objectLabel     = "tembok",
+                                dObj            = obstacleDist,
+                                clockDirection  = 12,    // halangan selalu didepan
+                                objectLabel     = if (wallDetected) "tembok" else "halangan",
                                 isMovingForward = isMovingForward,
                                 imuData         = latestImuData
                             )
-                            if (wallAlert != null) {
-                                ttsAlertManager.speak(wallAlert)
+                            if (obstacleAlert != null) {
+                                ttsAlertManager.speak(obstacleAlert)
                             }
 
                             val adaptiveT = ttsAlertManager.getAdaptiveThreshold(SpatialMappingUtils.WALL_TRACKING_ID)
-                            if (wallDistance < adaptiveT) {
+                            if (obstacleDist < adaptiveT) {
                                 closeThreatExists = true
                             }
-                            if (wallDistance < adaptiveT + TtsAlertManager.EPS_NOISE) {
+                            if (obstacleDist < adaptiveT + TtsAlertManager.EPS_NOISE) {
                                 allClear = false
                             }
                         } else {
@@ -902,7 +917,7 @@ class CameraStreamActivity : AppCompatActivity() {
         val imuSnap = latestImuData
         val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
         val aLinMag = imuSnap?.getOrElse(5) { 0f } ?: 0f
-        val isMovingForward = aLinMag > 0.3f
+        val isMovingForward = aLinMag > 2.94f // 0.3g sesuai Formula G (a_th)
         val thetaDeg = rawTheta - 20f
         val frameWidth = latestFrameWidth
 
