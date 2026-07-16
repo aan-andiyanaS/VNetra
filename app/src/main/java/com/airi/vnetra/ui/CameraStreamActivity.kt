@@ -860,7 +860,10 @@ class CameraStreamActivity : AppCompatActivity() {
                                 thetaDeg  = thetaDeg
                             )
 
-                            if (terrainResult.type != TerrainDetector.TerrainType.SAFE && 
+                            // ADR-035: Lewati terrain detection saat kepala berotasi.
+                            // Menunduk menyebabkan ToF menyapu lantai → false positive CONTAMINATED/HOLE.
+                            if (!isHeadRotating &&
+                                terrainResult.type != TerrainDetector.TerrainType.SAFE &&
                                 terrainResult.type != TerrainDetector.TerrainType.OPEN &&
                                 terrainResult.confidence >= 0.55f) {
                                 
@@ -940,6 +943,18 @@ class CameraStreamActivity : AppCompatActivity() {
         val imuSnap = latestImuData
         val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
         val aLinMag = imuSnap?.getOrElse(5) { 0f } ?: 0f
+        
+        // ADR-035: Jika kepala sedang berotasi, lewati seluruh pemrosesan YOLO TTS.
+        // Saat kepala berputar, kamera ikut berputar dan YOLO mendeteksi objek baru
+        // yang masuk ke frame — setiap objek baru ini (!alerted) akan memicu TTS spam.
+        val pitchRateSnap = imuSnap?.getOrElse(2) { 0f } ?: 0f
+        val rollRateSnap  = imuSnap?.getOrElse(3) { 0f } ?: 0f
+        val yawRateSnap   = imuSnap?.getOrElse(4) { 0f } ?: 0f
+        val isHeadRotatingNow = kotlin.math.abs(pitchRateSnap) > 10f ||
+            kotlin.math.abs(yawRateSnap) > 10f ||
+            kotlin.math.abs(rollRateSnap) > 10f
+        if (isHeadRotatingNow) return
+        
         // ADR-035: Gunakan state debounce kelas (movingForwardConsecutiveFrames) agar konsisten
         // dengan perhitungan di tofCollectJob. JANGAN hitung ulang secara instan di sini
         // karena tidak ada filter isHeadRotating dan temporal debounce.
