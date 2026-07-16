@@ -1585,11 +1585,25 @@ Konsep *convergence guard* atau *initialization guard* pada filter statistik mer
 
 $$\boxed{\delta_H = \mathbf{1}\!\left[d_{obj}^{(t)} < d_{w0}\right] \cdot \mathbf{1}\!\left[f_{obj} = 0\right]}$$
 
-**Mekanisme update flag setelah peringatan:**
+**Mekanisme update flag setelah peringatan (v9.4 awal):**
 
 $$f_{obj} := \begin{cases} 1, & \text{jika } \delta_H = 1 \quad \text{(set: sudah diperingatkan)} \\ 0, & \text{jika objek hilang dari frame YOLO, atau } |\Delta d| > \varepsilon_{noise} \quad \text{(reset)} \end{cases}$$
 
 dengan $\Delta d = d_{obj}^{(t-1)} - d_{obj}^{(t)}$ dan $\varepsilon_{noise} = 30$ mm.
+
+> **[DIPERBARUI ADR-032 & ADR-033]** Penambahan Noise Gate Akselerometer dan Gyroscope Guard pada kondisi reset.
+>
+> **Masalah:** Mengangguk atau berputar di tempat (diam namun berotasi) menyebabkan jarak absolut pancaran ToF berubah $>30\text{mm}$ karena *sweeping* proyektif, yang memicu reset palsu dan *spam* peringatan.
+>
+> **Kondisi Reset Baru:**
+> $$f_{obj} := 0, \quad \text{jika objek hilang, atau } \left( |\Delta d| > \varepsilon_{noise}\ \wedge\ \text{isMoving} \right)$$
+>
+> dengan $\text{isMoving}$ dikendalikan oleh gerbang keamanan (*Noise Gate*):
+> $$\text{isMoving} = \mathbf{1}\!\left[\|a_{lin}\| > a_{th}\right] \wedge \neg\, \text{isHeadRotating}$$
+>
+> $$\text{isHeadRotating} = \mathbf{1}\!\left[|\omega_{x}^{corr}| > 20\right] \vee \mathbf{1}\!\left[|\omega_{y}^{corr}| > 20\right] \vee \mathbf{1}\!\left[|\omega_{z}^{corr}| > 20\right]$$
+>
+> **Artinya:** Sistem menolak me-reset status peringatan jika pengguna terdeteksi diam ($\|a_{lin}\| < 2.94\ \text{m/s}^2$) **ATAU** sedang merotasikan kepalanya secara sadar ($\omega > 20\ ^\circ/\text{s}$). Ini mematikan *spam* peringatan objek statis saat mengangguk/mendongak.
 
 **Domain:** $\delta_H \in \{0, 1\}$, $f_{obj} \in \{0, 1\}$
 
@@ -1637,9 +1651,13 @@ Dalam **software engineering**, pola ini diformalkan oleh **David Harel** dalam 
 
 $$S_0 \xrightarrow{[\text{cond}]/\text{action}} S_1 \xrightarrow{[\text{reset\_cond}]} S_0$$
 
-yang dalam Formula H menjadi:
+yang dalam Formula H menjadi (sebelum revisi ADR):
 
 $$S_0 \xrightarrow{\left[d_{obj} < d_{w0}\ \wedge\ f_{obj}=0\right]/\text{TTS}} S_1 \xrightarrow{\left[|\Delta d| > \varepsilon_{noise}\ \vee\ \text{obj hilang}\right]} S_0$$
+
+Dan setelah ADR-032 & ADR-033 (Penambahan Guard Gyro-Accel):
+
+$$S_0 \xrightarrow{\left[d_{obj} < d_{w0}\ \wedge\ f_{obj}=0\right]/\text{TTS}} S_1 \xrightarrow{\left[(\,|\Delta d| > \varepsilon_{noise}\ \wedge\ \text{isMoving}\,)\ \vee\ \text{obj hilang}\right]} S_0$$
 
 Dalam konteks **embedded systems dan IoT**, pola ini adalah standar universal untuk mencegah *alert fatigue* — dijelaskan dalam IEC 62682:2014 (*Management of Alarms in the Process Industries*) yang mendefinisikan prinsip "alarm hanya berbunyi ketika kondisi pertama kali muncul, bukan terus-menerus".
 
@@ -1670,7 +1688,7 @@ Saat YOLO kehilangan tracking satu frame (tracking ID hilang lalu muncul kembali
     TTS: "Objek dekat"      Diam
     f_obj := 1
               │
-    Reset jika |Δd| > 30mm atau objek hilang
+    Reset jika ( |Δd| > 30mm AND isMoving ) atau objek hilang
 ```
 
 ---
