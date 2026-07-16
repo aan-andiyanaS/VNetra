@@ -472,7 +472,7 @@ class TtsAlertManager(private val context: Context) {
                     // IMPLEMENTASI DELAY (ADR-031):
                     if (clearCandidateTime == 0L) {
                         clearCandidateTime = now // Mulai menghitung durasi jalan kosong
-                    } else if (now - clearCandidateTime > 2500L) { // Harus konstan 2.5 detik
+                    } else if (now - clearCandidateTime > 500L) { // Harus konstan 0.5 detik
                         currentState = NavState.PATH_CLEAR
                         lastClearTime = now
                         hasGivenSecondClearWarning = false
