@@ -313,8 +313,6 @@ class TtsAlertManager(private val context: Context) {
             }
             dObj > D_RESET && alreadyAlerted -> {
                 // ADR-035: Jangan reset flag saat kepala sedang berotasi.
-                // Saat menunduk, lantai menciptakan jarak palsu yang kemudian naik melewati D_RESET
-                // saat kepala diluruskan kembali, memicu siklus re-trigger yang berulang-ulang.
                 val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f
                 val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f
                 val yawRateImu = imuData?.getOrElse(4) { 0f } ?: 0f
@@ -322,9 +320,17 @@ class TtsAlertManager(private val context: Context) {
                     kotlin.math.abs(yawRateImu) > 10f ||
                     kotlin.math.abs(rollRate) > 10f
                 if (!isHeadRotatingNow) {
-                    // Kepala diam dan objek benar-benar menjauh → reset normal
-                    alertFlags[trackingId] = false
-                    Log.d(TAG, "Flag reset (D_RESET): id=$trackingId d=${dObj}mm")
+                    // ADR-035 (fix final): Untuk rintangan STATIS (tembok/terrain), hanya reset flag
+                    // jika pengguna benar-benar berjalan menjauh (isMovingForward=true).
+                    // Ini mencegah noise ToF (dObj osilasi di sekitar D_RESET=1150mm saat diam)
+                    // dari menyebabkan flag reset dan memicu peringatan ulang berulang-ulang.
+                    val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID ||
+                        trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID
+                    val shouldReset = !isStaticObstacle || isMovingForward
+                    if (shouldReset) {
+                        alertFlags[trackingId] = false
+                        Log.d(TAG, "Flag reset (D_RESET): id=$trackingId d=${dObj}mm moving=$isMovingForward")
+                    }
                 }
                 null
             }
