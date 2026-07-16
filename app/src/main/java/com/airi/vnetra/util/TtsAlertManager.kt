@@ -427,6 +427,7 @@ class TtsAlertManager(private val context: Context) {
         private var lastWarningTime = 0L
         private var lastClearTime = System.currentTimeMillis()
         private var hasGivenSecondClearWarning = true
+        private var clearCandidateTime = 0L
 
         /**
          * Panggil setiap kali ada pembaruan data ToF dan IMU.
@@ -438,10 +439,9 @@ class TtsAlertManager(private val context: Context) {
         fun processNavigationState(isDanger: Boolean, isMovingForward: Boolean, isTurning: Boolean) {
             val now = System.currentTimeMillis()
 
-
-
-
             if (isDanger) {
+                clearCandidateTime = 0L // Reset candidate timer jika halangan muncul lagi
+                
                 // KONDISI: Deteksi Tembok (WARNING)
                 if (currentState == NavState.PATH_CLEAR) {
                     // Transisi dari CLEAR ke WARNING
@@ -469,14 +469,22 @@ class TtsAlertManager(private val context: Context) {
                 // KONDISI: Jalan Kosong (CLEAR)
                 if (currentState == NavState.WALL_WARNING) {
                     // Transisi dari WARNING ke CLEAR (user berhasil menemukan jalan kosong saat menengok)
-                    currentState = NavState.PATH_CLEAR
-                    lastClearTime = now
-                    hasGivenSecondClearWarning = false
-                    
-                    // Langsung beritahu bahwa jalan kosong 1 kali
-                    speak("Jalan di depan kosong")
+                    // IMPLEMENTASI DELAY (ADR-031):
+                    if (clearCandidateTime == 0L) {
+                        clearCandidateTime = now // Mulai menghitung durasi jalan kosong
+                    } else if (now - clearCandidateTime > 2500L) { // Harus konstan 2.5 detik
+                        currentState = NavState.PATH_CLEAR
+                        lastClearTime = now
+                        hasGivenSecondClearWarning = false
+                        clearCandidateTime = 0L
+                        
+                        // Langsung beritahu bahwa jalan kosong 1 kali
+                        speak("Jalan di depan kosong")
+                    }
                 } else {
                     // Tetap di PATH_CLEAR
+                    clearCandidateTime = 0L // Pastikan clear
+
                     if (!isMovingForward) {
                         // User masih ragu / belum maju setelah beberapa waktu (misal 6 detik)
                         if (!hasGivenSecondClearWarning && now - lastClearTime > 6000L) {
@@ -498,6 +506,7 @@ class TtsAlertManager(private val context: Context) {
             lastWarningTime = 0L
             lastClearTime = System.currentTimeMillis()
             hasGivenSecondClearWarning = true
+            clearCandidateTime = 0L
         }
     }
 
