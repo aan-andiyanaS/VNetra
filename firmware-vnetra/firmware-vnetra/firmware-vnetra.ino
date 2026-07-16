@@ -1389,8 +1389,16 @@ void handleButton() {
             if (wifiConnected) ledGreen(); else if (bleActive) ledBlue(); else ledOff();
             resetButtonPressed = false; resetLedPhase = 0;
             if (holdTime < 1000) {
-                if (millis() - lastShortReleaseTime < 600) triggerImuCalibration();
-                else lastShortReleaseTime = millis();
+                if (millis() - lastShortReleaseTime < 600) {
+                    triggerImuCalibration();
+                } else {
+                    lastShortReleaseTime = millis();
+                    // Opsi 2: Mute Toggle via Short Press
+                    if (wsClientConnected && ws.count() > 0) {
+                        ws.textAll("CMD:TOGGLE_MUTE");
+                        Serial.println("[WS] Mengirim CMD:TOGGLE_MUTE ke Android");
+                    }
+                }
             }
         }
     }

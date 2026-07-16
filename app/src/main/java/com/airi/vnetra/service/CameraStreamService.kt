@@ -144,6 +144,9 @@ class CameraStreamService : Service() {
     private val _pingWebsocketFlow = MutableStateFlow(-1L)
     val pingWebsocketFlow: StateFlow<Long> = _pingWebsocketFlow.asStateFlow()
 
+    private val _muteToggleFlow = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val muteToggleFlow: SharedFlow<Unit> = _muteToggleFlow
+
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -289,6 +292,8 @@ class CameraStreamService : Service() {
                                 val rtt = System.currentTimeMillis() - sentTime
                                 // OWD (One Way Delay) estimasi = RTT / 2
                                 _pingWebsocketFlow.value = rtt / 2
+                            } else if (text == "CMD:TOGGLE_MUTE") {
+                                _muteToggleFlow.tryEmit(Unit)
                             }
                         }
 

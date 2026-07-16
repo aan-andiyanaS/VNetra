@@ -121,6 +121,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
     private var latencyMonitorJob: Job? = null
     private var pingWebsocketJob: Job? = null
+    private var muteToggleJob: Job? = null
 
     // ── TTS Alert Manager (P3.3) ────────────────
     private lateinit var ttsAlertManager: TtsAlertManager
@@ -561,6 +562,7 @@ class CameraStreamActivity : AppCompatActivity() {
         tofCollectJob?.cancel()
         latencyMonitorJob?.cancel()
         pingWebsocketJob?.cancel()
+        muteToggleJob?.cancel()
 
         // Reset state latency
         pingCamera = 0
@@ -587,6 +589,25 @@ class CameraStreamActivity : AppCompatActivity() {
                 throw e
             } catch (e: Exception) {
                 android.util.Log.e("CameraStreamActivity", "Ping WS collect error", e)
+            }
+        }
+
+        muteToggleJob = lifecycleScope.launch(Dispatchers.Default) {
+            try {
+                svc.muteToggleFlow.collect {
+                    if (::ttsAlertManager.isInitialized) {
+                        ttsAlertManager.isMuted = !ttsAlertManager.isMuted
+                        if (ttsAlertManager.isMuted) {
+                            ttsAlertManager.speakForce("Suara dimatikan sementara")
+                        } else {
+                            ttsAlertManager.speakForce("Suara diaktifkan kembali")
+                        }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("CameraStreamActivity", "Mute toggle collect error", e)
             }
         }
 
@@ -720,6 +741,12 @@ class CameraStreamActivity : AppCompatActivity() {
                         movingForwardConsecutiveFrames = 0
                     }
                     val isMovingForward = movingForwardConsecutiveFrames >= 3
+
+                    // ADR-035: Auto-Unmute (Mute Cerdas)
+                    if (isMovingForward && ::ttsAlertManager.isInitialized && ttsAlertManager.isMuted) {
+                        ttsAlertManager.isMuted = false
+                        ttsAlertManager.speakForce("Pergerakan terdeteksi, suara diaktifkan kembali")
+                    }
 
 
                     var hasCloseYoloThreat = false

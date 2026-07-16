@@ -10,6 +10,12 @@ import android.util.Log
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.BufferOverflow
 
 /**
  * TtsAlertManager — Peringatan Objek Statis One-Shot (v9.4)
@@ -69,6 +75,13 @@ class TtsAlertManager(private val context: Context) {
     // TTS Engine
     private var tts: TextToSpeech? = null
     private val ttsReady = AtomicBoolean(false)
+    private val isInitialized: Boolean get() = ttsReady.get()
+
+    private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val ttsFlow = MutableSharedFlow<String>(extraBufferCapacity = 5, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    
+    @Volatile
+    var isMuted: Boolean = false
 
     // A2DP Keep-Alive (Zero Wake-Up Delay)
     private var silentAudioTrack: AudioTrack? = null
@@ -101,6 +114,13 @@ class TtsAlertManager(private val context: Context) {
 
                 // Mulai mekanisme A2DP Keep-Alive agar Bluetooth tidak masuk mode sleep/sniff
                 startA2dpKeepAlive(audioAttributes)
+
+                // Listener flow TTS
+                scope.launch {
+                    ttsFlow.collect { text ->
+                        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "vnetra_${System.currentTimeMillis()}")
+                    }
+                }
             } else {
                 Log.e(TAG, "TTS init gagal: status=$status")
             }
@@ -365,8 +385,6 @@ class TtsAlertManager(private val context: Context) {
     fun postProcessDetections(activeClasses: Set<Int>) {
         val now = System.currentTimeMillis()
 
-
-
         for (classId in activeClasses) {
             lastSeenTime[classId] = now
         }
@@ -395,12 +413,8 @@ class TtsAlertManager(private val context: Context) {
      * @param text teks Bahasa Indonesia yang akan disuarakan
      */
     fun speak(text: String) {
-        if (!ttsReady.get() || tts == null) {
-            Log.w(TAG, "TTS belum siap, skip: \"$text\"")
-            return
-        }
-        val uid = "vnetra_${System.currentTimeMillis()}"
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, uid)
+        if (isMuted || !isInitialized) return
+        scope.launch { ttsFlow.emit(text) }
     }
 
     /**
@@ -410,9 +424,18 @@ class TtsAlertManager(private val context: Context) {
      * @param text teks Bahasa Indonesia yang akan disuarakan
      */
     fun speakAdd(text: String) {
-        if (!ttsReady.get() || tts == null) return
-        val uid = "vnetra_${System.currentTimeMillis()}"
-        tts?.speak(text, TextToSpeech.QUEUE_ADD, null, uid)
+        if (isMuted || !isInitialized) return
+        if (tts?.isSpeaking == true) return
+        scope.launch { ttsFlow.emit(text) }
+    }
+
+    /**
+     * Memaksa peringatan bersuara meskipun dalam status isMuted = true.
+     * Digunakan khusus untuk konfirmasi status Mute ON/OFF.
+     */
+    fun speakForce(text: String) {
+        if (!isInitialized) return
+        scope.launch { ttsFlow.emit(text) }
     }
 
     /**
