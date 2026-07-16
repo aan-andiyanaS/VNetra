@@ -269,14 +269,23 @@ class TtsAlertManager(private val context: Context) {
                 val deltaD = kotlin.math.abs((dObjPrev[trackingId] ?: dObj) - dObj)
                 var isMoving = deltaD > 30 // epsilon_noise
                 
-                // Mencegah rotasi kepala dan noise mereset one-shot saat pengguna diam (ADR-032)
+                // Mencegah rotasi kepala dan noise mereset one-shot saat pengguna diam (ADR-032 & ADR-033)
                 val isStaticObjectH = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPaving
-                if (imuData != null && imuData[5] < 2.94f) {
-                    if (isStaticObjectH) {
-                        isMoving = false
-                    } else if (vAvg <= 50f) {
-                        // Objek YOLO tidak mendekat secara nyata, gerakan semu akibat rotasi kepala
-                        isMoving = false
+                if (imuData != null) {
+                    val pitchRate = imuData[2]
+                    val rollRate  = imuData[3]
+                    val yawRate   = imuData[4]
+                    val aLinMag   = imuData[5]
+                    
+                    val isHeadRotating = kotlin.math.abs(pitchRate) > 20f || kotlin.math.abs(yawRate) > 20f || kotlin.math.abs(rollRate) > 20f
+                    
+                    if (aLinMag < 2.94f || isHeadRotating) {
+                        if (isStaticObjectH) {
+                            isMoving = false
+                        } else if (vAvg <= 50f) {
+                            // Objek YOLO tidak mendekat secara nyata, gerakan semu akibat rotasi kepala
+                            isMoving = false
+                        }
                     }
                 }
                 

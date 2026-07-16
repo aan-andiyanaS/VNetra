@@ -695,10 +695,17 @@ class CameraStreamActivity : AppCompatActivity() {
                     var closeThreatExists = false
                     var allClear = true
 
+                    val pitchRate = latestImuData?.getOrElse(2) { 0f } ?: 0f
+                    val rollRate = latestImuData?.getOrElse(3) { 0f } ?: 0f
                     val yawRate = latestImuData?.getOrElse(4) { 0f } ?: 0f
                     val aLinMag = latestImuData?.getOrElse(5) { 0f } ?: 0f
+                    
                     val isTurning = kotlin.math.abs(yawRate) > 30f // deg/s
-                    val isMovingForward = aLinMag > 2.94f    // m/s^2 (terdeteksi ada langkah/guncangan maju, a_th=0.3g)
+                    
+                    // ADR-033: Guard against false positive walking when head is rotating (nodding/turning)
+                    val isHeadRotating = kotlin.math.abs(pitchRate) > 20f || kotlin.math.abs(yawRate) > 20f || kotlin.math.abs(rollRate) > 20f
+                    val isMovingForward = (aLinMag > 2.94f) && !isHeadRotating    // m/s^2 (a_th=0.3g)
+
 
                     var hasCloseYoloThreat = false
                     if (::ttsAlertManager.isInitialized) {
