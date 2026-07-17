@@ -192,6 +192,21 @@ object SpatialMappingUtils {
     }
 
     /**
+     * Petakan posisi vertikal y_c ke indeks baris sensor ToF,
+     * dengan proyeksi linear sederhana sesuai tinggi kamera dan resolusi aktif.
+     * Digunakan untuk keperluan visualisasi grid UI.
+     *
+     * @param yc         posisi vertikal centroid (px) dalam rentang [0, H_CAM]
+     * @param resolution resolusi aktif: 4 atau 8
+     * @return i ∈ {0..resolution-1}
+     */
+    fun mapToTofRow(yc: Float, resolution: Int = 8): Int {
+        val rowHeight = H_CAM.toFloat() / resolution
+        val raw = (yc / rowHeight).toInt()
+        return raw.coerceIn(0, resolution - 1)
+    }
+
+    /**
      * Kembalikan daftar indeks kolom "tepat depan" (zona JAM 12)
      * sesuai resolusi aktif. Digunakan di tofCollectJob sebagai proxy objek
      * di depan ketika YOLO belum tersedia.

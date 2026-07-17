@@ -13,7 +13,10 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.provider.Settings
+import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -686,9 +689,32 @@ class CameraStreamActivity : AppCompatActivity() {
                             }
 
                             val alpha = 0.3f // Faktor smoothing EMA
+                            val currentDetections = latestDetections
+                            val currentFrameWidth = latestFrameWidth.coerceAtLeast(1)
+                            val currentFrameHeight = latestFrameHeight.coerceAtLeast(1)
 
                             for (i in tofData.indices) {
                                 if (i >= tofViews.size) continue // Pengaman batas index array
+                                
+                                val row = i / currentTofMode
+                                val col = i % currentTofMode
+                                var isYoloCentroid = false
+                                
+                                for (det in currentDetections) {
+                                    val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
+                                    val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / currentFrameWidth)
+                                    val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
+                                    
+                                    val ycRaw = (det.boundingBox.top + det.boundingBox.bottom) / 2f
+                                    val yc = ycRaw * (SpatialMappingUtils.H_CAM.toFloat() / currentFrameHeight)
+                                    val r = SpatialMappingUtils.mapToTofRow(yc, currentTofMode)
+                                    
+                                    if (j == col && r == row) {
+                                        isYoloCentroid = true
+                                        break
+                                    }
+                                }
+
                                 val rawDistance = tofData[i]
 
                                 if (rawDistance <= 0) {
@@ -698,9 +724,11 @@ class CameraStreamActivity : AppCompatActivity() {
                                         val held = smoothedTofData!![i].toInt()
                                         if (held > 0) {
                                             tofViews[i].text = "$held"
-                                            tofViews[i].setBackgroundColor(
-                                                getColorForDistance(held, dimmed = true)
-                                            )
+                                            var color = getColorForDistance(held, dimmed = true)
+                                            if (isYoloCentroid) {
+                                                color = androidx.core.graphics.ColorUtils.blendARGB(color, android.graphics.Color.BLUE, 0.4f)
+                                            }
+                                            tofViews[i].setBackgroundColor(color)
                                         }
                                     } else {
                                         tofViews[i].text = "—"
@@ -718,7 +746,11 @@ class CameraStreamActivity : AppCompatActivity() {
 
                                     val smoothedDistance = smoothedTofData!![i].toInt()
                                     tofViews[i].text = "$smoothedDistance"
-                                    tofViews[i].setBackgroundColor(getColorForDistance(smoothedDistance))
+                                    var color = getColorForDistance(smoothedDistance)
+                                    if (isYoloCentroid) {
+                                        color = androidx.core.graphics.ColorUtils.blendARGB(color, android.graphics.Color.BLUE, 0.4f)
+                                    }
+                                    tofViews[i].setBackgroundColor(color)
                                 }
                             }
                         }
@@ -994,7 +1026,11 @@ class CameraStreamActivity : AppCompatActivity() {
         val isHeadRotatingNow = kotlin.math.abs(pitchRateSnap) > 10f ||
             kotlin.math.abs(yawRateSnap) > 10f ||
             kotlin.math.abs(rollRateSnap) > 10f
-        if (isHeadRotatingNow) return
+            
+        if (isHeadRotatingNow) {
+            Log.v("YOLO_TTS", "Blocked by isHeadRotatingNow: pitch=$pitchRateSnap yaw=$yawRateSnap roll=$rollRateSnap")
+            return
+        }
         
         // ADR-035: Gunakan state debounce kelas (movingForwardConsecutiveFrames) agar konsisten
         // dengan perhitungan di tofCollectJob. JANGAN hitung ulang secara instan di sini
@@ -1005,10 +1041,16 @@ class CameraStreamActivity : AppCompatActivity() {
 
         // 1. Hitung dObj dan saring deteksi yang berada di zona aktif ToF
         val mappedDetections = detections.mapNotNull { det ->
+            // --- FORMULA B ---
             val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
             val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / frameWidth.toFloat())
-            if (!SpatialMappingUtils.isInTofZone(xc)) null
-            else {
+            
+            Log.v("YOLO_TTS", "Deteksi: ${det.className}, BBox: left=${det.boundingBox.left}, right=${det.boundingBox.right}, xcRaw=$xcRaw, xcNorm=$xc")
+            
+            if (!SpatialMappingUtils.isInTofZone(xc)) {
+                Log.v("YOLO_TTS", "-> Ditolak: ${det.className} di luar zona ToF (xc=$xc)")
+                null
+            } else {
                 val arahJam = SpatialMappingUtils.mapToClockDirection(xc)
                 val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
                 var dObj = TofDepthEstimator.calculate(
@@ -1025,6 +1067,9 @@ class CameraStreamActivity : AppCompatActivity() {
                         imageHeight = latestFrameHeight,
                         thetaDeg    = thetaDeg
                     )
+                    Log.v("YOLO_TTS", "-> ToF Gagal, fallback kamera dObj=$dObj")
+                } else {
+                    Log.v("YOLO_TTS", "-> ToF Sukses di kolom $j: dObj=$dObj")
                 }
                 det to Triple(dObj, arahJam, det.className)
             }
