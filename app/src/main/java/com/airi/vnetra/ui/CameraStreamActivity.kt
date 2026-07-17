@@ -37,6 +37,7 @@ import com.airi.vnetra.util.SessionManager
 import com.airi.vnetra.util.TerrainDetector
 import com.airi.vnetra.util.CameraDepthEstimator
 import com.airi.vnetra.util.SimpleTracker
+import com.airi.vnetra.util.DatasetManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -77,7 +78,9 @@ class CameraStreamActivity : AppCompatActivity() {
 
     private lateinit var binding:        ActivityCameraStreamBinding
     private lateinit var sessionManager: SessionManager
+    private lateinit var datasetManager: DatasetManager
 
+    private var isDatasetModeActive      = false
     private var streamService:   CameraStreamService? = null
     private var isBound          = false
     private var frameCollectJob: Job? = null
@@ -228,6 +231,7 @@ class CameraStreamActivity : AppCompatActivity() {
         }
 
         sessionManager = SessionManager(this)
+        datasetManager = DatasetManager(this)
 
         supportActionBar?.title = "Live Camera — $ipAddress"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
@@ -409,6 +413,19 @@ class CameraStreamActivity : AppCompatActivity() {
             if (currentTofMode == 4) return@setOnClickListener
             switchTofMode(4)
         }
+
+        // ── Tombol Dataset ───────────────────────────────────────────────────
+        binding.btnModeDataset.setOnCheckedChangeListener { _, isChecked ->
+            isDatasetModeActive = isChecked
+            if (::ttsAlertManager.isInitialized) {
+                ttsAlertManager.isMuted = isChecked
+                if (isChecked) {
+                    Toast.makeText(this, "Mode Dataset Aktif. TTS dimatikan.", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Mode Dataset Nonaktif. TTS menyala kembali.", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -502,6 +519,10 @@ class CameraStreamActivity : AppCompatActivity() {
                 svc.frameFlow.collect { jpegBytes ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     
+                    if (isDatasetModeActive) {
+                        datasetManager.saveFrameIfNeeded(jpegBytes)
+                    }
+
                     val startTime = System.currentTimeMillis()
                     val bitmap = runCatching {
                         BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)

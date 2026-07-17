@@ -368,7 +368,7 @@
 
         </LinearLayout>
 
-        <!-- Baris tombol: Reconnect + Akhiri -->
+        <!-- Baris tombol: Reconnect + Mode Dataset + Akhiri -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -382,6 +382,17 @@
                 android:layout_height="wrap_content"
                 android:text="Reconnect"
                 android:visibility="gone" />
+
+            <ToggleButton
+                android:id="@+id/btnModeDataset"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:textOn="Dataset: ON"
+                android:textOff="Dataset: OFF"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#FF9800"
+                android:textSize="11sp" />
 
             <Button
                 android:id="@+id/btnAkhiri"
