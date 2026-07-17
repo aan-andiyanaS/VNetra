@@ -165,7 +165,7 @@ class CameraStreamService : Service() {
             stopStreamAndRelease()
             cancelAllNotifications()
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
-            showStoppedNotification(ipAddress)
+            // ADR-038: Hapus pemanggilan showStoppedNotification agar status bar bersih
             stopSelf()
             return START_NOT_STICKY
         }
@@ -575,29 +575,6 @@ class CameraStreamService : Service() {
         }
     }
 
-    private fun showStoppedNotification(ip: String) {
-        if (ip.isEmpty()) return
-        runCatching {
-            val mainIntent = Intent(this, com.airi.vnetra.MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            }
-            val pendingIntent = PendingIntent.getActivity(
-                this, 2,
-                mainIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            )
-            val notif = NotificationCompat.Builder(this, NOTIF_CH_FG)
-                .setContentTitle("Sesi Kamera Dihentikan")
-                .setContentText("Ketuk untuk terhubung kembali ke kamera ESP32-S3")
-                .setSmallIcon(R.mipmap.ic_launcher)
-                .setAutoCancel(true)
-                .setContentIntent(pendingIntent)
-                .build()
-            (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-                .notify(NOTIF_ID_STOPPED, notif)
-        }
-    }
-
     private fun buildForegroundNotif(): Notification {
         val openPi = PendingIntent.getActivity(
             this, 0,
@@ -642,8 +619,13 @@ class CameraStreamService : Service() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
-        // App di-swipe dari recent: service tetap jalan (notifikasi masih ada)
-        Log.d(TAG, "Task removed — service tetap jalan di background")
+        // ADR-038: Bunuh service dan notifikasi secara mutlak saat aplikasi 
+        // dihapus secara sengaja (swiped/killed) dari menu Recent Apps.
+        Log.d(TAG, "Task removed — membunuh service secara bersih")
+        stopStreamAndRelease()
+        cancelAllNotifications()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
 
