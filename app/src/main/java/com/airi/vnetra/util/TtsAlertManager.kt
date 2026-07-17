@@ -284,9 +284,9 @@ class TtsAlertManager(private val context: Context) {
                 val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f
                 val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f
                 val yawRateImu = imuData?.getOrElse(4) { 0f } ?: 0f
-                val isHeadRotatingNow = kotlin.math.abs(pitchRate) > 10f ||
-                    kotlin.math.abs(yawRateImu) > 10f ||
-                    kotlin.math.abs(rollRate) > 10f
+                val isHeadRotatingNow = kotlin.math.abs(pitchRate) > 5f ||
+                    kotlin.math.abs(yawRateImu) > 5f ||
+                    kotlin.math.abs(rollRate) > 5f
                 
                 if (isHeadRotatingNow) return null
                 

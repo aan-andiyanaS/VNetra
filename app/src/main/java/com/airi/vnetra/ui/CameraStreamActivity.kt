@@ -229,6 +229,14 @@ class CameraStreamActivity : AppCompatActivity() {
         supportActionBar?.title = "Live Camera — $ipAddress"
         supportActionBar?.setDisplayHomeAsUpEnabled(true)
 
+        // ADR-035 (Tambahan): Mencegah Android modern menghancurkan aplikasi 
+        // saat tombol / gesture Back ditekan, sehingga pemrosesan latar belakang tetap aman.
+        onBackPressedDispatcher.addCallback(this, object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                moveTaskToBack(true)
+            }
+        })
+
         // Apply dynamic safe area margins and padding using Window Insets
         ViewCompat.setOnApplyWindowInsetsListener(binding.root) { _, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
@@ -285,22 +293,33 @@ class CameraStreamActivity : AppCompatActivity() {
         if (ipAddress.isEmpty()) return
         val serviceIntent = CameraStreamService.createStartIntent(this, ipAddress)
         startService(serviceIntent)
-        bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+        
+        // PONYTAIL ADR-035: Hindari re-binding jika sudah ter-bind 
+        // (karena sekarang tidak di-unbind di onStop)
+        if (!isBound) {
+            bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+        }
     }
 
     override fun onStop() {
         super.onStop()
         runCatching { unregisterReceiver(exitReceiver) }
+        
+        // PONYTAIL: ADR-035
+        // Biarkan semua coroutine (YOLO, ToF, TTS) dan binding tetap berjalan 
+        // di latar belakang (background) saat aplikasi diminimalkan (onStop).
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        
+        // ADR-035: Matikan semua background processing saat aplikasi benar-benar ditutup
         cancelAllJobs()
         if (isBound) {
             runCatching { unbindService(serviceConnection) }
             isBound       = false
             streamService = null
         }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
         // P3.3: Bebaskan resource TTS — mencegah leak AudioTrack di background
         if (::ttsAlertManager.isInitialized) ttsAlertManager.shutdown()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -316,12 +335,6 @@ class CameraStreamActivity : AppCompatActivity() {
             val si = CameraStreamService.createStartIntent(this, ipAddress)
             stopService(si); startService(si)
         }
-    }
-
-    // Back → minimize, service tetap jalan
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        moveTaskToBack(true)
     }
 
     override fun onSupportNavigateUp(): Boolean { moveTaskToBack(true); return true }
@@ -620,7 +633,8 @@ class CameraStreamActivity : AppCompatActivity() {
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring && imuData.size >= 6) {
                             binding.tvImuPitch.text = "Pitch: %.1f°".format(imuData[0])
-                            binding.tvImuRoll.text  = "Roll: %.1f°".format(imuData[1])
+                            binding.tvImuRoll.text  = "Roll:  %.1f°".format(imuData[1])
+                            binding.tvImuYaw.text   = "Yaw:   %.1f°".format(imuData[2])
                             // Tampilkan status Mahony: "warming up" selama 5 detik pertama
                             val converged = imuData.getOrElse(8) { 0f } > 0.5f
                             if (converged) {
@@ -727,9 +741,9 @@ class CameraStreamActivity : AppCompatActivity() {
                     val isTurning = kotlin.math.abs(yawRate) > 30f // deg/s
                     
                     // ADR-035: Guard against false positive walking when head is rotating (nodding/turning)
-                    // Sensitivitas dinaikkan ke 10f agar "nodding" pelan (yang menimbulkan akselerasi sentripetal)
+                    // Sensitivitas dinaikkan ke 5f agar "nodding" pelan (yang menimbulkan akselerasi sentripetal)
                     // terdeteksi sebagai rotasi kepala dan bukan langkah kaki.
-                    val isHeadRotating = kotlin.math.abs(pitchRate) > 10f || kotlin.math.abs(yawRate) > 10f || kotlin.math.abs(rollRate) > 10f
+                    val isHeadRotating = kotlin.math.abs(pitchRate) > 5f || kotlin.math.abs(yawRate) > 5f || kotlin.math.abs(rollRate) > 5f
                     
                     val isAccelerating = (aLinMag > 2.94f) && !isHeadRotating    // m/s^2 (a_th=0.3g)
                     
@@ -1254,7 +1268,8 @@ class CameraStreamActivity : AppCompatActivity() {
         runOnUiThread {
             runCatching {
                 binding.tvImuPitch.text = "Pitch: —"
-                binding.tvImuRoll.text  = "Roll: —"
+                binding.tvImuRoll.text  = "Roll:  —"
+                binding.tvImuYaw.text   = "Yaw:   —"
                 binding.tvImuAccel.text = "Accel: —"
                 binding.tvLatencyMonitor.text = "=== SYSTEM PING MONITOR ===\nCam Decode : —\nToF Total  : —\n---------------------------\n► MAX BOTTLENECK : —\n\n[Sequential ToF Details]\n├─ Smoothing : —\n├─ Formula E/H : —\n└─ Terrain J : —\n==========================="
                 binding.ivCameraFrame.setImageResource(android.R.color.transparent)
