@@ -25,6 +25,7 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.GestureDetectorCompat
 import androidx.lifecycle.lifecycleScope
@@ -415,7 +416,15 @@ class CameraStreamActivity : AppCompatActivity() {
         }
 
         // ── Tombol Dataset ───────────────────────────────────────────────────
-        binding.btnModeDataset.setOnCheckedChangeListener { _, isChecked ->
+        binding.btnModeDataset.setOnCheckedChangeListener { buttonView, isChecked ->
+            if (isChecked && Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                    ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE), 101)
+                    buttonView.isChecked = false
+                    return@setOnCheckedChangeListener
+                }
+            }
+
             isDatasetModeActive = isChecked
             if (::ttsAlertManager.isInitialized) {
                 ttsAlertManager.isMuted = isChecked

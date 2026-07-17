@@ -23,9 +23,12 @@ class DatasetManager(private val context: Context) {
     private val MAX_DATASET_COUNT = 1500
     private var limitReached = false
 
-    private val storageDir: File? by lazy {
-        val dir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), "dataset esp32")
-        if (!dir.exists()) dir.mkdirs()
+    // Menggunakan direktori publik (Pictures) agar mudah diakses dari File Manager / PC
+    private val storageDir: File by lazy {
+        val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "dataset esp32")
+        if (!dir.exists()) {
+            dir.mkdirs()
+        }
         dir
     }
 
@@ -37,7 +40,7 @@ class DatasetManager(private val context: Context) {
         lastSavedTime = now
 
         withContext(Dispatchers.IO) {
-            val dir = storageDir ?: return@withContext
+            val dir = storageDir
 
             // Hitung jumlah file yang sudah ada sekali saja di awal (Ponytail Lazy Evaluation)
             if (currentCount == -1) {
