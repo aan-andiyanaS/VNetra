@@ -95,8 +95,6 @@ class CameraStreamActivity : AppCompatActivity() {
 
     private lateinit var tofViews: Array<android.widget.TextView>
 
-    // Variabel untuk menyimpan data ToF yang di-smooth (Exponential Moving Average)
-    private var smoothedTofData: FloatArray? = null
 
     // Pre-alokasi untuk mengurangi GC pressure:
     // floatArrayOf() di dalam loop ToF (64 cell × 10Hz = 640 alokasi/detik) menyebabkan GC pause.
@@ -141,11 +139,8 @@ class CameraStreamActivity : AppCompatActivity() {
     
 
     // Temporal holdover: tahan nilai terakhir yang valid selama N frame sebelum tampil "—".
-    // Ini mencegah cell terluar (yang memiliki SNR lebih rendah) flicker antara angka dan "—"
-    // karena status sensor (9/255) kadang muncul selang-seling antar frame.
-    // Nilai 5 frame @ 10Hz = 0.5 detik toleransi sebelum cell dianggap benar-benar kosong.
+    // Dipindahkan ke local state di tofCollectJob (thread-safe by design, hanya satu coroutine).
     private val HOLDOVER_FRAMES = 15
-    private var holdoverCount: IntArray? = null  // countdown per cell; -1 = sudah ditampilkan "—"
 
     // FPS counter
     private var frameCount     = 0
@@ -686,102 +681,118 @@ class CameraStreamActivity : AppCompatActivity() {
         }
 
         tofCollectJob = lifecycleScope.launch(Dispatchers.Default) {
+            // Local state: hanya diakses dari satu coroutine ini (thread-safe by design).
+            // Tidak perlu @Volatile karena tidak ada thread lain yang menyentuhnya.
+            var localSmoothed: FloatArray? = null
+            var localHoldover: IntArray?   = null
+
             try {
                 svc.tofFlow.collect { tofData ->
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     latestTofData = tofData
 
-                    // Fase 1: Smoothing (EMA)
+                    // ── Fase 1: Guard resolusi berubah (perlu Main karena rebuildTofGrid adalah UI op) ──
                     val startSmooth = System.currentTimeMillis()
-                    withContext(Dispatchers.Main) {
-                        if (!isDestroyed && !isFinishing && !isAkhiring
-                            && ::tofViews.isInitialized) {
-
-                            if (tofData.size != tofViews.size) {
-                                val detectedMode = if (tofData.size == 16) 4 else 8
-                                if (currentTofMode != detectedMode) {
-                                    currentTofMode = detectedMode
-                                    saveTofMode(detectedMode)
-                                    rebuildTofGrid(detectedMode)
-                                    updateTofModeButtons(detectedMode)
-                                }
-                                smoothedTofData = null // Reset smoothing array jika resolusi berubah
-                                return@withContext
+                    val tofViewSize = withContext(Dispatchers.Main) {
+                        if (!::tofViews.isInitialized) return@withContext -1
+                        if (tofData.size != tofViews.size) {
+                            val detectedMode = if (tofData.size == 16) 4 else 8
+                            if (currentTofMode != detectedMode) {
+                                currentTofMode = detectedMode
+                                saveTofMode(detectedMode)
+                                rebuildTofGrid(detectedMode)
+                                updateTofModeButtons(detectedMode)
                             }
+                            localSmoothed = null // Reset smoothing array saat resolusi berubah
+                            localHoldover = null
+                            return@withContext -1 // Sinyal: skip frame ini
+                        }
+                        tofViews.size
+                    }
+                    if (tofViewSize < 0) {
+                        pingTofSmooth = System.currentTimeMillis() - startSmooth
+                        return@collect
+                    }
 
-                            if (smoothedTofData == null || smoothedTofData!!.size != tofData.size) {
-                                smoothedTofData = FloatArray(tofData.size) { i -> tofData[i].toFloat() }
-                                holdoverCount   = null  // Inisialisasi ulang saat ukuran berubah
-                            }
+                    // ── Fase 2: KOMPUTASI di Default thread (tidak menyentuh View) ──
+                    if (localSmoothed == null || localSmoothed!!.size != tofData.size) {
+                        localSmoothed = FloatArray(tofData.size) { i -> tofData[i].toFloat() }
+                        localHoldover = null
+                    }
+                    if (localHoldover == null || localHoldover!!.size != tofData.size) {
+                        localHoldover = IntArray(tofData.size) { HOLDOVER_FRAMES }
+                    }
 
-                            if (holdoverCount == null || holdoverCount!!.size != tofData.size) {
-                                holdoverCount = IntArray(tofData.size) { HOLDOVER_FRAMES }
-                            }
+                    val smoothed = localSmoothed!!
+                    val holdover = localHoldover!!
+                    val alpha = 0.3f
+                    val currentDetections = latestDetections
+                    val currentFrameWidth  = latestFrameWidth.coerceAtLeast(1)
+                    val currentFrameHeight = latestFrameHeight.coerceAtLeast(1)
+                    val mode = currentTofMode
 
-                            val alpha = 0.3f // Faktor smoothing EMA
-                            val currentDetections = latestDetections
-                            val currentFrameWidth = latestFrameWidth.coerceAtLeast(1)
-                            val currentFrameHeight = latestFrameHeight.coerceAtLeast(1)
+                    // Pre-alokasi array hasil: setiap elemen adalah Pair<text, color>
+                    // Ukuran tetap sama per frame, tidak ada alokasi tambahan di dalam loop.
+                    val cellTexts  = Array(tofData.size) { "" }
+                    val cellColors = IntArray(tofData.size) { colorInvalidCell }
 
-                            for (i in tofData.indices) {
-                                if (i >= tofViews.size) continue // Pengaman batas index array
-                                
-                                val row = i / currentTofMode
-                                val col = i % currentTofMode
-                                var isYoloCentroid = false
-                                
-                                for (det in currentDetections) {
-                                    val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
-                                    val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / currentFrameWidth)
-                                    val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
-                                    
-                                    val ycRaw = (det.boundingBox.top + det.boundingBox.bottom) / 2f
-                                    val yc = ycRaw * (SpatialMappingUtils.H_CAM.toFloat() / currentFrameHeight)
-                                    val r = SpatialMappingUtils.mapToTofRow(yc, currentTofMode)
-                                    
-                                    if (j == col && r == row) {
-                                        isYoloCentroid = true
-                                        break
-                                    }
-                                }
+                    for (i in tofData.indices) {
+                        val row = i / mode
+                        val col = i % mode
 
-                                val rawDistance = tofData[i]
+                        // Centroid check: apakah sel ini bertumpang-tindih dengan deteksi YOLO?
+                        var isYoloCentroid = false
+                        for (det in currentDetections) {
+                            val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
+                            val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / currentFrameWidth)
+                            val j = SpatialMappingUtils.mapToTofColumn(xc, mode)
+                            val ycRaw = (det.boundingBox.top + det.boundingBox.bottom) / 2f
+                            val yc = ycRaw * (SpatialMappingUtils.H_CAM.toFloat() / currentFrameHeight)
+                            val r = SpatialMappingUtils.mapToTofRow(yc, mode)
+                            if (j == col && r == row) { isYoloCentroid = true; break }
+                        }
 
-                                if (rawDistance <= 0) {
-                                    val remaining = holdoverCount!![i]
-                                    if (remaining > 0) {
-                                        holdoverCount!![i] = remaining - 1
-                                        val held = smoothedTofData!![i].toInt()
-                                        if (held > 0) {
-                                            tofViews[i].text = "$held"
-                                            var color = getColorForDistance(held, dimmed = true)
-                                            if (isYoloCentroid) {
-                                                color = androidx.core.graphics.ColorUtils.blendARGB(color, android.graphics.Color.BLUE, 0.4f)
-                                            }
-                                            tofViews[i].setBackgroundColor(color)
-                                        }
-                                    } else {
-                                        tofViews[i].text = "—"
-                                        tofViews[i].setBackgroundColor(colorInvalidCell)
-                                        smoothedTofData!![i] = 0f
-                                    }
-                                } else {
-                                    holdoverCount!![i] = HOLDOVER_FRAMES
-
-                                    if (smoothedTofData!![i] <= 0f) {
-                                        smoothedTofData!![i] = rawDistance.toFloat()
-                                    } else {
-                                        smoothedTofData!![i] = alpha * rawDistance + (1.0f - alpha) * smoothedTofData!![i]
-                                    }
-
-                                    val smoothedDistance = smoothedTofData!![i].toInt()
-                                    tofViews[i].text = "$smoothedDistance"
-                                    var color = getColorForDistance(smoothedDistance)
+                        val rawDistance = tofData[i]
+                        if (rawDistance <= 0) {
+                            val remaining = holdover[i]
+                            if (remaining > 0) {
+                                holdover[i] = remaining - 1
+                                val held = smoothed[i].toInt()
+                                if (held > 0) {
+                                    cellTexts[i] = "$held"
+                                    var color = getColorForDistance(held, dimmed = true)
                                     if (isYoloCentroid) {
                                         color = androidx.core.graphics.ColorUtils.blendARGB(color, android.graphics.Color.BLUE, 0.4f)
                                     }
-                                    tofViews[i].setBackgroundColor(color)
+                                    cellColors[i] = color
                                 }
+                                // else: tetap colorInvalidCell (default)
+                            } else {
+                                cellTexts[i] = "—"
+                                smoothed[i] = 0f
+                                // cellColors[i] sudah colorInvalidCell
+                            }
+                        } else {
+                            holdover[i] = HOLDOVER_FRAMES
+                            smoothed[i] = if (smoothed[i] <= 0f) rawDistance.toFloat()
+                                          else alpha * rawDistance + (1f - alpha) * smoothed[i]
+                            val d = smoothed[i].toInt()
+                            cellTexts[i] = "$d"
+                            var color = getColorForDistance(d)
+                            if (isYoloCentroid) {
+                                color = androidx.core.graphics.ColorUtils.blendARGB(color, android.graphics.Color.BLUE, 0.4f)
+                            }
+                            cellColors[i] = color
+                        }
+                    }
+
+                    // ── Fase 3: RENDER di Main thread — hanya assignment View, nol kalkulasi ──
+                    withContext(Dispatchers.Main) {
+                        if (!isDestroyed && !isFinishing && !isAkhiring && ::tofViews.isInitialized) {
+                            for (i in cellTexts.indices) {
+                                if (i >= tofViews.size) break
+                                tofViews[i].text = cellTexts[i]
+                                tofViews[i].setBackgroundColor(cellColors[i])
                             }
                         }
                     }   // end withContext(Dispatchers.Main)
