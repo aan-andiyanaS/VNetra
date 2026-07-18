@@ -36,8 +36,9 @@ import com.airi.vnetra.util.TtsAlertManager
 import com.airi.vnetra.util.SpatialMappingUtils
 import com.airi.vnetra.util.SessionManager
 import com.airi.vnetra.util.TerrainDetector
-import com.airi.vnetra.util.CameraDepthEstimator
 import com.airi.vnetra.util.SimpleTracker
+import com.airi.vnetra.util.TtcManager
+import com.airi.vnetra.util.TtcStatus
 import com.airi.vnetra.util.DatasetManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -155,6 +156,7 @@ class CameraStreamActivity : AppCompatActivity() {
     // AI Detector
     private var yoloDetector: YoloDetector? = null
     private val tracker = SimpleTracker(maxAge = 5)
+    private val ttcManager = TtcManager()
     @Volatile private var latestDetections: List<DetectionResult> = emptyList()
     @Volatile private var latestFrameWidth: Int = 640
     @Volatile private var latestFrameHeight: Int = 480
@@ -551,6 +553,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                             // 1. Lakukan proses deteksi di background
                                             val rawResults = detector.detect(bitmap)
                                             val trackedResults = tracker.process(rawResults)
+                                            ttcManager.cleanup(trackedResults.map { it.trackId }.toSet())
                                             latestDetections = trackedResults
                                             triggerInstantYoloTts(trackedResults)
                                             
@@ -861,14 +864,9 @@ class CameraStreamActivity : AppCompatActivity() {
                                     resolution = currentTofMode
                                 )
                                 
-                                // Jika ToF gagal membaca jarak (D_MAX), gunakan estimasi kamera monokuler sebagai cadangan
+                                // Jika ToF gagal membaca jarak (D_MAX), abaikan jarak statis karena kita pakai Formula I instan
                                 if (dObj >= TofDepthEstimator.D_MAX) {
-                                    dObj = CameraDepthEstimator.estimateDistance(
-                                        className   = det.className,
-                                        boundingBox = det.boundingBox,
-                                        imageHeight = latestFrameHeight,
-                                        thetaDeg    = thetaDeg
-                                    )
+                                    // D_MAX dibiarkan agar tidak memicu alarm palsu di ToF loop
                                 }
                                 
                                 // Catatan: ttsAlertManager.process untuk YOLO kini ditangani penuh secara instan
@@ -1100,17 +1098,27 @@ class CameraStreamActivity : AppCompatActivity() {
                     thetaDeg   = thetaDeg,
                     resolution = currentTofMode
                 )
-                // Jika ToF gagal membaca jarak (D_MAX), gunakan estimasi kamera monokuler
+                // --- FORMULA I: TTC Multi-Dimensional ---
+                val rawDObj = if (dObj >= TofDepthEstimator.D_MAX) -1 else dObj
+                val ttcStatus = ttcManager.evaluateThreat(det, rawDObj)
+                
                 if (dObj >= TofDepthEstimator.D_MAX) {
-                    dObj = CameraDepthEstimator.estimateDistance(
-                        className   = det.className,
-                        boundingBox = det.boundingBox,
-                        imageHeight = latestFrameHeight,
-                        thetaDeg    = thetaDeg
-                    )
-                    Log.v("YOLO_TTS", "-> ToF Gagal, fallback kamera dObj=$dObj")
+                    if (ttcStatus == TtcStatus.IMMINENT) {
+                        dObj = 500 // Paksa masuk zona bahaya agar TTS langsung teriak
+                        Log.v("YOLO_TTS", "-> ToF Gagal, tapi TTC IMMINENT! Paksa dObj=500")
+                    } else if (ttcStatus == TtcStatus.PROBABLE) {
+                        dObj = 1000 // Zona waspada
+                        Log.v("YOLO_TTS", "-> ToF Gagal, TTC PROBABLE. Paksa dObj=1000")
+                    } else {
+                        Log.v("YOLO_TTS", "-> ToF Gagal, TTC POSSIBLE. Abaikan.")
+                    }
                 } else {
-                    Log.v("YOLO_TTS", "-> ToF Sukses di kolom $j: dObj=$dObj")
+                    if (ttcStatus == TtcStatus.IMMINENT && dObj > 1000) {
+                        dObj = 500
+                        Log.v("YOLO_TTS", "-> TTC Override! ToF $dObj tapi objek mendekat cepat, paksa dObj=500")
+                    } else {
+                        Log.v("YOLO_TTS", "-> ToF Sukses di kolom $j: dObj=$dObj")
+                    }
                 }
                 det to Triple(dObj, arahJam, det.className)
             }
@@ -1483,9 +1491,7 @@ class CameraStreamActivity : AppCompatActivity() {
         val numCells   = resolution * resolution
         val textSizeSp = if (resolution == 4) 11f else 7.5f
 
-        // Reset state EMA saat resolusi berubah agar tidak ada data lama dari mode sebelumnya.
-        smoothedTofData = null
-        holdoverCount   = null  // Reset holdover counter juga agar tidak ada counter stale
+        // Reset state EMA sudah ditangani di tofCollectJob secara lokal.
 
         // PENTING: Hapus semua view SEBELUM mengubah columnCount/rowCount.
         // Jika columnCount diubah dari 8→4 sementara 64 view dengan spec col=7 masih ada,

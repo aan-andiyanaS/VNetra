@@ -18,6 +18,7 @@ class SimpleTracker(
     private val iouThreshold: Float = 0.3f
 ) {
     data class Track(
+        val id: Int,
         var classId: Int,
         var className: String,
         var confidence: Float,
@@ -55,6 +56,7 @@ class SimpleTracker(
     }
 
     private val tracks = mutableListOf<Track>()
+    private var nextTrackId = 1
 
     fun process(detections: List<DetectionResult>): List<DetectionResult> {
         // 1. Prediksi lokasi baru untuk semua track yang ada berdasarkan kecepatan terakhir
@@ -90,6 +92,7 @@ class SimpleTracker(
         for (det in unmatchedDetections) {
             tracks.add(
                 Track(
+                    id = nextTrackId++,
                     classId = det.classId,
                     className = det.className,
                     confidence = det.confidence,
@@ -108,7 +111,8 @@ class SimpleTracker(
                 className = track.className,
                 // Beri sedikit pinalti confidence jika ini hanya hasil tebakan prediksi (missedFrames > 0)
                 confidence = if (track.missedFrames > 0) track.confidence * 0.8f else track.confidence,
-                boundingBox = RectF(track.boundingBox)
+                boundingBox = RectF(track.boundingBox),
+                trackId = track.id
             )
         }
     }

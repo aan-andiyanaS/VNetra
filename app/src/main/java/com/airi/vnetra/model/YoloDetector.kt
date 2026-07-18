@@ -18,7 +18,8 @@ data class DetectionResult(
     val classId: Int,
     val className: String,
     val confidence: Float,
-    val boundingBox: RectF
+    val boundingBox: RectF,
+    var trackId: Int = -1
 )
 
 enum class ModelStatus {
