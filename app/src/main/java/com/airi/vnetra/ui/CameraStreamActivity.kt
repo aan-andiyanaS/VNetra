@@ -40,6 +40,8 @@ import com.airi.vnetra.util.SimpleTracker
 import com.airi.vnetra.util.TtcManager
 import com.airi.vnetra.util.TtcStatus
 import com.airi.vnetra.util.DatasetManager
+import com.airi.vnetra.util.NavigationCoordinator
+import com.airi.vnetra.util.ToFGridRenderer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -131,6 +133,8 @@ class CameraStreamActivity : AppCompatActivity() {
 
     // ── TTS Alert Manager (P3.3) ────────────────
     private lateinit var ttsAlertManager: TtsAlertManager
+    private lateinit var navigationCoordinator: NavigationCoordinator
+    private lateinit var tofGridRenderer: ToFGridRenderer
 
     // ── Formula J — Terrain Detector (P6) ───────────────────────
     private val terrainDetector = TerrainDetector()
@@ -161,8 +165,7 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var latestFrameWidth: Int = 640
     @Volatile private var latestFrameHeight: Int = 480
     
-    // ADR-035: Debounce state for forward movement validation
-    private var movingForwardConsecutiveFrames = 0
+    // ADR-035: Debounce state for forward movement validation handled by NavigationCoordinator
     private val isInferencing = java.util.concurrent.atomic.AtomicBoolean(false)
 
     private val exitReceiver = object : android.content.BroadcastReceiver() {
@@ -216,6 +219,8 @@ class CameraStreamActivity : AppCompatActivity() {
         
         binding = ActivityCameraStreamBinding.inflate(layoutInflater)
         setContentView(binding.root)
+        
+        tofGridRenderer = ToFGridRenderer(this, binding.gridTof)
 
         // Set support action bar with the custom toolbar
         setSupportActionBar(binding.toolbar)
@@ -266,9 +271,9 @@ class CameraStreamActivity : AppCompatActivity() {
 
         setupBadgeSwipeGesture()
         setupClickListeners()
-        // Load mode tersimpan sebelum init grid
+        // Ambil saved mode ToF (default 8) lalu render grid
         currentTofMode = loadTofMode()
-        initTofGrid()
+        tofGridRenderer.initializeGrid(currentTofMode)
         updateTofModeButtons(currentTofMode)
         showStreamStateSafe(StreamState.CONNECTING)
 
@@ -279,6 +284,7 @@ class CameraStreamActivity : AppCompatActivity() {
         // Dipanggil di onCreate agar TTS punya cukup waktu 
         ttsAlertManager = TtsAlertManager(this)
         ttsAlertManager.initTts()
+        navigationCoordinator = NavigationCoordinator(ttsAlertManager, ttcManager)
 
         // Init YOLO Detector (Secara default akan mencoba GPU/NPU karena masalah library sudah diperbaiki)
         yoloDetector = YoloDetector(this)
@@ -555,7 +561,13 @@ class CameraStreamActivity : AppCompatActivity() {
                                             val trackedResults = tracker.process(rawResults)
                                             ttcManager.cleanup(trackedResults.map { it.trackId }.toSet())
                                             latestDetections = trackedResults
-                                            triggerInstantYoloTts(trackedResults)
+                                            navigationCoordinator.processInstantYoloTts(
+                                                detections = trackedResults,
+                                                tofData = latestTofData,
+                                                imuData = latestImuData,
+                                                frameWidth = bitmap.width,
+                                                tofMode = currentTofMode
+                                            )
                                             
                                             // 2. Jika berhasil, update UI di Main Thread
                                             withContext(Dispatchers.Main) {
@@ -697,20 +709,20 @@ class CameraStreamActivity : AppCompatActivity() {
                     // ── Fase 1: Guard resolusi berubah (perlu Main karena rebuildTofGrid adalah UI op) ──
                     val startSmooth = System.currentTimeMillis()
                     val tofViewSize = withContext(Dispatchers.Main) {
-                        if (!::tofViews.isInitialized) return@withContext -1
-                        if (tofData.size != tofViews.size) {
+                        if (!::tofGridRenderer.isInitialized) return@withContext -1
+                        if (tofData.size != tofGridRenderer.getGridSize()) {
                             val detectedMode = if (tofData.size == 16) 4 else 8
                             if (currentTofMode != detectedMode) {
                                 currentTofMode = detectedMode
                                 saveTofMode(detectedMode)
-                                rebuildTofGrid(detectedMode)
+                                tofGridRenderer.rebuildGrid(detectedMode)
                                 updateTofModeButtons(detectedMode)
                             }
                             localSmoothed = null // Reset smoothing array saat resolusi berubah
                             localHoldover = null
                             return@withContext -1 // Sinyal: skip frame ini
                         }
-                        tofViews.size
+                        tofGridRenderer.getGridSize()
                     }
                     if (tofViewSize < 0) {
                         pingTofSmooth = System.currentTimeMillis() - startSmooth
@@ -734,71 +746,20 @@ class CameraStreamActivity : AppCompatActivity() {
                     val currentFrameHeight = latestFrameHeight.coerceAtLeast(1)
                     val mode = currentTofMode
 
-                    // Pre-alokasi array hasil: setiap elemen adalah Pair<text, color>
-                    // Ukuran tetap sama per frame, tidak ada alokasi tambahan di dalam loop.
-                    val cellTexts  = Array(tofData.size) { "" }
-                    val cellColors = IntArray(tofData.size) { colorInvalidCell }
-
-                    for (i in tofData.indices) {
-                        val row = i / mode
-                        val col = i % mode
-
-                        // Centroid check: apakah sel ini bertumpang-tindih dengan deteksi YOLO?
-                        var isYoloCentroid = false
-                        for (det in currentDetections) {
-                            val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
-                            val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / currentFrameWidth)
-                            val j = SpatialMappingUtils.mapToTofColumn(xc, mode)
-                            val ycRaw = (det.boundingBox.top + det.boundingBox.bottom) / 2f
-                            val yc = ycRaw * (SpatialMappingUtils.H_CAM.toFloat() / currentFrameHeight)
-                            val r = SpatialMappingUtils.mapToTofRow(yc, mode)
-                            if (j == col && r == row) { isYoloCentroid = true; break }
-                        }
-
-                        val rawDistance = tofData[i]
-                        if (rawDistance <= 0) {
-                            val remaining = holdover[i]
-                            if (remaining > 0) {
-                                holdover[i] = remaining - 1
-                                val held = smoothed[i].toInt()
-                                if (held > 0) {
-                                    cellTexts[i] = "$held"
-                                    var color = getColorForDistance(held, dimmed = true)
-                                    if (isYoloCentroid) {
-                                        color = androidx.core.graphics.ColorUtils.blendARGB(color, android.graphics.Color.BLUE, 0.4f)
-                                    }
-                                    cellColors[i] = color
-                                }
-                                // else: tetap colorInvalidCell (default)
-                            } else {
-                                cellTexts[i] = "—"
-                                smoothed[i] = 0f
-                                // cellColors[i] sudah colorInvalidCell
-                            }
-                        } else {
-                            holdover[i] = HOLDOVER_FRAMES
-                            smoothed[i] = if (smoothed[i] <= 0f) rawDistance.toFloat()
-                                          else alpha * rawDistance + (1f - alpha) * smoothed[i]
-                            val d = smoothed[i].toInt()
-                            cellTexts[i] = "$d"
-                            var color = getColorForDistance(d)
-                            if (isYoloCentroid) {
-                                color = androidx.core.graphics.ColorUtils.blendARGB(color, android.graphics.Color.BLUE, 0.4f)
-                            }
-                            cellColors[i] = color
+                    withContext(Dispatchers.Main) {
+                        if (!isDestroyed && !isFinishing && !isAkhiring && ::tofGridRenderer.isInitialized) {
+                            tofGridRenderer.updateGrid(
+                                tofData = tofData,
+                                mode = mode,
+                                smoothed = smoothed,
+                                holdover = holdover,
+                                currentDetections = currentDetections,
+                                currentFrameWidth = currentFrameWidth,
+                                currentFrameHeight = currentFrameHeight,
+                                alpha = alpha
+                            )
                         }
                     }
-
-                    // ── Fase 3: RENDER di Main thread — hanya assignment View, nol kalkulasi ──
-                    withContext(Dispatchers.Main) {
-                        if (!isDestroyed && !isFinishing && !isAkhiring && ::tofViews.isInitialized) {
-                            for (i in cellTexts.indices) {
-                                if (i >= tofViews.size) break
-                                tofViews[i].text = cellTexts[i]
-                                tofViews[i].setBackgroundColor(cellColors[i])
-                            }
-                        }
-                    }   // end withContext(Dispatchers.Main)
                     pingTofSmooth = System.currentTimeMillis() - startSmooth
 
                     val imuSnap  = latestImuData
@@ -809,28 +770,11 @@ class CameraStreamActivity : AppCompatActivity() {
                     var closeThreatExists = false
                     var allClear = true
 
-                    val pitchRate = latestImuData?.getOrElse(2) { 0f } ?: 0f
-                    val rollRate = latestImuData?.getOrElse(3) { 0f } ?: 0f
+                    navigationCoordinator.updateMovementState(latestImuData)
+                    val isMovingForward = navigationCoordinator.movingForwardConsecutiveFrames >= 3
                     val yawRate = latestImuData?.getOrElse(4) { 0f } ?: 0f
-                    val aLinMag = latestImuData?.getOrElse(5) { 0f } ?: 0f
-                    
-                    val isTurning = kotlin.math.abs(yawRate) > 30f // deg/s
-                    
-                    // ADR-035: Guard against false positive walking when head is rotating (nodding/turning)
-                    // Sensitivitas dinaikkan ke 5f agar "nodding" pelan (yang menimbulkan akselerasi sentripetal)
-                    // terdeteksi sebagai rotasi kepala dan bukan langkah kaki.
-                    val isHeadRotating = kotlin.math.abs(pitchRate) > 5f || kotlin.math.abs(yawRate) > 5f || kotlin.math.abs(rollRate) > 5f
-                    
-                    val isAccelerating = (aLinMag > 2.94f) && !isHeadRotating    // m/s^2 (a_th=0.3g)
-                    
-                    // Temporal Debounce: Akselerasi harus bertahan selama beberapa frame beruntun (misal 3 frame)
-                    // untuk membedakan antara entakan bocor sesaat dan gaya melangkah yang konstan.
-                    if (isAccelerating) {
-                        movingForwardConsecutiveFrames++
-                    } else {
-                        movingForwardConsecutiveFrames = 0
-                    }
-                    val isMovingForward = movingForwardConsecutiveFrames >= 3
+                    val isTurning = kotlin.math.abs(yawRate) > 30f
+                    val isHeadRotating = navigationCoordinator.isHeadRotating(latestImuData, 5f)
 
                     // ADR-035: Auto-Unmute (Mute Cerdas)
                     if (isMovingForward && ::ttsAlertManager.isInitialized && ttsAlertManager.isMuted) {
@@ -1045,134 +989,7 @@ class CameraStreamActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Memproses peringatan TTS untuk YOLO secara instan segera setelah inferensi AI selesai.
-     * Hal ini memangkas delay ToF Loop (100ms) untuk objek YOLO.
-     */
-    private fun triggerInstantYoloTts(detections: List<DetectionResult>) {
-        if (detections.isEmpty() || !::ttsAlertManager.isInitialized) return
-        val tofData = latestTofData ?: return
-        val imuSnap = latestImuData
-        val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
-        val aLinMag = imuSnap?.getOrElse(5) { 0f } ?: 0f
-        
-        // ADR-035: Jika kepala sedang berotasi, lewati seluruh pemrosesan YOLO TTS.
-        // Saat kepala berputar, kamera ikut berputar dan YOLO mendeteksi objek baru
-        // yang masuk ke frame — setiap objek baru ini (!alerted) akan memicu TTS spam.
-        val pitchRateSnap = imuSnap?.getOrElse(2) { 0f } ?: 0f
-        val rollRateSnap  = imuSnap?.getOrElse(3) { 0f } ?: 0f
-        val yawRateSnap   = imuSnap?.getOrElse(4) { 0f } ?: 0f
-        val isHeadRotatingNow = kotlin.math.abs(pitchRateSnap) > 10f ||
-            kotlin.math.abs(yawRateSnap) > 10f ||
-            kotlin.math.abs(rollRateSnap) > 10f
-            
-        if (isHeadRotatingNow) {
-            Log.v("YOLO_TTS", "Blocked by isHeadRotatingNow: pitch=$pitchRateSnap yaw=$yawRateSnap roll=$rollRateSnap")
-            return
-        }
-        
-        // ADR-035: Gunakan state debounce kelas (movingForwardConsecutiveFrames) agar konsisten
-        // dengan perhitungan di tofCollectJob. JANGAN hitung ulang secara instan di sini
-        // karena tidak ada filter isHeadRotating dan temporal debounce.
-        val isMovingForward = movingForwardConsecutiveFrames >= 3
-        val thetaDeg = rawTheta - 20f
-        val frameWidth = latestFrameWidth
 
-        // 1. Hitung dObj dan saring deteksi yang berada di zona aktif ToF
-        val mappedDetections = detections.mapNotNull { det ->
-            // --- FORMULA B ---
-            val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
-            val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / frameWidth.toFloat())
-            
-            Log.v("YOLO_TTS", "Deteksi: ${det.className}, BBox: left=${det.boundingBox.left}, right=${det.boundingBox.right}, xcRaw=$xcRaw, xcNorm=$xc")
-            
-            if (!SpatialMappingUtils.isInTofZone(xc)) {
-                Log.v("YOLO_TTS", "-> Ditolak: ${det.className} di luar zona ToF (xc=$xc)")
-                null
-            } else {
-                val arahJam = SpatialMappingUtils.mapToClockDirection(xc)
-                val j = SpatialMappingUtils.mapToTofColumn(xc, currentTofMode)
-                var dObj = TofDepthEstimator.calculate(
-                    tofData    = tofData,
-                    j          = j,
-                    thetaDeg   = thetaDeg,
-                    resolution = currentTofMode
-                )
-                // --- FORMULA I: TTC Multi-Dimensional ---
-                val rawDObj = if (dObj >= TofDepthEstimator.D_MAX) -1 else dObj
-                val ttcStatus = ttcManager.evaluateThreat(det, rawDObj)
-                
-                if (dObj >= TofDepthEstimator.D_MAX) {
-                    if (ttcStatus == TtcStatus.IMMINENT) {
-                        dObj = 500 // Paksa masuk zona bahaya agar TTS langsung teriak
-                        Log.v("YOLO_TTS", "-> ToF Gagal, tapi TTC IMMINENT! Paksa dObj=500")
-                    } else if (ttcStatus == TtcStatus.PROBABLE) {
-                        dObj = 1000 // Zona waspada
-                        Log.v("YOLO_TTS", "-> ToF Gagal, TTC PROBABLE. Paksa dObj=1000")
-                    } else {
-                        Log.v("YOLO_TTS", "-> ToF Gagal, TTC POSSIBLE. Abaikan.")
-                    }
-                } else {
-                    if (ttcStatus == TtcStatus.IMMINENT && dObj > 1000) {
-                        dObj = 500
-                        Log.v("YOLO_TTS", "-> TTC Override! ToF $dObj tapi objek mendekat cepat, paksa dObj=500")
-                    } else {
-                        Log.v("YOLO_TTS", "-> ToF Sukses di kolom $j: dObj=$dObj")
-                    }
-                }
-                det to Triple(dObj, arahJam, det.className)
-            }
-        }
-
-        // 2. Kelompokkan per classId dan pilih hanya objek terdekat per kelas (mencegah spamming multi-instance)
-        val closestDetections = mappedDetections
-            .groupBy { it.first.classId }
-            .mapValues { entry -> entry.value.minByOrNull { it.second.first }!! }
-
-        val activeClasses = closestDetections.keys
-        val urgentAlerts = mutableListOf<String>()
-        val infoAlerts = mutableListOf<String>()
-
-        // 3. Proses deteksi terdekat untuk one-shot alert
-        for ((classId, detPair) in closestDetections) {
-            val dObj = detPair.second.first
-            val arahJam = detPair.second.second
-            val label = detPair.second.third
-            val alertMsg = ttsAlertManager.process(
-                trackingId     = classId,
-                dObj           = dObj,
-                clockDirection = arahJam,
-                objectLabel    = label,
-                isMovingForward = isMovingForward,
-                imuData         = latestImuData
-            )
-            if (alertMsg != null) {
-                val isPaving = label in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-                val isPeripheral = arahJam == 10 || arahJam == 2
-                
-                // Paving dan objek di pinggir (jam 10 / jam 2) hanya sebagai informasi (antre)
-                if (isPaving || isPeripheral) {
-                    infoAlerts.add(alertMsg)
-                } else {
-                    // Objek berbahaya di area depan (jam 11, 12, 1) memotong suara
-                    urgentAlerts.add(alertMsg)
-                }
-            }
-        }
-
-        // 4. Suarakan peringatan (pisahkan prioritas)
-        if (urgentAlerts.isNotEmpty()) {
-            val combinedMsg = urgentAlerts.joinToString(", dan ")
-            ttsAlertManager.speak(combinedMsg) // QUEUE_FLUSH (Prioritas Tinggi, memotong suara lain)
-        }
-        if (infoAlerts.isNotEmpty()) {
-            val combinedMsg = infoAlerts.joinToString(", dan ")
-            ttsAlertManager.speakAdd(combinedMsg) // QUEUE_ADD (Informasi, masuk antrean)
-        }
-
-        // 5. Bersihkan berkala flag untuk kelas yang tidak terdeteksi aktif
-        ttsAlertManager.postProcessDetections(activeClasses)
-    }
 
     // ──────────────────────────────────────────────────────────────────────────
     // Akhiri Proses
@@ -1367,41 +1184,14 @@ class CameraStreamActivity : AppCompatActivity() {
                 binding.tvImuAccel.text = "Accel: —"
                 binding.tvLatencyMonitor.text = "=== SYSTEM PING MONITOR ===\nCam Decode : —\nToF Total  : —\n---------------------------\n► MAX BOTTLENECK : —\n\n[Sequential ToF Details]\n├─ Smoothing : —\n├─ Formula E/H : —\n└─ Terrain J : —\n==========================="
                 binding.ivCameraFrame.setImageResource(android.R.color.transparent)
-                if (::tofViews.isInitialized) {
-                    tofViews.forEach {
-                        it.text = "—"
-                        it.setBackgroundColor(colorInvalidCell)  // gunakan konstanta, bukan parseColor
-                    }
+                if (::tofGridRenderer.isInitialized) {
+                    tofGridRenderer.clearGrid()
                 }
             }
         }
     }
 
-    /**
-     * Mengembalikan warna gradasi semi-transparan berdasarkan jarak ToF.
-     * Jarak <= 200mm = Merah penuh.
-     * Jarak >= 2000mm = Hijau penuh.
-     * Jarak di antaranya = Gradasi (Merah -> Oranye -> Kuning -> Hijau).
-     *
-     * @param dimmed Jika true, warna lebih transparan (alpha 48 ~19%) untuk menandai
-     *               bahwa nilai ini sedang dalam masa holdover (data terakhir yang valid,
-     *               bukan data segar). Normal alpha = 96 (~37%).
-     *
-     * OPTIMASI: gunakan hsvTemp (pre-allocated FloatArray) untuk menghindari
-     * alokasi objek baru di setiap cell setiap frame.
-     */
-    private fun getColorForDistance(distance: Int, dimmed: Boolean = false): Int {
-        if (distance <= 0) return colorInvalidCell
-        val minDistance = 200f
-        val maxDistance = 2000f
-        val clampedDistance = distance.coerceIn(minDistance.toInt(), maxDistance.toInt()).toFloat()
-        val ratio = (clampedDistance - minDistance) / (maxDistance - minDistance)
-        hsvTemp[0] = ratio * 120f // 0f (Merah) s.d 120f (Hijau) — hsvTemp[1] & [2] sudah 1f
-        // Alpha normal: 96 (~37% opacity) agar grid tidak menutupi gambar kamera
-        // Alpha dimmed: 48 (~19% opacity) sebagai petunjuk visual bahwa data sedang holdover
-        val alpha = if (dimmed) 48 else 96
-        return android.graphics.Color.HSVToColor(alpha, hsvTemp)
-    }
+
 
     private var isFullscreen = false
     private fun toggleFullscreen() {
@@ -1434,7 +1224,7 @@ class CameraStreamActivity : AppCompatActivity() {
         // Kirim command ke firmware via service
         streamService?.sendTofModeCommand(resolution)
         // Rebuild grid lokal agar UI langsung responsif
-        rebuildTofGrid(resolution)
+        tofGridRenderer.rebuildGrid(resolution)
         updateTofModeButtons(resolution)
         Toast.makeText(this,
             "Mode ToF: ${resolution}x${resolution}" +
@@ -1482,69 +1272,7 @@ class CameraStreamActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Hapus semua cell lama dari gridTof dan buat ulang sesuai resolusi baru.
-     * @param resolution 4 = 4x4 (16 cell), 8 = 8x8 (64 cell)
-     */
-    private fun rebuildTofGrid(resolution: Int) {
-        if (isDestroyed || isFinishing) return
-        val numCells   = resolution * resolution
-        val textSizeSp = if (resolution == 4) 11f else 7.5f
 
-        // Reset state EMA sudah ditangani di tofCollectJob secara lokal.
-
-        // PENTING: Hapus semua view SEBELUM mengubah columnCount/rowCount.
-        // Jika columnCount diubah dari 8→4 sementara 64 view dengan spec col=7 masih ada,
-        // GridLayout akan crash di layout pass Choreographer (ArrayIndexOutOfBounds internal Android).
-        binding.gridTof.removeAllViews()
-        binding.gridTof.columnCount = resolution
-        binding.gridTof.rowCount    = resolution
-
-        // Buat cell baru
-        tofViews = Array(numCells) { i ->
-            val row = i / resolution
-            val col = i % resolution
-            android.widget.TextView(this).apply {
-                layoutParams = android.widget.GridLayout.LayoutParams(
-                    android.widget.GridLayout.spec(row, 1f),
-                    android.widget.GridLayout.spec(col, 1f)
-                ).apply {
-                    width  = 0
-                    height = 0
-                    setMargins(1, 1, 1, 1)
-                }
-                gravity = android.view.Gravity.CENTER
-                setTextColor(android.graphics.Color.WHITE)
-                textSize = textSizeSp
-                text     = "—"
-                setBackgroundColor(colorInvalidCell)  // gunakan konstanta, bukan parseColor
-            }.also { binding.gridTof.addView(it) }
-        }
-
-        // Reset translasi dan re-apply offset agar overlay ToF sejajar dengan kamera.
-        //
-        // FoV Vertikal:
-        //   - VL53L5CX (ToF)  : 45°  → ±22.5° dari titik tengah
-        //   - OV2640 (Kamera) : 41°  → ±20.5° dari titik tengah
-        //
-        // Kamera hanya menangkap 41/45 ≈ 91.1% dari rentang vertikal ToF.
-        // Selisih FoV di atas/bawah masing-masing = (45° - 41°) / 2 = 2°.
-        // Proporsi offset atas = 2° / 45° ≈ 0.0444 dari tinggi grid.
-        //
-        // Geser grid ke atas sebesar proporsi tersebut sehingga bagian atas ToF
-        // yang "melampaui" bingkai kamera tersembunyi di luar tampilan.
-        val TOF_FOV_V    = 45f
-        val CAMERA_FOV_V = 41f
-        val overlapFraction = (TOF_FOV_V - CAMERA_FOV_V) / 2f / TOF_FOV_V  // ≈ 0.0444
-        binding.gridTof.post {
-            binding.gridTof.translationY = -(binding.gridTof.height.toFloat() * overlapFraction)
-        }
-    }
-
-    private fun initTofGrid() {
-        // Bangun grid sesuai mode yang tersimpan
-        rebuildTofGrid(currentTofMode)
-    }
 
     private fun updateUpperViewsMargins() {
         if (!::binding.isInitialized) return
