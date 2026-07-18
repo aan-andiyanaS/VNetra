@@ -102,90 +102,58 @@ class YoloDetector(
 
             val supportNpu = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1
 
-            var targetDelegate = delegateMode
-            var finalModelName = ""
-            
-            if (targetDelegate == DelegateMode.AUTO) {
-                // Logika Mode AUTO: Prioritas NPU(INT8) > GPU(FP32) > CPU
-                if (hasInt8 && supportNpu && modelPreference != ModelPreference.FP32) {
-                    targetDelegate = DelegateMode.NPU
-                    finalModelName = MODEL_INT8
-                    Log.i(TAG, "Mode AUTO: Memprioritaskan NPU dengan model INT8.")
-                } else if (hasFp32 && modelPreference != ModelPreference.INT8) {
-                    targetDelegate = DelegateMode.GPU
-                    finalModelName = MODEL_FP32
-                    Log.i(TAG, "Mode AUTO: Memprioritaskan GPU dengan model FP32.")
-                } else {
-                    targetDelegate = DelegateMode.CPU
-                    finalModelName = if (hasInt8 && modelPreference != ModelPreference.FP32) MODEL_INT8 else (if (hasFp32) MODEL_FP32 else MODEL_INT8)
-                    Log.i(TAG, "Mode AUTO: Fallback ke CPU dengan model $finalModelName.")
-                }
-            } else {
-                // Logika Mode MANUAL (NPU / GPU / CPU sudah ditentukan)
-                // 1. Pemilihan Model (Mempertimbangkan preferensi manual pengguna)
-                finalModelName = if (modelStatus == ModelStatus.FULL) {
-                    if (modelPreference == ModelPreference.FP32) {
-                        Log.i(TAG, "Kondisi FULL Model: Pengguna memaksa pilihan FP32.")
-                        MODEL_FP32
-                    } else if (modelPreference == ModelPreference.INT8) {
-                        Log.i(TAG, "Kondisi FULL Model: Pengguna memaksa pilihan INT8.")
-                        MODEL_INT8
-                    } else {
-                        // Jika preferensi model AUTO, pilih berdasarkan hardware
-                        if (targetDelegate == DelegateMode.NPU || targetDelegate == DelegateMode.CPU) {
-                            Log.i(TAG, "Kondisi FULL Model: Mengutamakan INT8 karena eksekutor adalah $targetDelegate.")
-                            MODEL_INT8
-                        } else {
-                            Log.i(TAG, "Kondisi FULL Model: Mengutamakan FP32 karena eksekutor adalah GPU.")
-                            MODEL_FP32
-                        }
-                    }
-                } else {
-                    if (hasFp32) MODEL_FP32 else MODEL_INT8
-                }
-
-                // 2. Evaluasi akhir Hardware vs Model yang terpilih
-                if (targetDelegate == DelegateMode.GPU && finalModelName == MODEL_INT8) {
-                    Log.w(TAG, "GPU tidak bisa dipilih untuk model INT8. Fallback ke NPU/CPU.")
-                    targetDelegate = if (supportNpu) DelegateMode.NPU else DelegateMode.CPU
-                }
-
-                if (targetDelegate == DelegateMode.NPU && !supportNpu) {
-                    Log.w(TAG, "NPU dipilih tetapi API < 27. Fallback ke GPU/CPU.")
-                    targetDelegate = if (finalModelName == MODEL_FP32) DelegateMode.GPU else DelegateMode.CPU
-                }
-            }
-
-            // 4. Menerapkan opsi TFLite sesuai target delegate akhir
-            activeDelegate = targetDelegate
-            when (targetDelegate) {
-                DelegateMode.NPU -> {
-                    options.setUseNNAPI(true)
-                    Log.i(TAG, "Menggunakan NPU (NNAPI) Delegate dengan model $finalModelName.")
-                }
-                DelegateMode.GPU -> {
-                    try {
-                        gpuDelegate = GpuDelegate()
-                        options.addDelegate(gpuDelegate)
-                        Log.i(TAG, "Menggunakan GPU Delegate dengan model $finalModelName.")
-                    } catch (e: Throwable) {
-                        Log.w(TAG, "Gagal inisialisasi GPU Delegate: ${e.message}. Fallback ke CPU.")
-                        options.setNumThreads(4)
-                        activeDelegate = DelegateMode.CPU
-                    }
-                }
-                DelegateMode.CPU -> {
-                    Log.i(TAG, "Menggunakan CPU Delegate (4 threads) dengan model $finalModelName.")
-                    options.setNumThreads(4)
-                }
-                DelegateMode.AUTO -> {
-                    // Sudah di-handle di atas (diubah ke GPU atau CPU). Tidak akan pernah tereksekusi di sini.
-                }
-            }
-
+            val finalModelName = if (hasFp32) MODEL_FP32 else MODEL_INT8
             val modelBuffer = loadModelFile(finalModelName)
-            interpreter = Interpreter(modelBuffer, options)
-            Log.i(TAG, "Loaded model $finalModelName successfully.")
+
+            var delegateSuccess = false
+            
+            // Logika Fallback Cerdas yang lebih ketat:
+            // - Jika INT8: NPU sangat optimal -> NPU, lalu CPU (GPU tidak mendukung INT8 murni)
+            // - Jika FP32: GPU sangat optimal -> GPU, lalu CPU (NPU kurang efisien untuk FP32)
+            val fallbackOrder = if (finalModelName == MODEL_INT8) {
+                listOf(DelegateMode.NPU, DelegateMode.CPU)
+            } else {
+                listOf(DelegateMode.GPU, DelegateMode.CPU)
+            }
+
+            for (delegate in fallbackOrder) {
+                try {
+                    when (delegate) {
+                        DelegateMode.NPU -> {
+                            if (!supportNpu) continue
+                            options.setUseNNAPI(true)
+                            activeDelegate = DelegateMode.NPU
+                        }
+                        DelegateMode.GPU -> {
+                            gpuDelegate = GpuDelegate()
+                            options.addDelegate(gpuDelegate)
+                            activeDelegate = DelegateMode.GPU
+                        }
+                        DelegateMode.CPU -> {
+                            options.setNumThreads(4)
+                            activeDelegate = DelegateMode.CPU
+                        }
+                        else -> continue
+                    }
+
+                    interpreter = Interpreter(modelBuffer, options)
+                    delegateSuccess = true
+                    Log.i(TAG, "Berhasil inisialisasi model $finalModelName dengan delegate $activeDelegate")
+                    break // Berhasil, keluar dari loop fallback
+                } catch (e: Throwable) {
+                    Log.w(TAG, "Gagal inisialisasi $delegate: ${e.message}. Mencoba fallback selanjutnya...")
+                    // Bersihkan delegate yang gagal
+                    gpuDelegate?.close()
+                    gpuDelegate = null
+                    options.setUseNNAPI(false)
+                }
+            }
+
+            if (!delegateSuccess) {
+                Log.e(TAG, "Semua percobaan delegate gagal!")
+                modelStatus = ModelStatus.NONE
+                return
+            }
 
             val inputTensor = interpreter?.getInputTensor(0)
             Log.i(TAG, "Input Tensor: DataType=${inputTensor?.dataType()}, Shape=${inputTensor?.shape()?.contentToString()}")
@@ -196,9 +164,8 @@ class YoloDetector(
             
             if (shape != null && shape.size == 3) {
                 // shape could be [1, boxes, num_classes+4] OR [1, num_classes+4, boxes]
-                // We know output boxes is usually large (e.g. 8400). Number of classes+4 is small (e.g. 25, 84).
                 if (shape[1] > shape[2]) {
-                    // Transposed: [1, 8400, classes+4]
+                    // Transposed
                     dynamicOutputBoxes = shape[1]
                     val coordsAndClasses = shape[2]
                     dynamicNumClasses = coordsAndClasses - 4
@@ -206,7 +173,7 @@ class YoloDetector(
                     outputBufferTransposed = Array(1) { Array(dynamicOutputBoxes) { FloatArray(coordsAndClasses) } }
                     Log.i(TAG, "Model uses transposed output shape: [1, $dynamicOutputBoxes, $coordsAndClasses] ($dynamicNumClasses classes)")
                 } else {
-                    // Standard: [1, classes+4, 8400]
+                    // Standard
                     dynamicOutputBoxes = shape[2]
                     val coordsAndClasses = shape[1]
                     dynamicNumClasses = coordsAndClasses - 4
