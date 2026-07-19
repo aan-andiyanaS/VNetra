@@ -143,6 +143,7 @@ Nilai-nilai tetap yang ditentukan oleh spesifikasi hardware. Seluruh formula men
 | $\Delta A_{norm}$ | 50 | % | **[Formula I.v2]** Nilai normalisasi area score; pertumbuhan $\ge 50\%$ → score = 1.0 |
 | $TTC_{HIGH}$ | 0.75 | — | **[Formula I.v2]** Threshold bahaya TTC tinggi |
 | $TTC_{MID}$ | 0.40 | — | **[Formula I.v2]** Threshold bahaya TTC menengah |
+| $drift_{norm}$ | 60 | px | **[Formula I.v3]** Normalisasi pergeseran lateral centroid; dipilih = $R_{col}$ (lebar 1 kolom ToF) agar threshold bermakna secara fisik — geser sejauh 1 kolom ToF = $drift\_score = 1.0$ |
 | $\Delta z_{step}$ | 500 | mm | **[Formula J.v2]** Ambang gradien vertikal untuk mengklasifikasikan step/lubang |
 | $\sigma_{col,th}$ | 200 | mm | **[Formula J.v2]** Threshold standar deviasi per kolom untuk deteksi anomali lokal |
 | $edge_{th}$ | 300 | mm | **[Formula J.v2]** Threshold sharpness tepi vertikal (tajam = cliff/obstacle) |
@@ -1785,7 +1786,33 @@ $$\boxed{\delta_I^{\text{pool}} = \begin{cases}
 - **PROBABLE** ($0.40$-$0.75$): Kirim ke Formula G **dan H** sebagai *confirmation signal*. Formula G membuat keputusan final berdasarkan $d_{obj}$ dan $T$; Formula H mengecek kondisi objek statis.
 - **POSSIBLE** ($\le 0.40$): Silent — catat untuk analisis, tidak menghasilkan TTS.
 
-**Domain:** $\text{TTC\_score}^{(i)}, \text{TTC\_weighted}^{(i)} \in [0, 1]$, $\delta_I^{\text{pool}} \in \{\text{IMMINENT, PROBABLE, POSSIBLE}\}$
+**I.8 — Lateral Drift Guard (BARU v9.5):**
+
+Kendaraan yang hanya *melintas* di jalur berbeda (bukan menabrak) memiliki pusat bounding box ($x_c$) yang bergeser lateral secara konsisten. Ketika pergeseran ini terdeteksi **dan** jarak ToF tidak sedang berkurang, skor TTC perlu dikoreksi ke bawah.
+
+Pergeseran horizontal centroid antar frame:
+
+$$\Delta x_c^{(i)} = x_c^{(i,t)} - x_c^{(i,t-1)}$$
+
+Skor drift ternormalisasi:
+
+$$\boxed{\text{drift\_score}^{(i)} = \text{clip}\!\left(\frac{|\Delta x_c^{(i)}|}{drift_{norm}},\ 0,\ 1\right)}$$
+
+Guard kondisional — drift hanya aktif ketika jarak ToF **tidak sedang berkurang** ($\text{dist\_score} \le 0.5$):
+
+$$\boxed{\text{drift\_guard}^{(i)} = \begin{cases} \text{drift\_score}^{(i)}, & \text{dist\_score}^{(i)} \le 0.5 \\ 0, & \text{dist\_score}^{(i)} > 0.5 \end{cases}}$$
+
+Modifikasi TTC score final:
+
+$$\boxed{\text{TTC\_score\_final}^{(i)} = \text{TTC\_score}^{(i)} \times \left(1 - \text{drift\_guard}^{(i)}\right)}$$
+
+$\text{TTC\_score\_final}^{(i)}$ menggantikan $\text{TTC\_score}^{(i)}$ sebagai input ke I.6 (class weighting).
+
+> **Mengapa guard `dist_score > 0.5`?** Jika jarak ToF memang berkurang ($\text{dist\_score} = 1.0$), kendaraan sedang mendekat secara fisik — baik frontal *maupun* dari sudut (*oblique approach*). Dalam kasus ini, $\text{drift\_guard} = 0$ sehingga TTC tidak dikurangi. Ini mencegah *false negative* pada kendaraan yang menabrak dari sudut, yang juga memiliki $\Delta x_c$ besar.
+
+> **Bobot tidak berubah:** $w_A + w_{AR} + w_{dist} = 1.0$ tetap. `drift_guard` adalah modifier *post-hoc* kondisional pada output `TTC_score`, bukan sub-skor ke-4 dalam penjumlahan berbobot.
+
+**Domain:** $\text{TTC\_score}^{(i)}, \text{TTC\_weighted}^{(i)}, \text{TTC\_score\_final}^{(i)} \in [0, 1]$, $\delta_I^{\text{pool}} \in \{\text{IMMINENT, PROBABLE, POSSIBLE}\}$
 
 ---
 
@@ -1805,12 +1832,17 @@ $$\boxed{\delta_I^{\text{pool}} = \begin{cases}
 | $\text{dist\_score}$ | Intermediat | $\{0.0, 0.5, 1.0\}$ | — | Sub-skor validasi jarak-area |
 | $\text{TTC\_score}^{(i)}$ | Intermediat | $[0, 1]$ | — | TTC score gabungan sebelum class weighting |
 | $m_{\text{class}}$ | Konstanta | $[0.8, 1.6]$ | — | Multiplier bobot kelas YOLO |
-| $\text{TTC\_weighted}^{(i)}$ | **Output** | $[0, 1]$ | — | **TTC score final setelah class weighting** |
+| $\text{TTC\_weighted}^{(i)}$ | Intermediat | $[0, 1]$ | — | TTC score setelah class weighting — input ke drift guard (I.8) |
+| $\Delta x_c^{(i)}$ | Intermediat | $(-640, 640)$ | px | Pergeseran horizontal centroid antar frame (I.8) |
+| $\text{drift\_score}^{(i)}$ | Intermediat | $[0, 1]$ | — | Skor pergeseran lateral ternormalisasi (I.8) |
+| $\text{drift\_guard}^{(i)}$ | Intermediat | $[0, 1]$ | — | Modifier drift kondisional: aktif hanya jika dist\_score $\le 0.5$ (I.8) |
+| $\text{TTC\_score\_final}^{(i)}$ | **Output** | $[0, 1]$ | — | **TTC score final setelah drift guard** — input ke I.7 pool routing |
 | $\delta_I^{\text{pool}}$ | **Output** | $\{\text{IMMINENT, PROBABLE, POSSIBLE}\}$ | — | **Pool peringatan TTC** |
 | $\Delta A_{th}$ | Konstanta | — | % | Threshold lama (v7) = 20%; digantikan oleh $\Delta A_{norm} = 50\%$ di v8 |
 | $\Delta A_{norm}$ | Konstanta | — | % | Normalisasi area score = 50% |
 | $\Delta\lambda_{th}$ | Konstanta | — | % | Threshold aspect ratio stability = 20% |
 | $TTC_{HIGH}, TTC_{MID}$ | Konstanta | — | — | Threshold pool: 0.75 dan 0.40 |
+| $drift_{norm}$ | Konstanta | — | px | Normalisasi drift = 60 px (= $R_{col}$, lebar 1 kolom ToF) |
 
 ---
 
@@ -1855,6 +1887,34 @@ $$\text{TTC\_score} = 0.5 \times 0.96 + 0.25 \times 0.0 + 0.25 \times 0.5 = 0.60
 $$\text{TTC\_weighted} = 0.605 \times 1.2 = 0.726 \to \text{PROBABLE (bukan IMMINENT)} \quad \checkmark$$
 
 V8 menghasilkan level yang lebih akurat — motor berputar di tempat tidak diklasifikasikan sebagai ancaman *imminent*, tetapi juga tidak diabaikan sepenuhnya.
+
+**Contoh numerik v9.5 — drift guard pada kendaraan melintas:**
+
+Skenario: motor melaju di jalur jalan, pengguna berjalan di trotoar. Motor terlihat dari jauh di Jam 12, bergeser ke Jam 11 saat dekat.
+
+*Frame t-1:* $x_c = 320\,\text{px}$ (Jam 12), $d_{t-1} = 2800\,\text{mm}$
+*Frame t:* $x_c = 290\,\text{px}$ (bergeser kiri), $A$ membesar, $d_t = 2820\,\text{mm}$ (sedikit menjauh)
+
+$$\Delta x_c = |290 - 320| = 30\,\text{px}$$
+$$\text{drift\_score} = \text{clip}(30/60, 0, 1) = 0.5$$
+$$\Delta d_I = 2800 - 2820 = -20\,\text{mm} \le -\varepsilon_{noise} \Rightarrow \text{dist\_score} = 0.0$$
+$$\text{drift\_guard} = 0.5 \quad (\text{dist\_score} = 0.0 \le 0.5 \Rightarrow \text{guard aktif})$$
+
+Misalkan $\text{TTC\_score} = 0.6$, $\text{TTC\_weighted} = 0.6 \times 1.2 = 0.72$:
+
+$$\text{TTC\_score\_final} = 0.72 \times (1 - 0.5) = 0.36 \to \text{POSSIBLE (bukan PROBABLE)} \quad \checkmark$$
+
+*Kendaraan melintas tidak memicu alert meskipun areanya membesar. Tanpa drift guard, ini akan masuk PROBABLE.*
+
+**Verifikasi keamanan — oblique approach (pendekatan dari sudut):**
+
+*Frame t:* $\Delta x_c = 50\,\text{px}$, $d_t = 2600\,\text{mm}$ (berkurang dari 2800):
+
+$$\Delta d_I = 200\,\text{mm} > \varepsilon_{noise} \Rightarrow \text{dist\_score} = 1.0$$
+$$\text{drift\_guard} = 0 \quad (\text{dist\_score} = 1.0 > 0.5 \Rightarrow \text{guard nonaktif})$$
+$$\text{TTC\_score\_final} = \text{TTC\_weighted} \quad \text{(tidak berkurang)} \quad \checkmark$$
+
+*Kendaraan oblique yang benar-benar mendekat tetap menghasilkan alert penuh — tidak ada false negative.*
 
 **Integrasi dengan Formula G:**
 
@@ -2522,10 +2582,10 @@ G+H      + H         (log)
 
 ---
 
-*Dokumen ini adalah revisi dari `formula-matematis-v9.3.md` dengan 11 koreksi konsistensi notasi hasil audit menyeluruh: penyeragaman $R_{th}$ → $R_{th,hi}$ di tabel konstanta, standardisasi label pool `MID` → `MEDIUM` di F.5, standardisasi tipe terrain `CONTAM.` → `CONTAMINATED` di J.3, koreksi paket WebSocket di diagram ringkasan dari 6 ke 9 field, klarifikasi G.EKF bahwa $\|\mathbf{P}_t\|_F$ tidak dikirim mentah via WebSocket, koreksi keterangan $\omega_z^{corr}$ di tabel A.2, pembaruan nama zona J di diagram A.5 dari v7 ke v8, penambahan superscript $(i)$ di formula G.2, penambahan catatan $N_{row,low}=1$ di J.2, koreksi `gz` → `ωz` di diagram ringkasan, dan pembaruan nomor versi footer.*
+*Dokumen ini adalah revisi dari `formula-matematis-v9.4.md` dengan penambahan Formula I.8 (Lateral Drift Guard): mekanisme `drift_score` kondisional untuk mengurangi false positive pada kendaraan yang melintas di jalur berbeda. Guard hanya aktif saat `dist_score ≤ 0.5` sehingga tidak menimbulkan false negative pada pendekatan oblique. Konstanta baru: `drift_norm = 60px`. Bobot lama $w_A$, $w_{AR}$, $w_{dist}$ tidak berubah.*
 
 *Hardware: ESP32-S3 WROOM N16R8 · OV2640 2MP · VL53L5CX V2 · **MPU-6050 GY-521***
 
 *Arsitektur: ESP32-S3 (EKF IMU + sensor hub + Formula K fail-safe) ↔ WebSocket WiFi ↔ Smartphone (YOLO11 + Formula B–J + TTS)*
 
-*Versi: 9.4 | Tanggal revisi: 2026-06-05*
+*Versi: 9.5 | Tanggal revisi: 2026-07-19*

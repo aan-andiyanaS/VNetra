@@ -111,13 +111,17 @@ class TtcManager {
             0.5f 
         }
 
-        // I.5: Lateral Drift (Apakah objek hanya melintas di pinggir jalan?)
-        // Jika pusat objek bergeser horizontal > 20% dari lebarnya per frame, itu berarti ia menyamping.
+        // I.5 & I.8: Lateral Drift Guard (v9.5) - Menggantikan latScore lama
         val deltaCx = if (history.lastCx >= 0) abs(cx - history.lastCx) else 0f
-        val latScore = if ((deltaCx / width) > 0.2f) 0.0f else 1.0f
+        val driftNorm = 60f // R_col (lebar 1 kolom ToF)
+        val driftScore = (deltaCx / driftNorm).coerceIn(0f, 1f)
+        
+        // Guard: Jika ToF yakin jarak berkurang (distScore > 0.5), drift diabaikan (objek menabrak miring)
+        val driftGuard = if (distScore <= 0.5f) driftScore else 0f
 
-        // I.6: TTC Combined Score (Dikalikan latScore untuk meredam alarm palsu)
-        val ttcScore = ((0.50f * areaScore) + (0.25f * arScore) + (0.25f * distScore)) * latScore
+        // I.6: TTC Combined Score (dengan post-hoc modifier drift_guard)
+        val baseTtcScore = (0.50f * areaScore) + (0.25f * arScore) + (0.25f * distScore)
+        val ttcScore = baseTtcScore * (1f - driftGuard)
 
         // I.7: Weighted by Class
         val weight = classWeights[det.className] ?: 1.0f

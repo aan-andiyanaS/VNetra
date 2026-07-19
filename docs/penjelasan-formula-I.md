@@ -80,21 +80,43 @@ Logika sederhana: kalau kotaknya makin besar (objek mendekat), seharusnya sensor
 Ini adalah masalah klasik dalam sistem peringatan tabrakan (ADAS). Bagaimana jika Anda berdiri di trotoar pinggir jalan menghadap ke depan (jam 12), lalu ada mobil melaju kencang melintas di jalan raya di depan Anda?
 Kotak mobil itu akan **membesar** (karena ia mendekati titik terdekat dengan Anda), tetapi ia **tidak akan menabrak Anda**, melainkan hanya lewat dari kiri ke kanan.
 
-Untuk mengatasi "alarm palsu" ini, sistem mengecek pergerakan horizontal (sumbu X) dari pusat kotak objek:
-- Jika objek lurus menabrak Anda, pusat kotaknya akan **stabil di tengah**.
-- Jika objek hanya lewat menyamping, pusat kotaknya akan **bergeser drastis (drifting) dari satu sisi ke sisi lain**.
+Untuk mengatasi "alarm palsu" ini, sistem mengecek **seberapa jauh pusat kotak objek bergeser secara horizontal** dari frame ke frame:
 
-Jika pusat kotak bergeser horizontal **lebih dari 20% lebarnya sendiri** per *frame*, sistem menyimpulkan bahwa kendaraan itu sedang melintas di jalur lain (*lateral drift*), dan skor ancamannya langsung di-Nol-kan (diabaikan).
+- Jika objek lurus menabrak Anda, pusat kotaknya akan **stabil di tengah** (tidak bergeser, atau bergeser sangat sedikit).
+- Jika objek hanya lewat menyamping, pusat kotaknya akan **bergeser drastis** dari satu sisi ke sisi lain.
+
+Sistem mengukur pergeseran ini sebagai `drift_score` (antara 0.0–1.0). Semakin besar geseran horizontalnya, semakin tinggi drift_score-nya.
+
+**Tapi ada klausa pengaman yang sangat penting:** drift_score hanya *aktif* sebagai peredam jika sensor ToF **tidak sedang melaporkan bahwa jarak berkurang**. Kalau jarak memang berkurang (berarti objek memang nyata-nyata mendekat, bahkan dari sudut sekalipun), drift_score diabaikan sepenuhnya dan sistem tetap waspada penuh.
+
+```
+Kendaraan melintas (jarak tidak berkurang):
+  drift_score = 0.8 → drift_guard AKTIF → skor bahaya dikurangi ✓
+
+Kendaraan menabrak dari depan (jarak berkurang):
+  dist_score = 1.0 → drift_guard NONAKTIF → skor bahaya penuh ✓
+
+Kendaraan menabrak dari sudut 45° (jarak juga berkurang):
+  dist_score = 1.0 → drift_guard NONAKTIF → skor bahaya penuh ✓ (tidak ada false negative!)
+```
+
+> **Mengapa klausa pengaman ini krusial?** Kendaraan yang menabrak dari sudut (*oblique approach*) juga bergeser horizontal, persis seperti kendaraan yang melintas. Tanpa klausa ini, sistem bisa salah mengira kendaraan yang menabrak dari sudut sebagai "aman". Dengan klausa `dist_score > 0.5`, ini tidak bisa terjadi.
 
 ---
 
 ## Menggabungkan 3 Jawaban Menjadi 1 Skor
 
-Keempat jawaban di atas digabung menjadi satu angka: **TTC_score** (antara 0.0 hingga 1.0).
+Tiga jawaban utama (pertanyaan 1–3) digabung menjadi satu angka: **TTC_score** (antara 0.0 hingga 1.0):
 
-$$\text{TTC\_score} = [(0.50 \times \text{area\_score}) + (0.25 \times \text{ar\_score}) + (0.25 \times \text{dist\_score})] \times \text{lat\_score}$$
+$$\text{TTC\_score} = (0.50 \times \text{area\_score}) + (0.25 \times \text{ar\_score}) + (0.25 \times \text{dist\_score})$$
 
-Dibaca: "Pembesaran kotak bobotnya paling besar (50%), lalu dibantu oleh stabilitas bentuk (25%) dan sensor ToF (25%). Setelah itu, kalikan dengan *Lateral Drift Score* — jika terbukti objek hanya melintas menyamping, nilai total langsung hangus (dikali 0)."
+Setelah itu, **drift_guard** dari Pertanyaan 4 bekerja sebagai peredam *bersyarat* — hanya aktif jika jarak ToF tidak sedang berkurang:
+
+$$\text{TTC\_score\_final} = \text{TTC\_score} \times (1 - \text{drift\_guard})$$
+
+Dibaca: "Pembesaran kotak paling berpengaruh (50%), dibantu stabilitas bentuk (25%) dan sensor ToF (25%). Jika setelah itu terbukti objek hanya melintas menyamping **dan** sensor ToF tidak mendeteksi penurunan jarak, nilai total dikurangi sesuai besarnya pergeseran lateral."
+
+> **Kunci desain:** Bobot 50%+25%+25% = 100% **tidak berubah**. Drift_guard bukan sub-skor yang ikut dihitung dalam penjumlahan itu — ia adalah modifier yang diterapkan *sesudah* penjumlahan, dan hanya jika kondisi aman untuk melakukannya.
 
 ### Penyesuaian Berdasarkan Jenis Objek
 
@@ -167,6 +189,36 @@ Sistem tidak langsung panik karena `ar_score` yang rendah meredam skor keseluruh
 
 ---
 
+## Contoh Nyata: Mobil Melintas di Jalan Raya (Kasus Drift Guard)
+
+**Skenario:** Pengguna berdiri di trotoar, menghadap ke depan (Jam 12). Sebuah mobil melaju di jalan raya di depannya — bukan di trotoar. Mobil itu akan lewat dari kiri ke kanan, tidak akan menabrak. Namun area bounding box-nya membesar saat ia mendekati titik terdekat.
+
+**Frame 1 → Frame 2:**
+- Pusat kotak bergeser: `x_c` berubah dari 320px ke 290px → **pergeseran 30px** (dari Jam 12 bergeser ke Jam 11)
+- Kotak mobil membesar → `area_score = 0.60`
+- Bentuk kotak relatif stabil → `ar_score = 0.80`
+- Jarak ToF tidak berkurang (mobil di jalur berbeda, bukan mendekat ke posisi pengguna) → `dist_score = 0.0`
+
+$$\text{TTC\_score} = 0.50 \times 0.60 + 0.25 \times 0.80 + 0.25 \times 0.0 = 0.50$$
+$$\text{TTC\_weighted} = 0.50 \times 1.5\ (\text{mobil}) = 0.75 \rightarrow \text{(hampir IMMINENT!)}$$
+
+Tanpa drift guard, ini akan memicu peringatan `IMMINENT` — **alarm palsu!** Sekarang dengan drift guard:
+
+$$\text{drift\_score} = \text{clip}(30\,\text{px} / 60\,\text{px},\ 0,\ 1) = 0.50$$
+$$\text{dist\_score} = 0.0 \le 0.5 \rightarrow \text{drift\_guard AKTIF} = 0.50$$
+$$\text{TTC\_score\_final} = 0.75 \times (1 - 0.50) = 0.375 \rightarrow \boxed{\textbf{POSSIBLE — diam, tidak ada peringatan ✓}}$$
+
+Mobil yang hanya melintas tidak memicu alarm. Pengguna tidak terkejut dan tidak berbuat keputusan panik yang salah.
+
+**Verifikasi keamanan — bagaimana jika mobil itu justru menabrak dari sudut?**
+
+Sama-sama bergeser lateral, tapi jarak ToF berkurang:
+- Jarak ToF berkurang → `dist_score = 1.0 > 0.5` → **drift_guard NONAKTIF = 0**
+- `TTC_score_final = TTC_weighted` *(tidak ada pengurangan)*
+- Peringatan tetap berbunyi penuh ✓
+
+---
+
 ## Hubungan dengan Kondisi Siang Hari
 
 Ingat masalah ToF buta di siang hari? Berikut cara Formula I menambal celah tersebut secara otomatis:
@@ -174,13 +226,28 @@ Ingat masalah ToF buta di siang hari? Berikut cara Formula I menambal celah ters
 ```
 Kondisi Dalam Ruangan / Malam:
   ToF aktif → dist_score berkontribusi penuh (bobot 0.25)
+  drift_guard juga bisa aktif jika dist_score = 0.0 (jarak tidak berubah)
   Formula I bekerja di jarak > 4 meter
 
 Kondisi Siang Hari / Outdoor:
-  ToF buta mulai > 1 meter → dist_score = 0.5 (netral/diabaikan)
+  ToF buta mulai > 1 meter → dist_score = 0.5 (netral/meragukan)
+  drift_guard TIDAK aktif saat dist_score = 0.5 karena 0.5 ≤ 0.5 (di batas)
   Formula I tetap aktif dari jarak 1 meter hingga 20 meter
   hanya mengandalkan area_score + ar_score (total bobot 0.75)
   → Masih cukup sensitif untuk mendeteksi ancaman nyata
 ```
 
 Dengan demikian, sistem **tidak perlu dikonfigurasi ulang** antara kondisi siang dan malam. Formula I akan otomatis beradaptasi tergantung apakah ToF sedang memberikan data valid atau tidak.
+
+---
+
+## Ringkasan: Empat Pertanyaan Formula I
+
+| # | Pertanyaan | Variabel | Fungsi |
+|---|---|---|---|
+| 1 | Seberapa cepat kotaknya membesar? | `area_score` | Detektor utama ancaman (bobot 50%) |
+| 2 | Apakah bentuk kotaknya berubah aneh? | `ar_score` | Filter rotasi bukan mendekat (bobot 25%) |
+| 3 | Apakah sensor jarak setuju? | `dist_score` | Validasi silang kamera ↔ ToF (bobot 25%) |
+| 4 | Apakah objek hanya melintas menyamping? | `drift_guard` | Peredam *bersyarat* — hanya aktif jika jarak tidak berkurang |
+
+> **Catatan versi:** Pertanyaan 1–3 ada sejak v8. Pertanyaan 4 (Lateral Drift Guard) ditambahkan di **v9.5** berdasarkan temuan skenario trotoar pinggir jalan.
