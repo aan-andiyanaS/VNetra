@@ -290,12 +290,33 @@ class TtsAlertManager(private val context: Context) {
                 
                 if (isHeadRotatingNow) return null
                 
+                // Ponytail Pitch Bug Fix: 
+                // Jika pengguna menunduk tajam (pitch > 20 derajat), ToF akan mengenai lantai di dekat kaki (< 1000mm).
+                // Abaikan peringatan tembok statis dalam kondisi ini agar tidak diteriaki "Tembok" saat melihat sepatu.
+                val pitchAngle = imuData?.getOrElse(0) { 0f } ?: 0f
+                val isStaticObst = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || 
+                                   trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID
+                if (isStaticObst && pitchAngle > 20f) return null
+                
                 // ADR-035: Cooldown minimum antar re-trigger untuk tracking ID yang sama.
                 // Mencegah siklus rapid-fire: nod-down (fake close) → nod-up (flag reset) → nod-down lagi.
                 val lastSpokenMs = lastSpokenTime[trackingId] ?: 0L
                 if (now - lastSpokenMs < 3000L) return null
                 
-                // Kondisi: masuk zona bahaya, belum pernah diperingatkan → one-shot
+                // Mute Bug Fix (Amnesia Sementara):
+                // Jika TTS di-mute, JANGAN hafalkan rintangan ini. 
+                // Saat auto-unmute dipicu (karena berjalan), sistem akan menganggap objek ini baru dan langsung mengingatkan.
+                if (isMuted) return null
+
+                // Ponytail Spam Fix (Zero-Delay Responsive Scanning):
+                // Jika objek statis (Tembok/Terrain) DAN user sedang diam (!isMovingForward):
+                // Tunda pencatatan ke memori. Sistem tetap bisu sampai user mengambil langkah maju, 
+                // yang akan memicu alert instan tanpa delay 1 detik.
+                val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || 
+                                       trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID
+                if (isStaticObstacle && !isMovingForward) return null
+
+                // Kondisi: masuk zona bahaya, belum pernah diperingatkan -> one-shot
                 alertFlags[trackingId] = true
                 lastSeenTime[trackingId] = now
                 lastSpokenTime[trackingId] = now
