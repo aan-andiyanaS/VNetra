@@ -84,7 +84,7 @@ class NavigationCoordinator(
                 val j = SpatialMappingUtils.mapToTofColumn(xc, tofMode)
                 var dObj = TofDepthEstimator.calculate(tofData, j, thetaDeg, tofMode)
                 
-                val ttcStatus = ttcManager.evaluateThreat(det, dObj)
+                val ttcStatus = ttcManager.evaluateThreat(det, dObj, imuData)
                 if (dObj >= TofDepthEstimator.D_MAX) {
                     if (ttcStatus == TtcStatus.IMMINENT) {
                         dObj = 500

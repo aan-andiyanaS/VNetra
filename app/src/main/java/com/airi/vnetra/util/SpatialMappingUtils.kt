@@ -43,6 +43,7 @@ object SpatialMappingUtils {
     const val W_CAM   = 640   // px — lebar gambar kamera OV2640 (VGA)
     const val H_CAM   = 480   // px — tinggi gambar kamera OV2640 (VGA)
 
+
     const val WALL_TRACKING_ID = 999  // ID unik global untuk asisten TTS tembok
     const val TERRAIN_TRACKING_ID = 998  // ID unik untuk asisten medan jalan
 
@@ -56,6 +57,11 @@ object SpatialMappingUtils {
 
     // Area aktif ToF dalam koordinat gambar 640px
     const val W_TOF   = W_CAM - D_LEFT - D_RIGHT  // = 442 px
+
+    // ── Konstanta Fisika Kamera — untuk kompensasi rotasi kepala (Formula I.8 v9.5) ──
+    // FOV horizontal OV2640 standar = 66°. Jika menggunakan lensa wide-angle (120°), ubah ke 120f.
+    const val FOV_H_DEG  = 66f                           // derajat
+    const val PX_PER_DEG = W_TOF.toFloat() / FOV_H_DEG  // ≈ 6.7 px/° (442 / 66)
 
     // Jumlah kolom dan baris sensor (8×8 atau 4×4 tergantung mode)
     const val N_COL   = 8

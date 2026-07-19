@@ -42,8 +42,12 @@ class TtcManager {
     /**
      * Evaluasi tingkat ancaman objek berdasarkan pelebaran kotak (area growth),
      * stabilitas rasio aspek (aspect ratio), dan konfirmasi jarak ToF.
+     *
+     * @param imuData data IMU terbaru (opsional). Jika tersedia, digunakan untuk
+     *                mengkompensasi pergeseran bounding box akibat rotasi kepala (Formula I.8 v9.5).
+     *                Jika null, fallback ke perilaku sebelumnya (tanpa kompensasi).
      */
-    fun evaluateThreat(det: DetectionResult, dObj: Int): TtcStatus {
+    fun evaluateThreat(det: DetectionResult, dObj: Int, imuData: FloatArray? = null): TtcStatus {
         if (det.trackId == -1) return TtcStatus.POSSIBLE
 
         val history = objectMemory.getOrPut(det.trackId) { ObjectHistory() }
@@ -111,9 +115,20 @@ class TtcManager {
             0.5f 
         }
 
-        // I.5 & I.8: Lateral Drift Guard (v9.5) - Menggantikan latScore lama
-        val deltaCx = if (history.lastCx >= 0) abs(cx - history.lastCx) else 0f
-        val driftNorm = 60f // R_col (lebar 1 kolom ToF)
+        // I.5 & I.8: Lateral Drift Guard (v9.5) dengan Kompensasi IMU
+        // Jika IMU tersedia, prediksi posisi "baru" objek statis akibat rotasi kepala.
+        // Objek statis akan memiliki deltaCx ≈ 0 (prediksi akurat), objek dinamis > 0.
+        //   ωz_corr (°/s) × Δt_frame (1/15 s) = pergeseran sudut (°)
+        //   pergeseran piksel = pergeseran sudut × PX_PER_DEG
+        val deltaCx = if (history.lastCx >= 0) {
+            val yawRateDps  = imuData?.getOrElse(4) { 0f } ?: 0f
+            val headShiftPx = yawRateDps * (1f / 15f) * SpatialMappingUtils.PX_PER_DEG
+            val predictedCx = history.lastCx + headShiftPx
+            abs(cx - predictedCx)
+        } else {
+            0f
+        }
+        val driftNorm  = 60f // R_col (lebar 1 kolom ToF)
         val driftScore = (deltaCx / driftNorm).coerceIn(0f, 1f)
         
         // Guard: Jika ToF yakin jarak berkurang (distScore > 0.5), drift diabaikan (objek menabrak miring)
