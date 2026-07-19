@@ -117,7 +117,12 @@ class CameraStreamActivity : AppCompatActivity() {
     // @Volatile: ditulis dari Dispatchers.Default, dibaca dari coroutine lain.
     // Tidak perlu synchronized karena assignment reference bersifat atomic di JVM.
     @Volatile private var latestImuData: FloatArray? = null  // 9 field: [θ,φ,ωx,ωy,ωz,a,ts,vBase,conv]
+    @Volatile private var lastImuReceivedAt: Long = 0L
     @Volatile private var latestTofData: IntArray?   = null  // 16 atau 64 nilai (mm), -1 = invalid
+
+    // Guard (Staleness Check): Kembalikan null jika IMU terputus/lag > 200ms
+    private val safeImuData: FloatArray?
+        get() = if (System.currentTimeMillis() - lastImuReceivedAt > 200L) null else latestImuData
 
     // ── Latency (Ping) Monitor State (L1.2) ───────────────────────────
     @Volatile private var pingCamera:     Long = 0
@@ -564,7 +569,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                             navigationCoordinator.processInstantYoloTts(
                                                 detections = trackedResults,
                                                 tofData = latestTofData,
-                                                imuData = latestImuData,
+                                                imuData = safeImuData,
                                                 frameWidth = bitmap.width,
                                                 tofMode = currentTofMode
                                             )
@@ -673,6 +678,7 @@ class CameraStreamActivity : AppCompatActivity() {
                     if (isDestroyed || isFinishing || isAkhiring) return@collect
                     // P1.6: Simpan state IMU terbaru untuk Formula E, G, J
                     latestImuData = imuData
+                    lastImuReceivedAt = System.currentTimeMillis()
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring && imuData.size >= 6) {
                             binding.tvImuPitch.text = "Pitch: %.1f°".format(imuData[0])
@@ -762,7 +768,7 @@ class CameraStreamActivity : AppCompatActivity() {
                     }
                     pingTofSmooth = System.currentTimeMillis() - startSmooth
 
-                    val imuSnap  = latestImuData
+                    val imuSnap  = safeImuData
                     val rawTheta = imuSnap?.getOrElse(0) { 0f } ?: 0f
                     val thetaDeg = rawTheta - 20f
 
@@ -770,11 +776,11 @@ class CameraStreamActivity : AppCompatActivity() {
                     var closeThreatExists = false
                     var allClear = true
 
-                    navigationCoordinator.updateMovementState(latestImuData)
+                    navigationCoordinator.updateMovementState(imuSnap)
                     val isMovingForward = navigationCoordinator.movingForwardConsecutiveFrames >= 3
-                    val yawRate = latestImuData?.getOrElse(4) { 0f } ?: 0f
+                    val yawRate = imuSnap?.getOrElse(4) { 0f } ?: 0f
                     val isTurning = kotlin.math.abs(yawRate) > 30f
-                    val isHeadRotating = navigationCoordinator.isHeadRotating(latestImuData, 5f)
+                    val isHeadRotating = navigationCoordinator.isHeadRotating(imuSnap, 5f)
 
                     // ADR-035: Auto-Unmute (Mute Cerdas)
                     if (isMovingForward && ::ttsAlertManager.isInitialized && ttsAlertManager.isMuted) {
@@ -853,7 +859,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                 clockDirection  = 12,    // halangan selalu didepan
                                 objectLabel     = if (wallDetected) "tembok" else "halangan",
                                 isMovingForward = isMovingForward,
-                                imuData         = latestImuData
+                                imuData         = safeImuData
                             )
                             if (obstacleAlert != null) {
                                 ttsAlertManager.speak(obstacleAlert)
@@ -875,7 +881,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                 clockDirection  = 12,
                                 objectLabel     = "tembok",
                                 isMovingForward = isMovingForward,
-                                imuData         = latestImuData
+                                imuData         = safeImuData
                             )
                         }
 
@@ -949,7 +955,7 @@ class CameraStreamActivity : AppCompatActivity() {
                                             clockDirection = terrainResult.direction,
                                             objectLabel = typeText,
                                             isMovingForward = isMovingForward,
-                                            imuData = latestImuData
+                                            imuData = safeImuData
                                         )
                                         
                                         if (alertMsg != null) {
