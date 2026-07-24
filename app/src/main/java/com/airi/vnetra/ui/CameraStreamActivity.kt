@@ -544,8 +544,10 @@ class CameraStreamActivity : AppCompatActivity() {
                     val startTime = System.currentTimeMillis()
 
                     // ADR-046: Double buffer — decode ke slot 'back' (yang tidak sedang di-render).
+                    // GUARD: jangan reuse buffer jika YOLO masih membaca pixelnya (CPU inference bisa >133ms).
+                    // Jika isInferencing=true, inBitmap=null → alokasi baru frame ini (GC normal, tidak crash).
                     val backIdx = 1 - bufferIndex
-                    options.inBitmap = bitmapBuffer[backIdx]  // reuse jika ukuran cocok
+                    options.inBitmap = if (!isInferencing.get()) bitmapBuffer[backIdx] else null
 
                     val bitmap = runCatching {
                         BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)
