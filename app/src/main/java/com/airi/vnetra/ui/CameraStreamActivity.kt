@@ -289,9 +289,18 @@ class CameraStreamActivity : AppCompatActivity() {
         ttsAlertManager.initTts()
         navigationCoordinator = NavigationCoordinator(ttsAlertManager, ttcManager)
 
-        // Init YOLO Detector (Secara default akan mencoba GPU/NPU karena masalah library sudah diperbaiki)
-        yoloDetector = YoloDetector(this)
-        updateAiIndicator()
+        // Init YOLO Detector secara async di background (Dispatchers.IO) agar tidak
+        // memblokir Main Thread saat inisialisasi GPU/NPU delegate.
+        // Pada perangkat mid-range (A17 4G), kompilasi shader GPU bisa memakan 3-5 detik.
+        // Semua akses ke yoloDetector sudah null-safe (cek modelStatus != NONE),
+        // sehingga aman untuk diisi setelah Activity tampil ke user.
+        lifecycleScope.launch(Dispatchers.IO) {
+            val detector = YoloDetector(this@CameraStreamActivity)
+            withContext(Dispatchers.Main) {
+                yoloDetector = detector
+                updateAiIndicator()
+            }
+        }
     }
 
     override fun onStart() {
