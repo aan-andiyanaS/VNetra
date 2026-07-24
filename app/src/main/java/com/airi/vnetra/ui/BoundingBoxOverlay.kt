@@ -68,17 +68,20 @@ class BoundingBoxOverlay(context: Context, attrs: AttributeSet?) : View(context,
             val textWidth = textBounds.width()
             val textHeight = textBounds.height()
 
+            // Clamp labelTop so the label is always visible, even if the box is at the top edge
+            val labelTop = if (top - textHeight - 8f < 0f) textHeight + 8f else top
+
             // Draw background for text
             canvas.drawRect(
                 left,
-                top - textHeight - 8f,
+                labelTop - textHeight - 8f,
                 left + textWidth + 8f,
-                top,
+                labelTop,
                 textBackgroundPaint
             )
 
             // Draw text
-            canvas.drawText(labelString, left + 4f, top - 4f, textPaint)
+            canvas.drawText(labelString, left + 4f, labelTop - 4f, textPaint)
         }
     }
 }

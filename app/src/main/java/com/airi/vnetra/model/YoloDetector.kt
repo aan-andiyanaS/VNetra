@@ -284,8 +284,8 @@ class YoloDetector(
         // when dimensions already match — do not recycle the caller's bitmap).
         if (resizedBitmap !== bitmap) resizedBitmap.recycle()
         
-        val padX = (INPUT_SIZE - newWidth) / 2
-        val padY = (INPUT_SIZE - newHeight) / 2
+        val padX = ((INPUT_SIZE - newWidth) / 2f).toInt()
+        val padY = ((INPUT_SIZE - newHeight) / 2f).toInt()
         
         for (y in 0 until INPUT_SIZE) {
             for (x in 0 until INPUT_SIZE) {
@@ -416,9 +416,7 @@ class YoloDetector(
         originalWidth: Int, originalHeight: Int
     ): RectF {
         // YOLOv8 TFLite export outputs absolute coordinates in [0, INPUT_SIZE] space.
-        // Do NOT apply a normalized-vs-absolute heuristic — it misfires for boxes
-        // near the left/top edge where cx or cy can be between 1.0 and 2.0, causing
-        // a second x640 multiplication that puts coords far off-screen (clipped to 0).
+        // A heuristic in postprocessBoxes handles normalization fallback if needed.
         val left   = (cx - w / 2 - padX) / scale
         val top    = (cy - h / 2 - padY) / scale
         val right  = (cx + w / 2 - padX) / scale
