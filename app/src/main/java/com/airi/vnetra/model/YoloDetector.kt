@@ -380,7 +380,7 @@ class YoloDetector(
 
                     // Log the first confident box's raw coordinates
                     if (results.isEmpty()) {
-                        Log.i(TAG, "Raw Box: cx=$cx, cy=$cy, w=$w, h=$h (classId=$classId, conf=$maxClassConf)")
+                        Log.d(TAG, "Raw Box: cx=$cx, cy=$cy, w=$w, h=$h (classId=$classId, conf=$maxClassConf)")
                     }
 
                     val rect = buildDetectionRect(cx, cy, w, h, padX, padY, scale, originalWidth, originalHeight)

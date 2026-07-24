@@ -257,10 +257,9 @@ class TtsAlertManager(private val context: Context) {
 
 
         val isPaving = objectLabel.startsWith("paving")
-        val finalLabelBase = if (isPaving) objectLabel else objectLabel
-        
+
         // ADR-039: Tambahan kata "mendekat" jika objek secara nyata bergerak maju ke arah pengguna (vAvg > 500 mm/s)
-        val finalLabel = if (!isPaving && vAvg > 500f) "$finalLabelBase mendekat" else finalLabelBase
+        val finalLabel = if (!isPaving && vAvg > 500f) "$objectLabel mendekat" else objectLabel
         
         val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
         

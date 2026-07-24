@@ -613,6 +613,7 @@ class CameraStreamService : Service() {
                     .asFloatBuffer().get(floats, 0, 6)
                 _imuFlow.emit(floats)
             }
+            else -> Log.w(TAG, "IMU payload terlalu kecil: ${payload.size}B (min 24B diperlukan)")
         }
     }
 

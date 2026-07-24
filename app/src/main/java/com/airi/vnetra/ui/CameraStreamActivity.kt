@@ -125,7 +125,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
     // ── TTS Alert Manager (P3.3) ────────────────
     private lateinit var ttsAlertManager: TtsAlertManager
-    private var initialYawOffset: Float? = null
+    @Volatile private var initialYawOffset: Float? = null  // ditulis dari imuCollectJob (Default)
     private lateinit var navigationCoordinator: NavigationCoordinator
     private lateinit var tofGridRenderer: ToFGridRenderer
 
