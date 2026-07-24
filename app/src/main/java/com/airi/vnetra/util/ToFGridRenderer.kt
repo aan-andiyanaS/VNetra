@@ -14,8 +14,10 @@ class ToFGridRenderer(
 ) {
     private var tofViews: Array<TextView> = emptyArray()
     private val hsvTemp = FloatArray(3) { 1f }
-    private val colorInvalidCell = Color.parseColor("#444444")
+    private val colorInvalidCell = Color.parseColor("#66444444") // Abu-abu semi transparan
     
+    private var currentTexts: Array<String> = emptyArray()
+    private var currentColors: IntArray = IntArray(0)
     // Constant
     private val HOLDOVER_FRAMES = 5
     private val TOF_FOV_V = 45f
@@ -30,11 +32,17 @@ class ToFGridRenderer(
     fun rebuildGrid(resolution: Int) {
         val numCells = resolution * resolution
         val textSizeSp = if (resolution == 4) 11f else 7.5f
+        
+        currentTexts = Array(numCells) { "—" }
+        currentColors = IntArray(numCells) { colorInvalidCell }
 
         // Remove all views before changing dimensions
         gridLayout.removeAllViews()
         gridLayout.columnCount = resolution
         gridLayout.rowCount = resolution
+        
+        // Memberikan background tipis pada GridLayout agar margin antar-sel terlihat seperti garis tepi
+        gridLayout.setBackgroundColor(Color.parseColor("#44FFFFFF"))
 
         tofViews = Array(numCells) { i ->
             val row = i / resolution
@@ -74,25 +82,28 @@ class ToFGridRenderer(
         alpha: Float = 0.3f
     ) {
         if (tofViews.isEmpty() || tofData.size != tofViews.size) return
+        if (currentFrameWidth == 0 || currentFrameHeight == 0) return
 
-        val cellTexts = Array(tofData.size) { "" }
-        val cellColors = IntArray(tofData.size) { colorInvalidCell }
+        // OPTIMASI: Hitung centroid YOLO 1x saja di luar loop untuk menghindari O(N*M)
+        val yoloCells = BooleanArray(tofData.size)
+        for (det in currentDetections) {
+            val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
+            val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / currentFrameWidth)
+            val j = SpatialMappingUtils.mapToTofColumn(xc, mode)
+            
+            val ycRaw = (det.boundingBox.top + det.boundingBox.bottom) / 2f
+            val yc = ycRaw * (SpatialMappingUtils.H_CAM.toFloat() / currentFrameHeight)
+            val r = SpatialMappingUtils.mapToTofRow(yc, mode)
+            
+            if (r in 0 until mode && j in 0 until mode) {
+                yoloCells[r * mode + j] = true
+            }
+        }
 
         for (i in tofData.indices) {
-            val row = i / mode
-            val col = i % mode
-
-            // Centroid check: apakah sel ini bertumpang-tindih dengan deteksi YOLO?
-            var isYoloCentroid = false
-            for (det in currentDetections) {
-                val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
-                val xc = xcRaw * (SpatialMappingUtils.W_CAM.toFloat() / currentFrameWidth)
-                val j = SpatialMappingUtils.mapToTofColumn(xc, mode)
-                val ycRaw = (det.boundingBox.top + det.boundingBox.bottom) / 2f
-                val yc = ycRaw * (SpatialMappingUtils.H_CAM.toFloat() / currentFrameHeight)
-                val r = SpatialMappingUtils.mapToTofRow(yc, mode)
-                if (j == col && r == row) { isYoloCentroid = true; break }
-            }
+            val isYoloCentroid = yoloCells[i]
+            var newText = "—"
+            var newColor = colorInvalidCell
 
             val rawDistance = tofData[i]
             if (rawDistance <= 0) {
@@ -101,15 +112,11 @@ class ToFGridRenderer(
                     holdover[i] = remaining - 1
                     val held = smoothed[i].toInt()
                     if (held > 0) {
-                        cellTexts[i] = "$held"
-                        var color = getColorForDistance(held, dimmed = true)
-                        if (isYoloCentroid) {
-                            color = ColorUtils.blendARGB(color, Color.BLUE, 0.4f)
-                        }
-                        cellColors[i] = color
+                        newText = "$held"
+                        newColor = getColorForDistance(held, dimmed = true)
+                        if (isYoloCentroid) newColor = ColorUtils.blendARGB(newColor, Color.BLUE, 0.4f)
                     }
                 } else {
-                    cellTexts[i] = "—"
                     smoothed[i] = 0f
                 }
             } else {
@@ -117,23 +124,20 @@ class ToFGridRenderer(
                 smoothed[i] = if (smoothed[i] <= 0f) rawDistance.toFloat()
                               else alpha * rawDistance + (1f - alpha) * smoothed[i]
                 val d = smoothed[i].toInt()
-                cellTexts[i] = "$d"
-                var color = getColorForDistance(d)
-                if (isYoloCentroid) {
-                    color = ColorUtils.blendARGB(color, Color.BLUE, 0.4f)
-                }
-                cellColors[i] = color
+                newText = "$d"
+                newColor = getColorForDistance(d)
+                if (isYoloCentroid) newColor = ColorUtils.blendARGB(newColor, Color.BLUE, 0.4f)
             }
-        }
 
-        render(cellTexts, cellColors)
-    }
-
-    private fun render(cellTexts: Array<String>, cellColors: IntArray) {
-        for (i in cellTexts.indices) {
-            if (i >= tofViews.size) break
-            tofViews[i].text = cellTexts[i]
-            tofViews[i].setBackgroundColor(cellColors[i])
+            // OPTIMASI: Update UI HANYA jika ada perubahan (mencegah overdraw/invalidation)
+            if (currentTexts[i] != newText) {
+                currentTexts[i] = newText
+                tofViews[i].text = newText
+            }
+            if (currentColors[i] != newColor) {
+                currentColors[i] = newColor
+                tofViews[i].setBackgroundColor(newColor)
+            }
         }
     }
 

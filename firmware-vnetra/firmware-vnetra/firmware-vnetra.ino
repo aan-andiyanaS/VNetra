@@ -158,7 +158,7 @@ static const float       DEG2RAD_F = 0.01745329252f;  // π/180, lebih portabel 
 // Resolusi aktif VL53L5CX: 8 (mode 8x8, 64 cell) atau 4 (mode 4x4, 16 cell)
 // Diubah via WebSocket command: SET_TOF_MODE:4 / SET_TOF_MODE:8
 volatile uint8_t tofResolution = 4;           // Awalnya 4x4 untuk kecepatan
-bool tofModeChangePending = false;   // Flag untuk meminta perubahan resolusi di thread TOF
+volatile bool tofModeChangePending = false;   // Flag untuk meminta perubahan resolusi di thread TOF
 
 // ======== DEKLARASI FUNGSI ========— GPIO 0 (BOOT) ========
 #define RESET_BUTTON_PIN 0
@@ -183,7 +183,7 @@ bool tofModeChangePending = false;   // Flag untuk meminta perubahan resolusi di
 
 // ======== TUNING ========
 static constexpr uint8_t  JPEG_QUALITY      = 20;      // 0=best, 63=worst
-static constexpr uint32_t TARGET_FRAME_US   = 100000;   // ~10 FPS
+static constexpr uint32_t TARGET_FRAME_US   = 66666;    // ~15 FPS
 static constexpr uint32_t WS_PING_INTERVAL  = 10000;   // ms — heartbeat setiap 10 detik
 static constexpr size_t   WS_BUF_MAX        = 130*1024;
 static constexpr uint32_t HEAP_GUARD_BYTES  = 30000;
@@ -1310,7 +1310,7 @@ void TOF_InitTask(void* pvParams) {
             Serial.printf("[TOF] Init: %dx%d, Freq=%dHz, IntTime=%dms\n",
                           tofResolution, tofResolution,
                           (tofResolution == 4 ? 15 : 10),
-                          (tofResolution == 4 ? 30 : 50));
+                          (tofResolution == 4 ? 20 : 30));
         }
         xSemaphoreGive(i2c_mutex);
 

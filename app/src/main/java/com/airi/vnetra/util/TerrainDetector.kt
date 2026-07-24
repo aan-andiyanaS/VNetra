@@ -232,6 +232,7 @@ class TerrainDetector {
                 ((R - R_TH_HI) / (1f - R_TH_HI)).coerceIn(0f, 1f)
             TerrainType.STAIR_UP ->
                 (xi / (EDGE_TH * 2f)).coerceIn(0f, 1f)
+            TerrainType.CONTAMINATED -> 1.0f  // Sinyal zLow < D_CONT sangat kuat
             else -> 0f
         }
 

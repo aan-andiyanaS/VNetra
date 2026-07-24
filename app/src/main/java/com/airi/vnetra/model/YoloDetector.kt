@@ -44,16 +44,30 @@ class YoloDetector(
         private const val MODEL_FP32 = "best_fp32.tflite"
         private const val MODEL_INT8 = "best_int8.tflite"
         private const val INPUT_SIZE = 640
-        private const val NUM_CLASSES = 14
+        private const val NUM_CLASSES = 9
         private const val OUTPUT_BOXES = 8400
         private const val CONFIDENCE_THRESHOLD = 0.30f
         private const val IOU_THRESHOLD = 0.45f
 
-        val CLASSES = arrayOf(
-            "orang", "mobil", "motor", "bus", "tiang",
-            "lurus", "belok", 
-            "simpang 3", "simpang 4", "stop", 
-            "tangga naik", "tangga turun", "zebra cross", "pohon"
+        // Nama kelas sesuai urutan output model (Bahasa Inggris, urutan alphabetical dari dataset)
+        // KRITIS: Harus sesuai persis dengan data.yaml nc & names yang digunakan saat training.
+        private val CLASSES = arrayOf(
+            "car", "drain", "motorcycle", "person", "pole",
+            "tactile_paving_alert", "tactile_paving_straight", "trading_cart", "tree"
+        )
+
+        // Peta translasi: nama kelas model (Inggris) → label TTS (Bahasa Indonesia)
+        // Ini satu-satunya tempat di mana mapping ini didefinisikan.
+        private val CLASS_LABELS_ID = mapOf(
+            "car"                      to "mobil",
+            "drain"                    to "selokan",
+            "motorcycle"               to "motor",
+            "person"                   to "orang",
+            "pole"                     to "tiang",
+            "tactile_paving_alert"     to "paving peringatan",
+            "tactile_paving_straight"  to "paving lurus",
+            "trading_cart"             to "gerobak",
+            "tree"                     to "pohon"
         )
     }
 
@@ -62,6 +76,8 @@ class YoloDetector(
 
     var activeDelegate: DelegateMode? = null
         private set
+
+    var lastMaxConfidence: Float = 0f
 
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
@@ -78,6 +94,9 @@ class YoloDetector(
     private val inputBuffer = ByteBuffer.allocateDirect(1 * INPUT_SIZE * INPUT_SIZE * 3 * 4).apply {
         order(ByteOrder.nativeOrder())
     }
+    // P2: Pre-alokasi IntArray sekali di init untuk menghindari alokasi 1.2MB per frame inference.
+    // INPUT_SIZE² = 640×640 = 409.600 elemen — cukup untuk input bitmap apa pun ≤ 640×640.
+    private val cachedIntValues = IntArray(INPUT_SIZE * INPUT_SIZE)
 
     init {
         setupModel()
@@ -229,10 +248,10 @@ class YoloDetector(
 
         // 3. Postprocess (Extract Boxes & NMS)
         val results = postprocessBoxes(bitmap.width, bitmap.height)
-        Log.i(TAG, "YOLO Detection completed. Found ${results.size} bounding boxes.")
+        Log.d(TAG, "YOLO Detection completed. Found ${results.size} bounding boxes.")
         if (results.isNotEmpty()) {
             val topConf = results.maxOf { it.confidence }
-            Log.i(TAG, "Top confidence: $topConf, Class: ${results.maxByOrNull { it.confidence }?.className}")
+            Log.d(TAG, "Top confidence: $topConf, Class: ${results.maxByOrNull { it.confidence }?.className}")
         }
         return results
     }
@@ -246,8 +265,12 @@ class YoloDetector(
         val newHeight = (bitmap.height * scale).toInt()
         
         val resizedBitmap = Bitmap.createScaledBitmap(bitmap, newWidth, newHeight, true)
-        val intValues = IntArray(newWidth * newHeight)
+        // P2: Gunakan cachedIntValues (pre-alokasi) — tidak ada alokasi 1.2MB per frame.
+        val intValues = cachedIntValues
         resizedBitmap.getPixels(intValues, 0, newWidth, 0, 0, newWidth, newHeight)
+        // Recycle only if createScaledBitmap returned a new instance (it may return the original
+        // when dimensions already match — do not recycle the caller's bitmap).
+        if (resizedBitmap !== bitmap) resizedBitmap.recycle()
         
         val padX = (INPUT_SIZE - newWidth) / 2
         val padY = (INPUT_SIZE - newHeight) / 2
@@ -295,14 +318,23 @@ class YoloDetector(
                 }
 
                 if (maxClassConf > CONFIDENCE_THRESHOLD) {
-                    val cx = output[i][0]
-                    val cy = output[i][1]
-                    val w = output[i][2]
-                    val h = output[i][3]
+                    var cx = output[i][0]
+                    var cy = output[i][1]
+                    var w = output[i][2]
+                    var h = output[i][3]
+
+                    // Auto-detect Normalized vs Absolute
+                    if (w <= 1.5f && h <= 1.5f) {
+                        cx *= INPUT_SIZE
+                        cy *= INPUT_SIZE
+                        w *= INPUT_SIZE
+                        h *= INPUT_SIZE
+                    }
 
                     val rect = buildDetectionRect(cx, cy, w, h, padX, padY, scale, originalWidth, originalHeight)
 
-                    val className = if (classId in CLASSES.indices) CLASSES[classId] else "obj_$classId"
+                    val classNameEn = if (classId in CLASSES.indices) CLASSES[classId] else "obj_$classId"
+                    val className = CLASS_LABELS_ID[classNameEn] ?: classNameEn
                     results.add(DetectionResult(classId, className, maxClassConf, rect))
                 }
                 
@@ -310,6 +342,7 @@ class YoloDetector(
                     highestFrameConf = maxClassConf
                 }
             }
+            lastMaxConfidence = highestFrameConf
             Log.d(TAG, "[Transposed] Frame diproses. Confidence tertinggi di frame ini: $highestFrameConf")
         } else {
             val output = if (outputBufferStandard != null) outputBufferStandard!![0] else outputBuffer[0]
@@ -327,26 +360,38 @@ class YoloDetector(
                     }
                 }
 
+                if (maxClassConf > highestFrameConf) {
+                    highestFrameConf = maxClassConf
+                }
+
                 if (maxClassConf > CONFIDENCE_THRESHOLD) {
-                    val cx = output[0][i]
-                    val cy = output[1][i]
-                    val w = output[2][i]
-                    val h = output[3][i]
+                    var cx = output[0][i]
+                    var cy = output[1][i]
+                    var w = output[2][i]
+                    var h = output[3][i]
+
+                    // Auto-detect Normalized vs Absolute
+                    if (w <= 1.5f && h <= 1.5f) {
+                        cx *= INPUT_SIZE
+                        cy *= INPUT_SIZE
+                        w *= INPUT_SIZE
+                        h *= INPUT_SIZE
+                    }
 
                     // Log the first confident box's raw coordinates
                     if (results.isEmpty()) {
                         Log.i(TAG, "Raw Box: cx=$cx, cy=$cy, w=$w, h=$h (classId=$classId, conf=$maxClassConf)")
                     }
 
-                    // Convert from Letterbox coords back to original image coords
-                    // If coordinates are normalized (0..1), multiply them by INPUT_SIZE first!
-                    // Let's dynamically handle normalized vs absolute
                     val rect = buildDetectionRect(cx, cy, w, h, padX, padY, scale, originalWidth, originalHeight)
 
-                    val className = if (classId in CLASSES.indices) CLASSES[classId] else "obj_$classId"
+                    val classNameEn = if (classId in CLASSES.indices) CLASSES[classId] else "obj_$classId"
+                    val className = CLASS_LABELS_ID[classNameEn] ?: classNameEn
                     results.add(DetectionResult(classId, className, maxClassConf, rect))
                 }
             }
+            lastMaxConfidence = highestFrameConf
+            Log.d(TAG, "[Standard] Frame diproses. Confidence tertinggi di frame ini: $highestFrameConf")
         }
 
         return applyNMS(results)
@@ -358,15 +403,14 @@ class YoloDetector(
         padX: Float, padY: Float, scale: Float,
         originalWidth: Int, originalHeight: Int
     ): RectF {
-        val cxAbsolute = if (cx < 2.0f) cx * INPUT_SIZE else cx
-        val cyAbsolute = if (cy < 2.0f) cy * INPUT_SIZE else cy
-        val wAbsolute = if (w < 2.0f) w * INPUT_SIZE else w
-        val hAbsolute = if (h < 2.0f) h * INPUT_SIZE else h
-
-        val left = (cxAbsolute - wAbsolute / 2 - padX) / scale
-        val top = (cyAbsolute - hAbsolute / 2 - padY) / scale
-        val right = (cxAbsolute + wAbsolute / 2 - padX) / scale
-        val bottom = (cyAbsolute + hAbsolute / 2 - padY) / scale
+        // YOLOv8 TFLite export outputs absolute coordinates in [0, INPUT_SIZE] space.
+        // Do NOT apply a normalized-vs-absolute heuristic — it misfires for boxes
+        // near the left/top edge where cx or cy can be between 1.0 and 2.0, causing
+        // a second x640 multiplication that puts coords far off-screen (clipped to 0).
+        val left   = (cx - w / 2 - padX) / scale
+        val top    = (cy - h / 2 - padY) / scale
+        val right  = (cx + w / 2 - padX) / scale
+        val bottom = (cy + h / 2 - padY) / scale
 
         return RectF(
             left.coerceAtLeast(0f),

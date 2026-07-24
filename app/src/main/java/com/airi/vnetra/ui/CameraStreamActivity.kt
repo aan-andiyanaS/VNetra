@@ -96,19 +96,6 @@ class CameraStreamActivity : AppCompatActivity() {
     private var currentTopInset = 0
     private var currentBottomInset = 0
 
-    private lateinit var tofViews: Array<android.widget.TextView>
-
-
-    // Pre-alokasi untuk mengurangi GC pressure:
-    // floatArrayOf() di dalam loop ToF (64 cell × 10Hz = 640 alokasi/detik) menyebabkan GC pause.
-    // Gunakan array yang sama dan update nilainya.
-    private val hsvTemp = floatArrayOf(0f, 1f, 1f)
-
-    // Warna cell tidak valid (semi-transparan hitam = #60000000).
-    // Pre-compute sekali untuk menghindari Color.parseColor() di setiap cell setiap frame
-    // (hingga 640 string parse/detik setelah sentinel filter → lebih banyak cell invalid).
-    private val colorInvalidCell = android.graphics.Color.argb(96, 0, 0, 0)
-
     // Mode ToF aktif: 4 atau 8 (4x4 atau 8x8)
     // Di-load dari SharedPreferences agar persisten antar sesi
     private var currentTofMode: Int = 8
@@ -138,6 +125,7 @@ class CameraStreamActivity : AppCompatActivity() {
 
     // ── TTS Alert Manager (P3.3) ────────────────
     private lateinit var ttsAlertManager: TtsAlertManager
+    private var initialYawOffset: Float? = null
     private lateinit var navigationCoordinator: NavigationCoordinator
     private lateinit var tofGridRenderer: ToFGridRenderer
 
@@ -160,7 +148,8 @@ class CameraStreamActivity : AppCompatActivity() {
     private var badgeSwipeRevealed = false
 
     // Guard: cegah double-execute akhiriProses
-    private var isAkhiring = false
+    // @Volatile: ditulis dari Main thread, dibaca dari Dispatchers.Default coroutines.
+    @Volatile private var isAkhiring = false
 
     // AI Detector
     private var yoloDetector: YoloDetector? = null
@@ -172,6 +161,9 @@ class CameraStreamActivity : AppCompatActivity() {
     
     // ADR-035: Debounce state for forward movement validation handled by NavigationCoordinator
     private val isInferencing = java.util.concurrent.atomic.AtomicBoolean(false)
+    // Fix 1.5: cache grid size to avoid withContext(Main) on every ToF frame (common path).
+    // Updated on Main thread after rebuildGrid; read on Default thread (volatile for visibility).
+    @Volatile private var cachedTofGridSize = 0
 
     private val exitReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -550,56 +542,60 @@ class CameraStreamActivity : AppCompatActivity() {
                     latestFrameWidth = bitmap.width
                     latestFrameHeight = bitmap.height
 
+                    // Fix 1.1: UI hanya setImageBitmap + updateFpsCounter — sesederhana mungkin di Main thread.
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring) {
                             binding.ivCameraFrame.setImageBitmap(bitmap)
                             updateFpsCounter(jpegBytes.size)
+                        }
+                    }
 
-                            // AI Inference
-                            if (yoloDetector?.modelStatus != ModelStatus.NONE && isInferencing.compareAndSet(false, true)) {
-                                val detector = yoloDetector
-                                if (detector != null) {
-                                    lifecycleScope.launch(Dispatchers.Default) {
-                                        try {
-                                            // 1. Lakukan proses deteksi di background
-                                            val rawResults = detector.detect(bitmap)
-                                            val trackedResults = tracker.process(rawResults)
-                                            ttcManager.cleanup(trackedResults.map { it.trackId }.toSet())
-                                            latestDetections = trackedResults
-                                            navigationCoordinator.processInstantYoloTts(
-                                                detections = trackedResults,
-                                                tofData = latestTofData,
-                                                imuData = safeImuData,
-                                                frameWidth = bitmap.width,
-                                                tofMode = currentTofMode
-                                            )
+                    // Fix 1.1: YOLO diluncurkan di luar withContext(Main).
+                    // AtomicBoolean.compareAndSet dan lifecycleScope.launch keduanya thread-safe.
+                    if (!isDestroyed && !isFinishing && !isAkhiring &&
+                        yoloDetector?.modelStatus != ModelStatus.NONE &&
+                        isInferencing.compareAndSet(false, true)) {
+                        val detector = yoloDetector
+                        if (detector != null) {
+                            lifecycleScope.launch(Dispatchers.Default) {
+                                try {
+                                    val startTime = android.os.SystemClock.elapsedRealtime()
+                                    val rawResults = detector.detect(bitmap)
+                                    val inferenceTime = android.os.SystemClock.elapsedRealtime() - startTime
+                                    val trackedResults = tracker.process(rawResults)
+                                    ttcManager.cleanup(trackedResults.map { it.trackId }.toSet())
+                                    latestDetections = trackedResults
+                                    navigationCoordinator.processInstantYoloTts(
+                                        detections = trackedResults,
+                                        tofData = latestTofData,
+                                        imuData = safeImuData,
+                                        frameWidth = bitmap.width,
+                                        tofMode = currentTofMode
+                                    )
+                                    withContext(Dispatchers.Main) {
+                                        if (!isDestroyed && !isFinishing && !isAkhiring) {
+                                            binding.boundingBoxOverlay.setResults(trackedResults, bitmap.width.toFloat(), bitmap.height.toFloat())
                                             
-                                            // 2. Jika berhasil, update UI di Main Thread
-                                            withContext(Dispatchers.Main) {
-                                                if (!isDestroyed && !isFinishing && !isAkhiring) {
-                                                    binding.boundingBoxOverlay.setResults(trackedResults, bitmap.width.toFloat(), bitmap.height.toFloat())
-                                                }
-                                            }
-                                        } catch (e: Exception) {
-                                            // Tangkap error jika terjadi agar tidak membatalkan seluruh coroutine parent
-                                            // jika bukan CancellationException
-                                            if (e !is kotlinx.coroutines.CancellationException) {
-                                                android.util.Log.e("CameraStreamActivity", "Error during AI inference", e)
-                                            } else {
-                                                throw e
-                                            }
-                                        } finally {
-                                            // 3. Pastikan flag selalu direset apapun yang terjadi
-                                            // Gunakan NonCancellable agar flag tetap di-reset meskipun parent job di-cancel
-                                            withContext(Dispatchers.Main + kotlinx.coroutines.NonCancellable) {
-                                                isInferencing.set(false)
-                                            }
+                                            // Update YOLO Debug UI
+                                            val maxConf = (yoloDetector?.lastMaxConfidence ?: 0f) * 100
+                                            val boxesCount = trackedResults.size
+                                            val yoloFps = if (inferenceTime > 0) 1000f / inferenceTime else 0f
+                                            binding.tvYoloDebug.text = String.format("YOLO: %d boxes | Max Conf: %.1f%% | %dms (%.1f FPS)", boxesCount, maxConf, inferenceTime, yoloFps)
                                         }
                                     }
-                                } else {
+                                } catch (e: Exception) {
+                                    if (e !is kotlinx.coroutines.CancellationException) {
+                                        android.util.Log.e("CameraStreamActivity", "Error during AI inference", e)
+                                    } else {
+                                        throw e
+                                    }
+                                } finally {
+                                    // Fix P4: AtomicBoolean.set() thread-safe — tidak perlu withContext(Main+NonCancellable).
                                     isInferencing.set(false)
                                 }
                             }
+                        } else {
+                            isInferencing.set(false)
                         }
                     }
                 }
@@ -681,16 +677,22 @@ class CameraStreamActivity : AppCompatActivity() {
                     lastImuReceivedAt = System.currentTimeMillis()
                     withContext(Dispatchers.Main) {
                         if (!isDestroyed && !isFinishing && !isAkhiring && imuData.size >= 6) {
-                            binding.tvImuPitch.text = "Pitch: %.1f°".format(imuData[0])
-                            binding.tvImuRoll.text  = "Roll:  %.1f°".format(imuData[1])
-                            binding.tvImuYaw.text   = "Yaw:   %.1f°".format(imuData[2])
-                            // Tampilkan status Mahony: "warming up" selama 5 detik pertama
                             val converged = imuData.getOrElse(8) { 0f } > 0.5f
+                            
                             if (converged) {
-                                binding.tvImuAccel.text = "Accel: %.2f m/s²".format(imuData[5])
+                                if (initialYawOffset == null) {
+                                    initialYawOffset = imuData[2]
+                                }
+                                binding.tvImuAccel.text = "Accel     : %6.2f m/s²".format(imuData[5])
                             } else {
                                 binding.tvImuAccel.text = "Mahony: warming up..."
                             }
+                            binding.tvImuPitch.text     = "Pitch     : %5.1f°".format(imuData[0])
+                            binding.tvImuRoll.text      = "Roll      : %5.1f°".format(imuData[1])
+                            binding.tvImuPitchRate.text = "Pitch Rate: %5.1f°/s".format(imuData[3])
+                            // TODO: verify imuData[2]=ωx_corr maps to Roll Rate (cross-check with firmware)
+                            binding.tvImuRollRate.text  = "Roll Rate : %5.1f°/s".format(imuData[2])
+                            binding.tvImuYaw.text       = "Yaw Rate  : %5.1f°/s".format(imuData[4])
                         }
                     }
                 }
@@ -714,25 +716,29 @@ class CameraStreamActivity : AppCompatActivity() {
 
                     // ── Fase 1: Guard resolusi berubah (perlu Main karena rebuildTofGrid adalah UI op) ──
                     val startSmooth = System.currentTimeMillis()
-                    val tofViewSize = withContext(Dispatchers.Main) {
-                        if (!::tofGridRenderer.isInitialized) return@withContext -1
-                        if (tofData.size != tofGridRenderer.getGridSize()) {
-                            val detectedMode = if (tofData.size == 16) 4 else 8
-                            if (currentTofMode != detectedMode) {
-                                currentTofMode = detectedMode
-                                saveTofMode(detectedMode)
-                                tofGridRenderer.rebuildGrid(detectedMode)
-                                updateTofModeButtons(detectedMode)
+                    // Fix 1.5: Fast path — baca cachedTofGridSize tanpa context switch ke Main.
+                    // withContext(Main) hanya terjadi saat init pertama atau mode berubah (jarang).
+                    if (cachedTofGridSize == 0 || tofData.size != cachedTofGridSize) {
+                        withContext(Dispatchers.Main) {
+                            if (!::tofGridRenderer.isInitialized) return@withContext
+                            val currentSize = tofGridRenderer.getGridSize()
+                            if (tofData.size != currentSize) {
+                                val detectedMode = if (tofData.size == 16) 4 else 8
+                                if (currentTofMode != detectedMode) {
+                                    currentTofMode = detectedMode
+                                    saveTofMode(detectedMode)
+                                    tofGridRenderer.rebuildGrid(detectedMode)
+                                    updateTofModeButtons(detectedMode)
+                                }
+                                localSmoothed = null
+                                localHoldover = null
+                                // cachedTofGridSize tetap 0: sinyal skip frame berikutnya juga
+                            } else {
+                                cachedTofGridSize = currentSize // Grid valid, cache ukurannya
                             }
-                            localSmoothed = null // Reset smoothing array saat resolusi berubah
-                            localHoldover = null
-                            return@withContext -1 // Sinyal: skip frame ini
                         }
-                        tofGridRenderer.getGridSize()
-                    }
-                    if (tofViewSize < 0) {
                         pingTofSmooth = System.currentTimeMillis() - startSmooth
-                        return@collect
+                        if (cachedTofGridSize == 0) return@collect // Grid belum siap atau baru di-rebuild
                     }
 
                     // ── Fase 2: KOMPUTASI di Default thread (tidak menyentuh View) ──
@@ -779,8 +785,12 @@ class CameraStreamActivity : AppCompatActivity() {
                     navigationCoordinator.updateMovementState(imuSnap)
                     val isMovingForward = navigationCoordinator.movingForwardConsecutiveFrames >= 3
                     val yawRate = imuSnap?.getOrElse(4) { 0f } ?: 0f
-                    val isTurning = kotlin.math.abs(yawRate) > 30f
-                    val isHeadRotating = navigationCoordinator.isHeadRotating(imuSnap, 5f)
+                    // isTurning: threshold 10°/s agar menoleh pelan (mencari jalan) juga dikenali
+                    // sebagai 'searching', sehingga SmartNavigation diam (tidak spam) saat proses pencarian.
+                    val isTurning = kotlin.math.abs(yawRate) > 10f
+                    // isHeadRotating: threshold 15°/s — cukup ketat untuk menangkap nodding/sweep lantai
+                    // (false positive terrain), tapi cukup longgar agar langsung unblock setelah selesai menoleh.
+                    val isHeadRotating = navigationCoordinator.isHeadRotating(imuSnap, 15f)
 
                     // ADR-035: Auto-Unmute (Mute Cerdas)
                     if (isMovingForward && ::ttsAlertManager.isInitialized && ttsAlertManager.isMuted) {
@@ -814,10 +824,8 @@ class CameraStreamActivity : AppCompatActivity() {
                                     resolution = currentTofMode
                                 )
                                 
-                                // Jika ToF gagal membaca jarak (D_MAX), abaikan jarak statis karena kita pakai Formula I instan
-                                if (dObj >= TofDepthEstimator.D_MAX) {
-                                    // D_MAX dibiarkan agar tidak memicu alarm palsu di ToF loop
-                                }
+                                // Jika ToF gagal membaca jarak (D_MAX), lewati objek ini
+                                if (dObj >= TofDepthEstimator.D_MAX) continue
                                 
                                 // Catatan: ttsAlertManager.process untuk YOLO kini ditangani penuh secara instan
                                 // oleh triggerInstantYoloTts. Di sini kita hanya mengupdate state deteksi ancaman.
@@ -848,7 +856,10 @@ class CameraStreamActivity : AppCompatActivity() {
 
                         if (!hasCloseYoloThreat && (wallDetected || genericObstacleDistance < 2000)) {
                             val obstacleDist = if (wallDetected) {
-                                tofData.filter { it in 30..1500 }.average().toInt()
+                                // ponytail: fold avoids List allocation (was: filter{}.average() at 10Hz)
+                                var sum = 0L; var count = 0
+                                for (d in tofData) { if (d in 30..1500) { sum += d; count++ } }
+                                if (count > 0) (sum / count).toInt() else Int.MAX_VALUE
                             } else {
                                 genericObstacleDistance
                             }
@@ -1119,12 +1130,13 @@ class CameraStreamActivity : AppCompatActivity() {
     }
 
     private fun cancelAllJobs() {
-        runCatching { frameCollectJob?.cancel() }; frameCollectJob = null
-        runCatching { stateCollectJob?.cancel() }; stateCollectJob = null
-        runCatching { imuCollectJob?.cancel() };   imuCollectJob   = null
-        runCatching { tofCollectJob?.cancel() };   tofCollectJob   = null
+        runCatching { frameCollectJob?.cancel() };   frameCollectJob   = null
+        runCatching { stateCollectJob?.cancel() };   stateCollectJob   = null
+        runCatching { imuCollectJob?.cancel() };     imuCollectJob     = null
+        runCatching { tofCollectJob?.cancel() };     tofCollectJob     = null
         runCatching { latencyMonitorJob?.cancel() }; latencyMonitorJob = null
-        runCatching { pingWebsocketJob?.cancel() }; pingWebsocketJob = null
+        runCatching { pingWebsocketJob?.cancel() };  pingWebsocketJob  = null
+        runCatching { muteToggleJob?.cancel() };     muteToggleJob     = null
     }
 
     /**
@@ -1175,6 +1187,7 @@ class CameraStreamActivity : AppCompatActivity() {
         }
         
         isBlockedState = false         // reset status terhalang
+        initialYawOffset = null
 
         pingCamera = 0
         pingTofSmooth = 0

@@ -218,7 +218,7 @@ class TtsAlertManager(private val context: Context) {
                     
                     // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
                     val aLin = imuData[5]
-                    val isPavingObj = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
+                    val isPavingObj = objectLabel.startsWith("paving")
                     val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
                     if (isStaticObject && aLin < 2.94f) {
                         vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
@@ -256,9 +256,11 @@ class TtsAlertManager(private val context: Context) {
         // =================================================================
 
 
-        // Aturan khusus untuk Paving (Guiding Block)
-        val isPaving = objectLabel in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
-        val finalLabel = if (isPaving) "paving $objectLabel" else objectLabel
+        val isPaving = objectLabel.startsWith("paving")
+        val finalLabelBase = if (isPaving) objectLabel else objectLabel
+        
+        // ADR-039: Tambahan kata "mendekat" jika objek secara nyata bergerak maju ke arah pengguna (vAvg > 500 mm/s)
+        val finalLabel = if (!isPaving && vAvg > 500f) "$finalLabelBase mendekat" else finalLabelBase
         
         val dirText  = SpatialMappingUtils.clockDirectionToTts(clockDirection)
         

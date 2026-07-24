@@ -130,7 +130,7 @@ class NavigationCoordinator(
             )
             
             if (alertMsg != null) {
-                val isPaving = label in listOf("lurus", "belok", "simpang 3", "simpang 4", "stop")
+                val isPaving = label.startsWith("paving")
                 val isPeripheral = arahJam == 10 || arahJam == 2
                 
                 if (isPaving || isPeripheral) {

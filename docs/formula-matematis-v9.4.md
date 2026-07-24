@@ -1790,14 +1790,6 @@ $$\boxed{\delta_I^{\text{pool}} = \begin{cases}
 
 Kendaraan yang hanya *melintas* di jalur berbeda (bukan menabrak) memiliki pusat bounding box ($x_c$) yang bergeser lateral secara konsisten. Ketika pergeseran ini terdeteksi **dan** jarak ToF tidak sedang berkurang, skor TTC perlu dikoreksi ke bawah.
 
-Pergeseran horizontal centroid antar frame:
-
-$$\Delta x_c^{(i)} = x_c^{(i,t)} - x_c^{(i,t-1)}$$
-
-Skor drift ternormalisasi:
-
-$$\boxed{\text{drift\_score}^{(i)} = \text{clip}\!\left(\frac{|\Delta x_c^{(i)}|}{drift_{norm}},\ 0,\ 1\right)}$$
-
 Guard kondisional — drift hanya aktif ketika jarak ToF **tidak sedang berkurang** ($\text{dist\_score} \le 0.5$):
 
 $$\boxed{\text{drift\_guard}^{(i)} = \begin{cases} \text{drift\_score}^{(i)}, & \text{dist\_score}^{(i)} \le 0.5 \\ 0, & \text{dist\_score}^{(i)} > 0.5 \end{cases}}$$
@@ -1812,7 +1804,39 @@ $\text{TTC\_score\_final}^{(i)}$ menggantikan $\text{TTC\_score}^{(i)}$ sebagai 
 
 > **Bobot tidak berubah:** $w_A + w_{AR} + w_{dist} = 1.0$ tetap. `drift_guard` adalah modifier *post-hoc* kondisional pada output `TTC_score`, bukan sub-skor ke-4 dalam penjumlahan berbobot.
 
+**I.8.1 — Kompensasi IMU Yaw Rate pada Perhitungan $\Delta x_c$ (implementasi aktual):**
+
+Formula naif mengukur pergeseran centroid sebagai selisih posisi antar frame biasa. Namun karena kamera dipasang di kepala pengguna, setiap rotasi kepala akan menggeser seluruh scene di layar — termasuk objek statis — sehingga formula naif akan salah mengklasifikasikan benda diam sebagai "benda yang bergerak menghindar" (*false evasion detection*).
+
+Solusinya adalah **Prediksi Posisi Berbasis IMU** (*IMU-Compensated Positional Prediction*). Sistem memprediksi posisi objek pada frame saat ini berdasarkan kecepatan putaran kepala (Yaw Rate, $\omega_z^{corr}$) dari Giroskop yang sudah terkoreksi bias oleh EKF:
+
+$$\boxed{\text{predCx}^{(i,t)} = x_c^{(i,t-1)} + \left(\omega_z^{corr} \cdot \Delta t_{frame} \cdot k_{px/deg}\right)}$$
+
+Di mana:
+- $\omega_z^{corr}$ — laju yaw terkoreksi dari IMU (°/s), dari indeks ke-4 paket WebSocket ESP32
+- $\Delta t_{frame} = 1/f_{cam}$ — periode frame kamera (s), dengan $f_{cam} = 15$ Hz
+- $k_{px/deg} = W_{cam} / FoV_H \approx 640/66 \approx 9.7$ px/° — konversi derajat putaran kepala ke pergeseran piksel; didefinisikan sebagai konstanta `PX_PER_DEG` di `SpatialMappingUtils.kt`
+
+Setelah posisi prediksi dihitung, $\Delta x_c$ adalah **selisih absolut antara posisi aktual dan posisi prediksi**, bukan selisih antar frame biasa:
+
+$$\boxed{\Delta x_c^{(i)} = \left| x_c^{(i,t)} - \text{predCx}^{(i,t)} \right|}$$
+
+Nilai ini kemudian dinormalisasi menjadi `drift_score` menggunakan $drift_{norm} = R_{col} = 60$ px (lebar satu kolom ToF):
+
+$$\boxed{\text{drift\_score}^{(i)} = \text{clip}\!\left(\frac{\Delta x_c^{(i)}}{drift_{norm}},\ 0,\ 1\right)}$$
+
+**Interpretasi Fisika:**
+
+| Kondisi Objek | $\Delta x_c$ | $\text{drift\_score}$ | Efek pada TTC |
+|---|---|---|---|
+| Diam (statis) — pengguna menoleh | $\approx 0$ (prediksi akurat) | $\approx 0$ | **Tidak dikurangi** |
+| Dinamis — melintas ke samping | $\gg 0$ (menyimpang dari prediksi) | $\to 1.0$ | **Dikurangi proporsional** |
+| Dinamis — mendekat frontal | $\approx 0$ (bergerak maju, tidak lateral) | $\approx 0$ | **Tidak dikurangi** |
+
+Dengan formula ini, sistem mampu membedakan antara "objek statis yang terlihat bergeser karena pengguna menoleh" dengan "objek yang benar-benar bergerak menghindar ke samping" — hal yang **tidak mungkin** dilakukan oleh formula selisih frame biasa tanpa data IMU.
+
 **Domain:** $\text{TTC\_score}^{(i)}, \text{TTC\_weighted}^{(i)}, \text{TTC\_score\_final}^{(i)} \in [0, 1]$, $\delta_I^{\text{pool}} \in \{\text{IMMINENT, PROBABLE, POSSIBLE}\}$
+
 
 ---
 

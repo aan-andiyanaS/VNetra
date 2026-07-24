@@ -75,8 +75,8 @@ class CameraStreamService : Service() {
         private const val RECONNECT_MAX_MS  = 8_000L
 
         const val EXTRA_IP    = "esp32_ip"
-        const val ACTION_STOP = "com.example.phase4_camera_eps_s3_mobile.ACTION_STOP"
-        const val ACTION_EXIT_APP = "com.example.phase4_camera_eps_s3_mobile.ACTION_EXIT_APP"
+        const val ACTION_STOP     = "com.airi.vnetra.ACTION_STOP"
+        const val ACTION_EXIT_APP = "com.airi.vnetra.ACTION_EXIT_APP"
 
         fun createStartIntent(ctx: Context, ip: String) =
             Intent(ctx, CameraStreamService::class.java).apply { putExtra(EXTRA_IP, ip) }
@@ -318,22 +318,10 @@ class CameraStreamService : Service() {
                                     else -> Log.w(TAG, "Frame tidak dikenal: type=0x%02X size=${raw.size}B".format(type.toInt() and 0xFF))
                                 }
 
-                                serviceScope.launch {
-                                    when (type) {
-                                        FRAME_TYPE_JPEG -> {
-                                            _frameFlow.emit(payload)
-                                        }
-                                        FRAME_TYPE_IMU  -> {
-                            // Payload v2: 9 float × 4B = 36B (firmware baru)
-                            // [0]=θ  [1]=φ  [2]=ωx_corr  [3]=ωy_corr  [4]=ωz_corr
-                            // [5]=‖a_lin‖  [6]=ts_esp_ms  [7]=v_head_base  [8]=is_converged
-                            emitImuPayload(payload)
-                        }
-                                        FRAME_TYPE_TOF  -> {
-                                            emitTofPayload(payload)
-                                        }
-                                        // FRAME_TYPE_HBEAT (0x03) diabaikan — sudah cukup sebagai keepalive
-                                    }
+                                when (type) {
+                                    FRAME_TYPE_JPEG -> _frameFlow.tryEmit(payload)
+                                    FRAME_TYPE_IMU  -> serviceScope.launch { emitImuPayload(payload) }
+                                    FRAME_TYPE_TOF  -> serviceScope.launch { emitTofPayload(payload) }
                                 }
                             }
                         }
@@ -431,27 +419,7 @@ class CameraStreamService : Service() {
                             emitImuPayload(payload)
                         }
                         FRAME_TYPE_TOF -> {
-                            if (payload.size >= 2) {
-                                val resMode = payload[0].toInt() and 0xFF
-                                val numCells = resMode * resMode
-                                val distSize = numCells * 2
-
-                                if (payload.size >= 1 + distSize) {
-                                    val ints = IntArray(numCells)
-                                    val buf = java.nio.ByteBuffer.wrap(payload, 1, distSize)
-                                        .order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                                        .asShortBuffer()
-
-                                    for (i in 0 until numCells) {
-                                        ints[i] = buf.get(i).toInt()
-                                    }
-                                    _tofFlow.emit(ints)
-                                } else {
-                                    Log.e(TAG, "UDP TOF payload terlalu kecil untuk ${resMode}x${resMode}: ${payload.size}B < ${1 + distSize}B")
-                                }
-                            } else {
-                                Log.e(TAG, "UDP TOF payload terlalu kecil: ${payload.size}B < 2B!")
-                            }
+                            emitTofPayload(payload)
                         }
                     }
                 }

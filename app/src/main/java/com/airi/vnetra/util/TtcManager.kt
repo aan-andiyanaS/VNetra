@@ -19,14 +19,17 @@ class TtcManager {
     private val ttcHigh = 0.75f
     private val ttcMid = 0.40f
 
-    // Class weights (m_class)
+    // Class weights (m_class) — kunci HARUS cocok dengan className Indonesia dari YoloDetector.CLASS_LABELS_ID
     private val classWeights = mapOf(
-        "bus" to 1.6f,
-        "truck" to 1.6f,
-        "car" to 1.5f,
-        "motorcycle" to 1.2f,
-        "person" to 1.0f,
-        "bicycle" to 0.8f
+        "mobil"             to 1.5f,
+        "selokan"           to 1.3f,
+        "motor"             to 1.2f,
+        "orang"             to 1.0f,
+        "tiang"             to 1.1f,
+        "paving peringatan" to 0.6f,
+        "paving lurus"      to 0.6f,
+        "gerobak"           to 1.0f,
+        "pohon"             to 0.8f
     )
     
     // Memory for object history
@@ -37,7 +40,7 @@ class TtcManager {
         var lastCx: Float = -1f
     }
 
-    private val objectMemory = mutableMapOf<Int, ObjectHistory>()
+    private val objectMemory = java.util.concurrent.ConcurrentHashMap<Int, ObjectHistory>()
 
     /**
      * Evaluasi tingkat ancaman objek berdasarkan pelebaran kotak (area growth),
