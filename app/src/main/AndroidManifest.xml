@@ -70,6 +70,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:screenOrientation="portrait"
             android:label="@string/app_name"
             android:theme="@style/Theme.ESP32Config">
             <intent-filter>
@@ -80,10 +81,12 @@
 
         <activity
             android:name=".ui.DeviceConfigActivity"
+            android:screenOrientation="portrait"
             android:theme="@style/Theme.ESP32Config" />
 
         <activity
             android:name=".ui.CameraStreamActivity"
+            android:screenOrientation="portrait"
             android:launchMode="singleTop"
             android:theme="@style/Theme.ESP32Config" />
 
