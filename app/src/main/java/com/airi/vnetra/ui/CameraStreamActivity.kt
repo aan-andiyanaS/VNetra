@@ -689,9 +689,8 @@ class CameraStreamActivity : AppCompatActivity() {
                             }
                             binding.tvImuPitch.text     = "Pitch     : %5.1f°".format(imuData[0])
                             binding.tvImuRoll.text      = "Roll      : %5.1f°".format(imuData[1])
-                            binding.tvImuPitchRate.text = "Pitch Rate: %5.1f°/s".format(imuData[3])
-                            // TODO: verify imuData[2]=ωx_corr maps to Roll Rate (cross-check with firmware)
-                            binding.tvImuRollRate.text  = "Roll Rate : %5.1f°/s".format(imuData[2])
+                            binding.tvImuPitchRate.text = "Pitch Rate: %5.1f°/s".format(imuData[2])  // [2]=ωx_corr = Pitch Rate
+                            binding.tvImuRollRate.text  = "Roll Rate : %5.1f°/s".format(imuData[3])  // [3]=ωy_corr = Roll Rate
                             binding.tvImuYaw.text       = "Yaw Rate  : %5.1f°/s".format(imuData[4])
                         }
                     }
