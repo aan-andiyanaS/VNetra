@@ -29,8 +29,6 @@ import kotlinx.coroutines.channels.BufferOverflow
  * Hysteresis D_RESET = D_W0 + EPS_NOISE mencegah flag reset-set-reset
  * berulang saat d_obj berfluktuasi tepat di batas 1000 mm.
  *
- * Juga berperan sebagai TTS engine yang digunakan Formula J (terrain alert).
- *
  * Untuk Tahap 1 (tanpa YOLO): tracking ID = indeks kolom ToF sebagai proxy.
  * Untuk Tahap 2 (dengan YOLO): tracking ID = YOLO tracking ID per objek.
  *
@@ -219,7 +217,7 @@ class TtsAlertManager(private val context: Context) {
                     // FUSI ACCEL: Noise Gate untuk Objek Statis (Ponytail ADR-017)
                     val aLin = imuData[5]
                     val isPavingObj = objectLabel.startsWith("paving")
-                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
+                    val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPavingObj
                     if (isStaticObject && aLin < 2.94f) {
                         vRaw = 0f // Pengguna diam, kecepatan objek statis pasti noise
                     }
@@ -295,8 +293,7 @@ class TtsAlertManager(private val context: Context) {
                 // Jika pengguna menunduk tajam (pitch > 20 derajat), ToF akan mengenai lantai di dekat kaki (< 1000mm).
                 // Abaikan peringatan tembok statis dalam kondisi ini agar tidak diteriaki "Tembok" saat melihat sepatu.
                 val pitchAngle = imuData?.getOrElse(0) { 0f } ?: 0f
-                val isStaticObst = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || 
-                                   trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID
+                val isStaticObst = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
                 if (isStaticObst && pitchAngle > 20f) return null
                 
                 // ADR-035: Cooldown minimum antar re-trigger untuk tracking ID yang sama.
@@ -313,8 +310,7 @@ class TtsAlertManager(private val context: Context) {
                 // Jika objek statis (Tembok/Terrain) DAN user sedang diam (!isMovingForward):
                 // Tunda pencatatan ke memori. Sistem tetap bisu sampai user mengambil langkah maju, 
                 // yang akan memicu alert instan tanpa delay 1 detik.
-                val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || 
-                                       trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID
+                val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
                 if (isStaticObstacle && !isMovingForward) return null
 
                 // Kondisi: masuk zona bahaya, belum pernah diperingatkan -> one-shot
@@ -348,7 +344,7 @@ class TtsAlertManager(private val context: Context) {
                     return null
                 }
                 
-                val isWall = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID
+                val isWall = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
                 
                 if (isWall && isMovingForward) {
                     val lastSpoken = lastSpokenTime[trackingId] ?: 0L
@@ -379,12 +375,11 @@ class TtsAlertManager(private val context: Context) {
                     kotlin.math.abs(yawRateImu) > 10f ||
                     kotlin.math.abs(rollRate) > 10f
                 if (!isHeadRotatingNow) {
-                    // ADR-035 (fix final): Untuk rintangan STATIS (tembok/terrain), hanya reset flag
+                    // ADR-035 (fix final): Untuk rintangan STATIS (tembok), hanya reset flag
                     // jika pengguna benar-benar berjalan menjauh (isMovingForward=true).
                     // Ini mencegah noise ToF (dObj osilasi di sekitar D_RESET=1150mm saat diam)
                     // dari menyebabkan flag reset dan memicu peringatan ulang berulang-ulang.
-                    val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID ||
-                        trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID
+                    val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
                     val shouldReset = !isStaticObstacle || isMovingForward
                     if (shouldReset) {
                         alertFlags[trackingId] = false

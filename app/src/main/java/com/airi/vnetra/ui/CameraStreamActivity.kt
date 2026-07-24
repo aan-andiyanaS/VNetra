@@ -35,7 +35,6 @@ import com.airi.vnetra.util.TofDepthEstimator
 import com.airi.vnetra.util.TtsAlertManager
 import com.airi.vnetra.util.SpatialMappingUtils
 import com.airi.vnetra.util.SessionManager
-import com.airi.vnetra.util.TerrainDetector
 import com.airi.vnetra.util.SimpleTracker
 import com.airi.vnetra.util.TtcManager
 import com.airi.vnetra.util.TtcStatus
@@ -115,7 +114,6 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var pingCamera:     Long = 0
     @Volatile private var pingTofSmooth:  Long = 0
     @Volatile private var pingFormulaEH:  Long = 0
-    @Volatile private var pingTerrain:    Long = 0
     @Volatile private var pingTotalTof:   Long = 0
     @Volatile private var pingWebsocket:  Long = -1L
 
@@ -129,9 +127,6 @@ class CameraStreamActivity : AppCompatActivity() {
     private lateinit var navigationCoordinator: NavigationCoordinator
     private lateinit var tofGridRenderer: ToFGridRenderer
 
-    // ── Formula J — Terrain Detector (P6) ─────────────────────────
-    private val terrainDetector = TerrainDetector()
-    
     @Volatile private var isBlockedState = false
     // Cooldown: cegah terrain alert flood (min. 3 detik antar peringatan, kecuali HIGH yang selalu langsung)
     
@@ -663,7 +658,6 @@ class CameraStreamActivity : AppCompatActivity() {
         pingCamera = 0
         pingTofSmooth = 0
         pingFormulaEH = 0
-        pingTerrain = 0
         pingTotalTof = 0
         pingWebsocket = -1L
 
@@ -960,65 +954,8 @@ class CameraStreamActivity : AppCompatActivity() {
                     }
                     pingFormulaEH = System.currentTimeMillis() - startFormula
 
-                    // Fase 3: TerrainDetector
-                    val startTerrain = System.currentTimeMillis()
-                    if (::ttsAlertManager.isInitialized) {
-                        val expectedSize = currentTofMode * currentTofMode
-                        if (tofData.size == expectedSize) {
-                            val terrainResult = terrainDetector.process(
-                                tofData   = tofData,
-                                thetaDeg  = thetaDeg
-                            )
+                    pingTotalTof = pingTofSmooth + pingFormulaEH
 
-                            // ADR-035: Lewati terrain detection saat kepala berotasi.
-                            // Menunduk menyebabkan ToF menyapu lantai → false positive CONTAMINATED/HOLE.
-                            if (!isHeadRotating &&
-                                terrainResult.type != TerrainDetector.TerrainType.SAFE &&
-                                terrainResult.type != TerrainDetector.TerrainType.OPEN &&
-                                terrainResult.confidence >= 0.55f) {
-                                
-                                val typeText = when (terrainResult.type) {
-                                    TerrainDetector.TerrainType.STAIR_DOWN -> "tangga turun"
-                                    TerrainDetector.TerrainType.STAIR_UP   -> "tangga naik"
-                                    TerrainDetector.TerrainType.HOLE       -> "lubang"
-                                    TerrainDetector.TerrainType.CONTAMINATED -> "objek dekat"
-                                    else -> ""
-                                }
-
-                                if (typeText.isNotEmpty()) {
-                                    // Validasi YOLO khusus untuk Tangga (HOLE, CONTAMINATED bypass YOLO)
-                                    var yoloValidated = true
-                                    val isStair = terrainResult.type == TerrainDetector.TerrainType.STAIR_DOWN || terrainResult.type == TerrainDetector.TerrainType.STAIR_UP
-                                    
-                                    if (isStair) {
-                                        val currentDetections = latestDetections
-                                        yoloValidated = currentDetections.any { it.className == "tangga naik" || it.className == "tangga turun" }
-                                    }
-
-                                    if (yoloValidated) {
-                                        // Lempar ke TtsAlertManager agar mematuhi Formula G (Adaptive Threshold) & Formula H (Reset Cooldown)
-                                        val alertMsg = ttsAlertManager.process(
-                                            trackingId = SpatialMappingUtils.TERRAIN_TRACKING_ID,
-                                            dObj = terrainResult.distance.toInt(),
-                                            clockDirection = terrainResult.direction,
-                                            objectLabel = typeText,
-                                            isMovingForward = isMovingForward,
-                                            imuData = safeImuData
-                                        )
-                                        
-                                        if (alertMsg != null) {
-                                            val isHigh = terrainResult.confidence >= 0.70f
-                                            if (isHigh) ttsAlertManager.speak(alertMsg)
-                                            else ttsAlertManager.speakAdd(alertMsg)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } // end if (ttsAlertManager.isInitialized)
-                    pingTerrain = System.currentTimeMillis() - startTerrain
-
-                    pingTotalTof = pingTofSmooth + pingFormulaEH + pingTerrain
                 } // end collect { tofData ->
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e  // re-throw agar coroutine cancellation bisa propagate (jangan diswallow!)
@@ -1187,7 +1124,6 @@ class CameraStreamActivity : AppCompatActivity() {
         val tofTotal = pingTotalTof
         val smooth = pingTofSmooth
         val formula = pingFormulaEH
-        val terrain = pingTerrain
         val maxBottleneck = maxOf(cam, tofTotal)
 
         val text = """
@@ -1201,8 +1137,7 @@ class CameraStreamActivity : AppCompatActivity() {
             
             [Sequential ToF Details]
             ├─ Smoothing : $smooth ms
-            ├─ Formula E/H : $formula ms
-            └─ Terrain J : $terrain ms
+            └─ Formula E/H : $formula ms
             ===========================
         """.trimIndent()
         
@@ -1229,7 +1164,6 @@ class CameraStreamActivity : AppCompatActivity() {
         pingCamera = 0
         pingTofSmooth = 0
         pingFormulaEH = 0
-        pingTerrain = 0
         pingTotalTof = 0
 
         runOnUiThread {
@@ -1238,7 +1172,7 @@ class CameraStreamActivity : AppCompatActivity() {
                 binding.tvImuRoll.text  = "Roll:  —"
                 binding.tvImuYaw.text   = "Yaw:   —"
                 binding.tvImuAccel.text = "Accel: —"
-                binding.tvLatencyMonitor.text = "=== SYSTEM PING MONITOR ===\nCam Decode : —\nToF Total  : —\n---------------------------\n► MAX BOTTLENECK : —\n\n[Sequential ToF Details]\n├─ Smoothing : —\n├─ Formula E/H : —\n└─ Terrain J : —\n==========================="
+                binding.tvLatencyMonitor.text = "=== SYSTEM PING MONITOR ===\nCam Decode : —\nToF Total  : —\n---------------------------\n► MAX BOTTLENECK : —\n\n[Sequential ToF Details]\n├─ Smoothing : —\n└─ Formula E/H : —\n==========================="
                 binding.ivCameraFrame.setImageResource(android.R.color.transparent)
                 if (::tofGridRenderer.isInitialized) {
                     tofGridRenderer.clearGrid()

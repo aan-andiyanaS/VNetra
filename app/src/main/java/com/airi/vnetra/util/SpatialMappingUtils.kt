@@ -45,7 +45,6 @@ object SpatialMappingUtils {
 
 
     const val WALL_TRACKING_ID = 999  // ID unik global untuk asisten TTS tembok
-    const val TERRAIN_TRACKING_ID = 998  // ID unik untuk asisten medan jalan
 
     // Fraksi grid ToF terhadap lebar kamera (dari XML: width_percent="0.69")
     const val TOF_GRID_FRAC = 0.69f  // gridTof.width / ivCameraFrame.width
