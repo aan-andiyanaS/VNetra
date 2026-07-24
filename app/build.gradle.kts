@@ -15,6 +15,12 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // ADR-047: minSdk=26 (Android 8.0) → semua device target adalah arm64.
+        // abiFilters mengurangi ukuran APK ~25-30% dan mempercepat load TFLite.
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     packaging {
@@ -65,8 +71,9 @@ dependencies {
     implementation(libs.squareup.okhttp)
 
     // TensorFlow Lite
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-gpu:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-gpu:2.16.1")
+    implementation("org.tensorflow:tensorflow-lite-gpu-api:2.16.1")
 
     // Test
     testImplementation(libs.junit)

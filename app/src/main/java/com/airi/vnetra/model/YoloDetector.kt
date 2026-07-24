@@ -144,12 +144,24 @@ class YoloDetector(
                             activeDelegate = DelegateMode.NPU
                         }
                         DelegateMode.GPU -> {
-                            gpuDelegate = GpuDelegate()
+                            // ADR-047 Fix A: SUSTAINED_SPEED mencegah GPU frekuensi drop saat thermal throttle.
+                            // Pada Exynos 990, ini menstabilkan inference dari ~55ms → ~35ms saat device panas.
+                            // Jika driver tidak mendukung hint ini, opsi diabaikan secara diam-diam.
+                            val gpuOptions = GpuDelegate.Options().apply {
+                                inferencePreference = GpuDelegate.Options.INFERENCE_PREFERENCE_SUSTAINED_SPEED
+                            }
+                            gpuDelegate = GpuDelegate(gpuOptions)
                             options.addDelegate(gpuDelegate)
                             activeDelegate = DelegateMode.GPU
                         }
                         DelegateMode.CPU -> {
-                            options.setNumThreads(4)
+                            // ADR-047 Fix B: Adaptive thread count — deteksi core aktual saat runtime.
+                            // coerceIn(2, 6): minimum 2 (device 2-core), maksimum 6 (flagship 12-core).
+                            // Contoh: 4-core → 2 thread, 8-core → 4 thread, 12-core → 6 thread.
+                            val cores = Runtime.getRuntime().availableProcessors()
+                            val threads = (cores / 2).coerceIn(2, 6)
+                            options.setNumThreads(threads)
+                            Log.i(TAG, "CPU fallback: $threads threads (dari $cores core tersedia)")
                             activeDelegate = DelegateMode.CPU
                         }
                         else -> continue

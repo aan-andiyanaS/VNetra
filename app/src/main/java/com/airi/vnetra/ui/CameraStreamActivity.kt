@@ -17,6 +17,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.Settings
 import android.util.Log
+import android.view.KeyEvent
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -128,6 +129,11 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var initialYawOffset: Float? = null  // ditulis dari imuCollectJob (Default)
     private lateinit var navigationCoordinator: NavigationCoordinator
     private lateinit var tofGridRenderer: ToFGridRenderer
+
+    // ADR-047 Fix D: Screen-off navigation mode — menjaga CPU+audio aktif saat layar mati.
+    // Berguna untuk pengguna tunanetra (layar tidak diperlukan) dan mencegah thermal throttle.
+    private var screenOffWakeLock: PowerManager.WakeLock? = null
+    private var isScreenOffModeActive = false
 
     // ── Formula J — Terrain Detector (P6) ───────────────────────
     private val terrainDetector = TerrainDetector()
@@ -341,6 +347,9 @@ class CameraStreamActivity : AppCompatActivity() {
         // ADR-046: Recycle double bitmap buffer
         bitmapBuffer[0]?.recycle(); bitmapBuffer[0] = null
         bitmapBuffer[1]?.recycle(); bitmapBuffer[1] = null
+        // ADR-047: Release WakeLock jika screen-off mode masih aktif
+        screenOffWakeLock?.release()
+        screenOffWakeLock = null
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -355,6 +364,58 @@ class CameraStreamActivity : AppCompatActivity() {
     }
 
     override fun onSupportNavigateUp(): Boolean { moveTaskToBack(true); return true }
+
+    /**
+     * ADR-047 Fix D: Toggle Screen-Off Navigation Mode.
+     *
+     * Saat aktif: layar mati, CPU+audio tetap berjalan via PARTIAL_WAKE_LOCK.
+     * Berguna untuk pengguna tunanetra (tidak perlu layar) dan mengurangi suhu
+     * device ~10°C, mencegah thermal throttling pada Exynos 990.
+     *
+     * WakeLock dibatasi 30 menit sebagai safety guard.
+     * User bisa nyalakan layar kembali via power button kapan saja.
+     */
+    private fun toggleScreenOffMode() {
+        isScreenOffModeActive = !isScreenOffModeActive
+        if (isScreenOffModeActive) {
+            // Matikan layar: hapus FLAG_KEEP_SCREEN_ON, acquire PARTIAL_WAKE_LOCK
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            screenOffWakeLock = pm.newWakeLock(
+                android.os.PowerManager.PARTIAL_WAKE_LOCK,
+                "VNetra:ScreenOffNav"
+            ).also { it.acquire(30 * 60 * 1000L) } // max 30 menit
+            ttsAlertManager.speakAdd("Mode layar mati aktif")
+            android.util.Log.i("CameraStreamActivity", "ADR-047: Screen-off mode ON")
+        } else {
+            // Nyalakan layar kembali
+            screenOffWakeLock?.release()
+            screenOffWakeLock = null
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            ttsAlertManager.speakAdd("Layar aktif kembali")
+            android.util.Log.i("CameraStreamActivity", "ADR-047: Screen-off mode OFF")
+        }
+    }
+
+    /**
+     * Long-press volume-down toggle screen-off navigation mode.
+     * Volume-down adalah tombol paling mudah diraba tunanetra tanpa melihat layar.
+     */
+    override fun onKeyLongPress(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            toggleScreenOffMode()
+            return true
+        }
+        return super.onKeyLongPress(keyCode, event)
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            event?.startTracking()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
 
     // ──────────────────────────────────────────────────────────────────────────
     // Runtime permissions
