@@ -1,4 +1,4 @@
-## Release Notes & Refactor Summary (v9.5)
+## ADR-049: Asynchronous YOLO Initialization, UI Refinement, and TerrainDetector Deprecation
 
 Pembaruan kali ini mencakup perbaikan *bottleneck* performa di perangkat spesifikasi menengah, perbaikan visual *augmented-reality* grid ToF, dan pembersihan ekstensif (*clean code*) dengan menghapus arsitektur *dead-code* dari sistem deteksi anomali daratan (*Terrain*).
 
