@@ -158,7 +158,13 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var latestDetections: List<DetectionResult> = emptyList()
     @Volatile private var latestFrameWidth: Int = 640
     @Volatile private var latestFrameHeight: Int = 480
-    
+
+    // ADR-046: Double buffer bitmap — eliminasi alokasi heap 600KB per frame (GC pause fix).
+    // bitmapBuffer[0] = front (sedang ditampilkan), bitmapBuffer[1] = back (sedang di-decode).
+    // bufferIndex menunjuk ke slot yang BARU saja selesai di-decode (aktif di ImageView).
+    private val bitmapBuffer = arrayOfNulls<Bitmap>(2)
+    private var bufferIndex  = 0
+
     // ADR-035: Debounce state for forward movement validation handled by NavigationCoordinator
     private val isInferencing = java.util.concurrent.atomic.AtomicBoolean(false)
     // Fix 1.5: cache grid size to avoid withContext(Main) on every ToF frame (common path).
@@ -332,6 +338,9 @@ class CameraStreamActivity : AppCompatActivity() {
         if (::ttsAlertManager.isInitialized) ttsAlertManager.shutdown()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         yoloDetector?.close()
+        // ADR-046: Recycle double bitmap buffer
+        bitmapBuffer[0]?.recycle(); bitmapBuffer[0] = null
+        bitmapBuffer[1]?.recycle(); bitmapBuffer[1] = null
     }
 
     override fun onNewIntent(intent: Intent?) {
@@ -533,14 +542,32 @@ class CameraStreamActivity : AppCompatActivity() {
                     }
 
                     val startTime = System.currentTimeMillis()
+
+                    // ADR-046: Double buffer — decode ke slot 'back' (yang tidak sedang di-render).
+                    val backIdx = 1 - bufferIndex
+                    options.inBitmap = bitmapBuffer[backIdx]  // reuse jika ukuran cocok
+
                     val bitmap = runCatching {
                         BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)
-                    }.getOrNull()
+                    }.getOrElse {
+                        // inBitmap gagal (frame pertama atau ukuran beda) — fallback tanpa reuse
+                        options.inBitmap = null
+                        runCatching {
+                            BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size, options)
+                        }.getOrNull()
+                    }
                     pingCamera = System.currentTimeMillis() - startTime
 
                     if (bitmap == null) return@collect
-                    latestFrameWidth = bitmap.width
+                    latestFrameWidth  = bitmap.width
                     latestFrameHeight = bitmap.height
+
+                    // Simpan ke slot back; jika bitmap baru dialokasikan (fallback), recycle slot lama.
+                    if (bitmap !== bitmapBuffer[backIdx]) {
+                        bitmapBuffer[backIdx]?.recycle()
+                        bitmapBuffer[backIdx] = bitmap
+                    }
+                    bufferIndex = backIdx  // swap: back menjadi front
 
                     // Fix 1.1: UI hanya setImageBitmap + updateFpsCounter — sesederhana mungkin di Main thread.
                     withContext(Dispatchers.Main) {

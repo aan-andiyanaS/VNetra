@@ -1446,7 +1446,7 @@ void handleCameraStreaming(uint64_t nowUs, uint32_t nowMs) {
         if (!powerSaveMode && wsClientConnected) stat_frames_cam++;
     }
 
-    if (nowMs - lastCleanup >= 2000) {
+    if (nowMs - lastCleanup >= 5000) {  // ADR-046: 5s (was 2s) — kurangi jitter timing frame
         lastCleanup = nowMs;
         ws.cleanupClients();
     }
