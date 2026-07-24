@@ -1,67 +1,84 @@
-# ADR-048: Portrait-Only Lock & UI Responsiveness
+## Release Notes & Refactor Summary (v9.5)
 
-## Status
-Diterima (Diimplementasikan pada commit `a1006ce`, branch `fixing`)
-
-## Konteks
-
-App VNetra tidak memiliki `screenOrientation` di `AndroidManifest.xml`. Jika user mengaktifkan auto-rotate di sistem Android, app bisa berputar ke landscape — menyebabkan layout berantakan karena tidak ada `layout-land/` variant.
+Pembaruan kali ini mencakup perbaikan *bottleneck* performa di perangkat spesifikasi menengah, perbaikan visual *augmented-reality* grid ToF, dan pembersihan ekstensif (*clean code*) dengan menghapus arsitektur *dead-code* dari sistem deteksi anomali daratan (*Terrain*).
 
 ---
 
-## Hasil Audit UI Responsiveness
+### 1. Performa: Async YOLO Initialization (`f8f1317`)
 
-Audit menyeluruh dilakukan terhadap seluruh layout dan activity sebelum implementasi:
+**Konteks Masalah:**
+Saat aplikasi dijalankan di perangkat kelas menengah (contoh: Samsung A17 4G), pengguna mengalami *freeze/stutter* yang parah pada *splash screen* sesaat setelah terhubung dengan ESP32. Profiler menunjukkan bahwa penyebab utamanya adalah alokasi memori tensor dan inisialisasi GPU Delegate TensorFlow Lite (`YoloDetector`) yang memblokir `Main Thread`.
 
-| Komponen | Status | Keterangan |
-|----------|--------|------------|
-| Aspect ratio kamera | ✅ Sudah benar | `constraintDimensionRatio="4:3"` |
-| Bottom navigation bar insets | ✅ Sudah ditangani | `ViewCompat.setOnApplyWindowInsetsListener` L.254 |
-| Toolbar top inset | ✅ Sudah ditangani | `setPadding(0, systemBars.top, 0, 0)` |
-| Controls bottom padding | ✅ Sudah ditangani | `systemBars.bottom + 16.dpToPx()` |
-| Layout responsif berbagai layar | ✅ Sudah benar | ConstraintLayout + match_parent |
-| **Portrait lock** | ✅ **Diperbaiki** | Tambah `screenOrientation="portrait"` |
+**Solusi:**
+Proses instansiasi dipindahkan ke *background thread* (I/O). Selama model dimuat, aktivitas *streaming* tetap berjalan lancar. Mekanisme pengamanan (guard) di dalam loop *drawing* juga ditambahkan untuk mencegah *NullPointerException* sebelum model siap.
 
----
+**Potongan Kode:**
+```kotlin
+// SEBELUM: Memblokir Main Thread di onCreate
+yoloDetector = YoloDetector(this, "yolov11n_float32.tflite")
 
-## Perubahan yang Dilakukan
-
-Tambah `android:screenOrientation="portrait"` ke semua 3 activity di `AndroidManifest.xml`:
-
-```xml
-<!-- MainActivity -->
-<activity
-    android:name=".MainActivity"
-    android:exported="true"
-    android:screenOrientation="portrait"
-    android:label="@string/app_name"
-    android:theme="@style/Theme.ESP32Config">
-
-<!-- DeviceConfigActivity -->
-<activity
-    android:name=".ui.DeviceConfigActivity"
-    android:screenOrientation="portrait"
-    android:theme="@style/Theme.ESP32Config" />
-
-<!-- CameraStreamActivity -->
-<activity
-    android:name=".ui.CameraStreamActivity"
-    android:screenOrientation="portrait"
-    android:launchMode="singleTop"
-    android:theme="@style/Theme.ESP32Config" />
+// SESUDAH: Non-blocking (Asynchronous)
+lifecycleScope.launch(Dispatchers.IO) {
+    try {
+        val detector = YoloDetector(this@CameraStreamActivity, "yolov11n_float32.tflite")
+        yoloDetector = detector
+        Log.d(TAG, "YOLO detector initialized asynchronously")
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to initialize YOLO detector", e)
+    }
+}
 ```
 
 ---
 
-## Konsekuensi
+### 2. UI/UX: Refinement Visual ToF Grid & Zona Arah Jam (`9a0efca`)
 
-- App selalu portrait meskipun auto-rotate device diaktifkan
-- Tidak ada Activity recreation saat device dirotasi = sesi streaming tidak terputus
-- Tidak perlu `layout-land/` variant — lebih sederhana (YAGNI)
-- Berlaku untuk semua ukuran layar (5" hingga 7")
+**Konteks Masalah:**
+Warna *overlay* matriks ToF (Merah, Kuning, Hijau) terlalu menyilaukan dan menghalangi visual asli dari kamera. Lebar sel dan garis putih antar-sel merusak *immersion*. Selain itu, teks "Jam 11", "Jam 12", "Jam 1" mengambang tanpa kejelasan batas zonanya.
+
+**Solusi:**
+Nilai HSV diubah menjadi lebih pastel (S=0.80, V=0.85). *Opacity* diangkat ke 145/255 agar warna terbaca jelas tanpa menyilaukan. *Stroke* sel ditiadakan, diganti dengan *background* abu-abu gelap transparan. Pemisah batas arah jam kini digambarkan secara eksplisit dengan pilar hijau.
+
+**Potongan Kode:**
+```kotlin
+// Perbaikan palet warna HSV di ToFGridRenderer.kt
+val hsv = FloatArray(3)
+hsv[0] = hue
+hsv[1] = 0.80f // Saturation diturunkan dari 1.0 (lebih pastel)
+hsv[2] = 0.85f // Value diturunkan dari 1.0 (tidak menyilaukan)
+
+// Alpha masking
+val alpha = if (isDimmed) 65 else 145 // 56.9% opacity vs 37% lama
+```
+```xml
+<!-- Penambahan batas arah jam di activity_camera_stream.xml -->
+<View
+    android:layout_width="1dp"
+    android:layout_height="18dp"
+    android:background="#AA00C853"
+    android:layout_marginStart="4dp"
+    android:layout_marginEnd="4dp" />
+```
 
 ---
 
-## Terkait
-- ADR-047: Hardware-Adaptive Performance Optimization
-- ADR-046: Camera Stutter Fix (bitmap double buffer)
+### 3. Arsitektur: Deprekasi & Penghapusan TerrainDetector (`32006e9`)
+
+**Konteks Masalah:**
+Fitur pendeteksian Tangga Naik, Tangga Turun, dan Lubang secara eksklusif menggunakan algoritma *spatial-gradient* dari sensor ToF (dijuluki **Fase 3: Terrain J**). Namun di lapangan (siang hari), sensor ToF tidak mampu mengukur kedalaman tanah melebihi jarak 1 meter (terblokir saturasi IR matahari), sehingga kalkulasi lubang/tangga selalu menghasilkan *false-positive* atau terlambat dideteksi. Selain itu, model YOLOv11 secara standar tidak memiliki kelas "tangga/lubang", sehingga validasi silang (YOLO + ToF) yang dirancang di awal tidak pernah terpenuhi.
+
+**Solusi:**
+Sesuai prinsip **YAGNI** (*You Aren't Gonna Need It*), keseluruhan sistem `TerrainDetector` (± 400 baris kode), variabel pelacakan latensi `pingTerrain`, dan pengidentifikasi `TERRAIN_TRACKING_ID` dihapus dari _codebase_ secara permanen, bukan sekadar di-*comment*. TTS kini murni bereaksi terhadap *Tembok/Obstacle* statis dan deteksi objek YOLO.
+
+**Potongan Kode:**
+```kotlin
+// DIHAPUS SEPENUHNYA dari CameraStreamActivity.kt:
+// private val terrainDetector = TerrainDetector()
+
+// DIHAPUS dari TtsAlertManager.kt (Penyederhanaan Noise Gate ADR-017):
+// SEBELUM:
+val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || trackingId == SpatialMappingUtils.TERRAIN_TRACKING_ID || isPavingObj
+
+// SESUDAH:
+val isStaticObject = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPavingObj
+```
