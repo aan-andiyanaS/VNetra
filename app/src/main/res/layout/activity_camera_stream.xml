@@ -88,6 +88,13 @@
                 android:textSize="14sp"
                 android:textStyle="bold" />
 
+            <!-- Garis tipis hijau — batas zona 10|11 -->
+            <View
+                android:layout_width="1dp"
+                android:layout_height="18dp"
+                android:layout_gravity="center_vertical"
+                android:background="#AA00C853" />
+
             <TextView
                 android:id="@+id/tvClock11"
                 android:layout_width="0dp"
@@ -98,6 +105,13 @@
                 android:textColor="#FFFFFF"
                 android:textSize="14sp"
                 android:textStyle="bold" />
+
+            <!-- Garis tipis hijau — batas zona 11|12 -->
+            <View
+                android:layout_width="1dp"
+                android:layout_height="18dp"
+                android:layout_gravity="center_vertical"
+                android:background="#AA00C853" />
 
             <TextView
                 android:id="@+id/tvClock12"
@@ -110,6 +124,13 @@
                 android:textSize="14sp"
                 android:textStyle="bold" />
 
+            <!-- Garis tipis hijau — batas zona 12|1 -->
+            <View
+                android:layout_width="1dp"
+                android:layout_height="18dp"
+                android:layout_gravity="center_vertical"
+                android:background="#AA00C853" />
+
             <TextView
                 android:id="@+id/tvClock1"
                 android:layout_width="0dp"
@@ -120,6 +141,13 @@
                 android:textColor="#FFFFFF"
                 android:textSize="14sp"
                 android:textStyle="bold" />
+
+            <!-- Garis tipis hijau — batas zona 1|2 -->
+            <View
+                android:layout_width="1dp"
+                android:layout_height="18dp"
+                android:layout_gravity="center_vertical"
+                android:background="#AA00C853" />
 
             <TextView
                 android:id="@+id/tvClock2"
@@ -133,6 +161,7 @@
                 android:textStyle="bold" />
 
         </LinearLayout>
+
 
         <!-- Teks Indikator Model AI -->
         <TextView

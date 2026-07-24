@@ -13,7 +13,8 @@ class ToFGridRenderer(
     private val gridLayout: GridLayout
 ) {
     private var tofViews: Array<TextView> = emptyArray()
-    private val hsvTemp = FloatArray(3) { 1f }
+    // S=0.80, V=0.85: softer/pastel palette — lebih enak dilihat saat overlay di kamera
+    private val hsvTemp = floatArrayOf(0f, 0.80f, 0.85f)
     private val colorInvalidCell = Color.parseColor("#66444444") // Abu-abu semi transparan
     
     private var currentTexts: Array<String> = emptyArray()
@@ -41,8 +42,8 @@ class ToFGridRenderer(
         gridLayout.columnCount = resolution
         gridLayout.rowCount = resolution
         
-        // Memberikan background tipis pada GridLayout agar margin antar-sel terlihat seperti garis tepi
-        gridLayout.setBackgroundColor(Color.parseColor("#44FFFFFF"))
+        // Background gelap pada GridLayout → garis tepi antar-sel lebih halus (tidak putih menyilaukan)
+        gridLayout.setBackgroundColor(Color.parseColor("#20000000"))
 
         tofViews = Array(numCells) { i ->
             val row = i / resolution
@@ -155,7 +156,9 @@ class ToFGridRenderer(
         val clampedDistance = distance.coerceIn(minDistance.toInt(), maxDistance.toInt()).toFloat()
         val ratio = (clampedDistance - minDistance) / (maxDistance - minDistance)
         hsvTemp[0] = ratio * 120f
-        val alphaChannel = if (dimmed) 48 else 96
+        // Normal: 145/255 ≈ 57% opak — cukup terlihat di kamera tanpa menghalangi objek
+        // Dimmed: 65/255 ≈ 25% — holdover cell, lebih redup
+        val alphaChannel = if (dimmed) 65 else 145
         return Color.HSVToColor(alphaChannel, hsvTemp)
     }
 }
