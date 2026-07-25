@@ -378,11 +378,6 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
             break;
         case WS_EVT_DATA: {
             AwsFrameInfo* info = (AwsFrameInfo*)arg;
-            if (info->opcode == WS_BINARY && len >= 2 && data[0] == 0xA1) {
-                esp_camera_sensor_t* s = esp_camera_sensor_get();
-                if (s) s->set_quality(s, data[1]);
-                Serial.printf("[WS] JPEG quality → %d\n", data[1]);
-            }
             // Command teks: SET_TOF_MODE:4 atau SET_TOF_MODE:8
             if (info->opcode == WS_TEXT && len > 0 && len < 32) {
                 // Salin ke buffer null-terminated (data[] mungkin tidak null-terminated)
