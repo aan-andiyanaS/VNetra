@@ -41,9 +41,6 @@
 
 // ======== INCLUDES ========
 // Mengatasi konflik nama sensor_t antara esp_camera dan Adafruit_Sensor
-#define sensor_t esp_camera_sensor_t
-#include "esp_camera.h"
-#undef sensor_t
 #include "esp_timer.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
@@ -64,24 +61,6 @@
 
 
 
-// ======== KAMERA PIN — ESP32-S3 WROOM N16R8 ========
-#define PWDN_GPIO_NUM   -1
-#define RESET_GPIO_NUM  -1
-#define XCLK_GPIO_NUM   15
-#define SIOD_GPIO_NUM   4
-#define SIOC_GPIO_NUM   5
-#define Y9_GPIO_NUM     16
-#define Y8_GPIO_NUM     17
-#define Y7_GPIO_NUM     18
-#define Y6_GPIO_NUM     12
-#define Y5_GPIO_NUM     10
-#define Y4_GPIO_NUM     8
-#define Y3_GPIO_NUM     9
-#define Y2_GPIO_NUM     11
-#define VSYNC_GPIO_NUM  6
-#define HREF_GPIO_NUM   7
-#define PCLK_GPIO_NUM   13
-
 // ======== RGB LED — GPIO 48 (WS2812) ========
 #define LED_PIN         48
 #define NUM_LEDS        1
@@ -89,9 +68,9 @@
 #define BLINK_INTERVAL  500
 
 // ======== SENSOR PIN & CONFIG ========
-#define SDA_PIN 1
-#define SCL_PIN 2
-#define LPN_PIN 14 // VL53L5CX enable pin
+#define SDA_PIN 21
+#define SCL_PIN 22
+#define LPN_PIN 19
 
 // ---------------------------------------------------------
 // SYNCHRONIZATION & CONFIG
@@ -346,59 +325,6 @@ bool loadAccelBias(float bias[3]) {
 }
 
 // ======== CAMERA INIT ========
-bool initCamera() {
-    camera_config_t cfg = {};
-    cfg.ledc_channel = LEDC_CHANNEL_0;
-    cfg.ledc_timer   = LEDC_TIMER_0;
-    cfg.pin_d0  = Y2_GPIO_NUM; cfg.pin_d1 = Y3_GPIO_NUM;
-    cfg.pin_d2  = Y4_GPIO_NUM; cfg.pin_d3 = Y5_GPIO_NUM;
-    cfg.pin_d4  = Y6_GPIO_NUM; cfg.pin_d5 = Y7_GPIO_NUM;
-    cfg.pin_d6  = Y8_GPIO_NUM; cfg.pin_d7 = Y9_GPIO_NUM;
-    cfg.pin_xclk     = XCLK_GPIO_NUM;
-    cfg.pin_pclk     = PCLK_GPIO_NUM;
-    cfg.pin_vsync    = VSYNC_GPIO_NUM;
-    cfg.pin_href     = HREF_GPIO_NUM;
-    cfg.pin_sccb_sda = SIOD_GPIO_NUM;
-    cfg.pin_sccb_scl = SIOC_GPIO_NUM;
-    cfg.pin_pwdn     = PWDN_GPIO_NUM;
-    cfg.pin_reset    = RESET_GPIO_NUM;
-    cfg.xclk_freq_hz = 24000000;        // 24MHz: max stable clock, readout lebih cepat
-    cfg.frame_size   = FRAMESIZE_VGA;   // 640x480 (VGA / 4:3): balance kualitas vs latensi
-    cfg.pixel_format = PIXFORMAT_JPEG;
-    cfg.jpeg_quality = JPEG_QUALITY;
-
-    if (psramFound()) {
-        cfg.fb_location = CAMERA_FB_IN_PSRAM;
-        cfg.fb_count    = 3;            // 3 buffer: pipeline lebih smooth, latency berkurang
-        cfg.grab_mode   = CAMERA_GRAB_LATEST;
-    } else {
-        cfg.fb_location = CAMERA_FB_IN_DRAM;
-        cfg.fb_count    = 1;
-        cfg.frame_size  = FRAMESIZE_QVGA;
-        cfg.grab_mode   = CAMERA_GRAB_WHEN_EMPTY;
-    }
-
-    if (esp_camera_init(&cfg) != ESP_OK) {
-        Serial.println("[CAM] Init FAILED!");
-        return false;
-    }
-
-    esp_camera_sensor_t* s = esp_camera_sensor_get();
-    if (s) {
-        s->set_whitebal(s, 1);
-        s->set_awb_gain(s, 1);
-        s->set_exposure_ctrl(s, 1);
-        s->set_aec2(s, 1);
-        s->set_gain_ctrl(s, 1);
-        s->set_bpc(s, 1);
-        s->set_wpc(s, 1);
-        s->set_raw_gma(s, 1);
-        s->set_lenc(s, 1);
-        s->set_gainceiling(s, (gainceiling_t)6);
-    }
-    Serial.println("[CAM] Init OK.");
-    return true;
-}
 
 // ======== HELPER ========
 void triggerImuCalibration() {
@@ -491,90 +417,6 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 }
 
 // ======== CAPTURE & SEND via WebSocket ========
-void captureAndSend() {
-    // Skip jika kamera dinonaktifkan sementara
-    if (!isCameraActive) return;
-    // Skip jika tidak ada client atau dalam mode hemat daya
-    if (ws.count() == 0 || powerSaveMode) return;
-
-    if (esp_get_free_heap_size() < HEAP_GUARD_BYTES) {
-        Serial.printf("[MEM] Heap kritis (%u B) — frame dilewati\n", esp_get_free_heap_size());
-        return;
-    }
-
-    // 3B: Dynamic JPEG Quality (Motion-Aware QoS)
-    static uint8_t current_sensor_quality = 0;
-    uint8_t target_quality = is_moving_fast ? QUALITY_MOTION : QUALITY_STILL;
-    if (current_sensor_quality != target_quality) {
-        esp_camera_sensor_t* s = esp_camera_sensor_get();
-        if (s) {
-            s->set_quality(s, target_quality);
-            current_sensor_quality = target_quality;
-            Serial.printf("[CAM] Dynamic Quality changed to %d (moving: %s)\n", target_quality, is_moving_fast ? "YES" : "NO");
-        }
-    }
-
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) return;
-
-    uint8_t* jpg_buf   = fb->buf;
-    size_t   jpg_len   = fb->len;
-    bool     converted = false;
-
-    if (fb->format != PIXFORMAT_JPEG) {
-        converted = frame2jpg(fb, JPEG_QUALITY, &jpg_buf, &jpg_len);
-        esp_camera_fb_return(fb);
-        fb = nullptr;
-        if (!converted) return;
-    }
-
-    const size_t   total = FRAME_HEADER_SZ + jpg_len;
-    const uint64_t ts_us = esp_timer_get_time();
-
-    // Pre-alokasi permanen satu kali eksekusi
-    if (!g_wsBuf) {
-        // Alokasikan memori konstan secara absolut
-        g_wsBufSize = WS_BUF_MAX; 
-        g_wsBuf = (uint8_t*)heap_caps_malloc(
-            g_wsBufSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT
-        );
-        // Fallback jika PSRAM gagal, gunakan SRAM internal walau kecil kemungkinannya
-        if (!g_wsBuf) g_wsBuf = (uint8_t*)malloc(g_wsBufSize);
-        
-        if (!g_wsBuf) {
-            Serial.println("[MEM] GAGAL mengalokasikan buffer statis!");
-            g_wsBufSize = 0;
-            if (fb)             esp_camera_fb_return(fb);
-            else if (converted) free(jpg_buf);
-            return;
-        }
-        Serial.printf("[MEM] Buffer WebSocket Statis Dialokasikan: %u Bytes\n", g_wsBufSize);
-    }
-
-    // Jika secara langka ada frame anomali yang lebih besar dari wadah (misal >130KB), buang frame tersebut (Drop)
-    if (total > g_wsBufSize) {
-        Serial.printf("[CAM] Frame terlalu besar (%u bytes) melebihi buffer statis (%u bytes). Frame didrop.\n", total, g_wsBufSize);
-        if (fb)             esp_camera_fb_return(fb);
-        else if (converted) free(jpg_buf);
-        return;
-    }
-
-    g_wsBuf[0] = FRAME_TYPE_JPEG;
-    memcpy(g_wsBuf + 1, &ts_us, 8);
-    memcpy(g_wsBuf + FRAME_HEADER_SZ, jpg_buf, jpg_len);
-
-    if (fb)             esp_camera_fb_return(fb);
-    else if (converted) free(jpg_buf);
-
-    // Kirim via WebSocket (menggunakan native TCP backpressure)
-    for (auto& client : ws.getClients()) {
-        // QoS Anti-Jitter: Mengizinkan maks 1 frame ngantre agar Pipa TCP tidak kosong
-        // Ini mencegah OS Android menahan TCP ACK (Delayed ACK Deadlock) selama 300ms.
-        if (client.status() == WS_CONNECTED && client.queueLen() <= 1) {
-            client.binary(g_wsBuf, total);
-        }
-    }
-}
 
 // ======== START WEBSOCKET SERVER ========
 void startCameraServer() {
@@ -648,12 +490,7 @@ bool connectToWifi(const String& ssid, const String& pass, const uint8_t* bssid 
         isWifiDisconnected = false;
 
         // Aktifkan kembali kamera jika sebelumnya sempat mati
-        if (!isCameraActive) {
-            Serial.println("[CAM] Re-initializing camera on successful connection...");
-            if (initCamera()) {
-                isCameraActive = true;
-            }
-        }
+        
 
         Serial.printf("[WiFi] Connected! IP: %s\n", deviceIP.c_str());
         Serial.printf("[WiFi] RSSI: %d dBm | Power saving: OFF\n", WiFi.RSSI());
@@ -1369,10 +1206,7 @@ void handleButton() {
                 }
                 shouldScanWifi = false; shouldConnectWifi = false; pendingSSID = ""; pendingPassword = "";
                 currentSSID = ""; currentPassword = ""; isWifiDisconnected = false;
-                if (!isCameraActive) {
-                    Serial.println("[RESET] Re-initializing camera for BLE provisioning mode...");
-                    if (initCamera()) isCameraActive = true;
-                }
+                
                 Serial.println("[BLE] Re-initializing BLE...");
                 initBLE();
                 Serial.println("[SYSTEM] WiFi reset done. BLE advertising aktif.");
@@ -1442,7 +1276,6 @@ void handleCameraStreaming(uint64_t nowUs, uint32_t nowMs) {
 
     if (nowUs - lastFrameUs >= TARGET_FRAME_US) {
         lastFrameUs = nowUs;
-        captureAndSend();
         if (!powerSaveMode && wsClientConnected) stat_frames_cam++;
     }
 
@@ -1465,18 +1298,13 @@ void handleWiFiReconnection(uint32_t nowMs) {
             } else {
                 if (nowMs - wifiDisconnectTime > 30000 && isCameraActive) {
                     Serial.println("[WiFi] Terputus > 30 detik. Menonaktifkan kamera sementara untuk hemat daya...");
-                    esp_camera_deinit(); isCameraActive = false;
                 }
             }
         } else {
             if (isWifiDisconnected) {
                 isWifiDisconnected = false;
                 Serial.println("[WiFi] Koneksi WiFi berhasil tersambung kembali!");
-                if (!isCameraActive) {
-                    Serial.println("[WiFi] Mengaktifkan kembali kamera...");
-                    if (initCamera()) isCameraActive = true;
-                    else Serial.println("[FATAL] Gagal mengaktifkan kembali kamera!");
-                }
+                
             }
         }
     }
@@ -1576,12 +1404,6 @@ void setup() {
         Serial.println("[OK] MPU6050 & Mahony Started.");
     }
 
-    Serial.println("[CAM] Initializing camera...");
-    if (!initCamera()) {
-        Serial.println("[FATAL] Camera init failed! Halting.");
-        ledRed();
-        while (true) delay(1000);
-    }
 
     // ── Tunggu WiFi task selesai ──
     // Dalam kondisi normal (BSSID cache valid), WiFi sudah connect
