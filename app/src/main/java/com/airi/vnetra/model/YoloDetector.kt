@@ -8,6 +8,7 @@ import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -77,10 +78,15 @@ class YoloDetector(
     var activeDelegate: DelegateMode? = null
         private set
 
+    /** File model yang sedang aktif digunakan (MODEL_FP32 atau MODEL_INT8). */
+    var activeModelFile: String? = null
+        private set
+
     var lastMaxConfidence: Float = 0f
 
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
+    private var nnApiDelegate: NnApiDelegate? = null
     
     private var isTransposedOutput = false
     private var outputBufferTransposed: Array<Array<FloatArray>>? = null
@@ -121,18 +127,34 @@ class YoloDetector(
 
             val supportNpu = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1
 
-            val finalModelName = if (hasFp32) MODEL_FP32 else MODEL_INT8
+            // Pilih model file berdasarkan preferensi user.
+            // AUTO = FP32 diutamakan jika tersedia, fallback ke INT8.
+            val finalModelName = when (modelPreference) {
+                ModelPreference.FP32  -> if (hasFp32) MODEL_FP32 else MODEL_INT8
+                ModelPreference.INT8  -> if (hasInt8) MODEL_INT8 else MODEL_FP32
+                ModelPreference.AUTO  -> if (hasFp32) MODEL_FP32 else MODEL_INT8
+            }
+            activeModelFile = finalModelName
             val modelBuffer = loadModelFile(finalModelName)
 
             var delegateSuccess = false
-            
-            // Logika Fallback Cerdas yang lebih ketat:
-            // - Jika INT8: NPU sangat optimal -> NPU, lalu CPU (GPU tidak mendukung INT8 murni)
-            // - Jika FP32: GPU sangat optimal -> GPU, lalu CPU (NPU kurang efisien untuk FP32)
-            val fallbackOrder = if (finalModelName == MODEL_INT8) {
-                listOf(DelegateMode.NPU, DelegateMode.CPU)
-            } else {
-                listOf(DelegateMode.GPU, DelegateMode.CPU)
+
+            // Delegate terbaik berbeda tergantung format model:
+            // - FP32 → GPU (shader fp32 di Adreno/Mali), fallback CPU
+            // - INT8 → NPU/NNAPI (quantized op akselerasi hardware), fallback CPU
+            //   (GPU tidak dipakai untuk INT8 karena TFLite GPU delegate memerlukan FP32/FP16)
+            //
+            // Jika user memilih delegate eksplisit (bukan AUTO), hormat pilihannya
+            // tapi tetap sediakan CPU sebagai jaring pengaman.
+            val fallbackOrder: List<DelegateMode> = when (delegateMode) {
+                DelegateMode.GPU  -> listOf(DelegateMode.GPU, DelegateMode.CPU)
+                DelegateMode.NPU  -> listOf(DelegateMode.NPU, DelegateMode.CPU)
+                DelegateMode.CPU  -> listOf(DelegateMode.CPU)
+                DelegateMode.AUTO -> if (finalModelName == MODEL_INT8) {
+                    listOf(DelegateMode.NPU, DelegateMode.CPU)
+                } else {
+                    listOf(DelegateMode.GPU, DelegateMode.CPU)
+                }
             }
 
             for (delegate in fallbackOrder) {
@@ -140,7 +162,21 @@ class YoloDetector(
                     when (delegate) {
                         DelegateMode.NPU -> {
                             if (!supportNpu) continue
-                            options.setUseNNAPI(true)
+                            // Gunakan NnApiDelegate eksplisit (bukan legacy setUseNNAPI) agar bisa
+                            // mengatur opsi lanjutan untuk NPU: execution preference, model token cache,
+                            // dan penanganan op yang tidak didukung secara lebih presisi.
+                            val nnOptions = NnApiDelegate.Options().apply {
+                                // SUSTAINED_SPEED: instruksikan NPU untuk menjaga frekuensi konstan
+                                // agar latensi inferensi stabil antar frame (tidak naik-turun akibat throttle).
+                                executionPreference = NnApiDelegate.Options.EXECUTION_PREFERENCE_SUSTAINED_SPEED
+                                // Izinkan NNAPI melakukan komputasi aritmetika secara paralel
+                                // di beberapa thread NPU/DSP jika hardware mendukung.
+                                useNnapiCpu = false  // Paksa pakai hardware accelerator, bukan CPU fallback NNAPI
+                                // allowFp16: biarkan false (default) karena model kita INT8 —
+                                // tidak perlu konversi FP16 yang justru membuang presisi INT8.
+                            }
+                            nnApiDelegate = NnApiDelegate(nnOptions)
+                            options.addDelegate(nnApiDelegate)
                             activeDelegate = DelegateMode.NPU
                         }
                         DelegateMode.GPU -> {
@@ -173,10 +209,9 @@ class YoloDetector(
                     break // Berhasil, keluar dari loop fallback
                 } catch (e: Throwable) {
                     Log.w(TAG, "Gagal inisialisasi $delegate: ${e.message}. Mencoba fallback selanjutnya...")
-                    // Bersihkan delegate yang gagal
-                    gpuDelegate?.close()
-                    gpuDelegate = null
-                    options.setUseNNAPI(false)
+                    // Bersihkan delegate yang gagal sebelum mencoba berikutnya
+                    gpuDelegate?.close(); gpuDelegate = null
+                    nnApiDelegate?.close(); nnApiDelegate = null
                 }
             }
 
@@ -219,6 +254,27 @@ class YoloDetector(
             interpreter = null
             modelStatus = ModelStatus.NONE
         }
+    }
+
+    /**
+     * Daftar delegate yang valid untuk model yang sedang aktif.
+     * Digunakan oleh UI dialog agar hanya menampilkan pilihan yang kompatibel:
+     *   FP32 → [GPU, CPU]
+     *   INT8 → [NPU, CPU]
+     */
+    fun availableDelegates(): List<DelegateMode> = when {
+        modelStatus == ModelStatus.NONE -> emptyList()
+        activeModelFile == MODEL_INT8   -> listOf(DelegateMode.NPU, DelegateMode.CPU)
+        else                            -> listOf(DelegateMode.GPU, DelegateMode.CPU)
+    }
+
+    /**
+     * Daftar model yang tersedia di assets.
+     * Digunakan oleh UI dialog untuk menampilkan hanya model yang ada.
+     */
+    fun availableModels(): List<ModelPreference> = buildList {
+        if (hasAsset(MODEL_FP32)) add(ModelPreference.FP32)
+        if (hasAsset(MODEL_INT8)) add(ModelPreference.INT8)
     }
 
     private fun hasAsset(fileName: String): Boolean {
@@ -469,7 +525,9 @@ class YoloDetector(
     fun close() {
         interpreter?.close()
         gpuDelegate?.close()
+        nnApiDelegate?.close()
         interpreter = null
         gpuDelegate = null
+        nnApiDelegate = null
     }
 }

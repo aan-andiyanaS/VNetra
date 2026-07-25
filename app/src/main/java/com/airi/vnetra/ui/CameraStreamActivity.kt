@@ -50,6 +50,8 @@ import kotlinx.coroutines.withContext
 import com.airi.vnetra.model.YoloDetector
 import com.airi.vnetra.model.DetectionResult
 import com.airi.vnetra.model.ModelStatus
+import com.airi.vnetra.model.DelegateMode
+import com.airi.vnetra.model.ModelPreference
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.core.view.ViewCompat
@@ -153,6 +155,22 @@ class CameraStreamActivity : AppCompatActivity() {
     @Volatile private var latestDetections: List<DetectionResult> = emptyList()
     @Volatile private var latestFrameWidth: Int = 640
     @Volatile private var latestFrameHeight: Int = 480
+
+    // ── Preferensi Model AI (persisten via SharedPreferences) ─────────────────
+    // Disimpan agar pilihan user tidak reset saat app ditutup dan dibuka kembali.
+    private val modelPrefs by lazy {
+        getSharedPreferences("vnetra_model_prefs", Context.MODE_PRIVATE)
+    }
+    private var activeModelPref: ModelPreference
+        get() = ModelPreference.valueOf(
+            modelPrefs.getString("model_pref", ModelPreference.AUTO.name) ?: ModelPreference.AUTO.name
+        )
+        set(v) = modelPrefs.edit().putString("model_pref", v.name).apply()
+    private var activeDelegatePref: DelegateMode
+        get() = DelegateMode.valueOf(
+            modelPrefs.getString("delegate_pref", DelegateMode.AUTO.name) ?: DelegateMode.AUTO.name
+        )
+        set(v) = modelPrefs.edit().putString("delegate_pref", v.name).apply()
 
     // ADR-046: Double buffer bitmap — eliminasi alokasi heap 600KB per frame (GC pause fix).
     // bitmapBuffer[0] = front (sedang ditampilkan), bitmapBuffer[1] = back (sedang di-decode).
@@ -289,13 +307,7 @@ class CameraStreamActivity : AppCompatActivity() {
         // Pada perangkat mid-range (A17 4G), kompilasi shader GPU bisa memakan 3-5 detik.
         // Semua akses ke yoloDetector sudah null-safe (cek modelStatus != NONE),
         // sehingga aman untuk diisi setelah Activity tampil ke user.
-        lifecycleScope.launch(Dispatchers.IO) {
-            val detector = YoloDetector(this@CameraStreamActivity)
-            withContext(Dispatchers.Main) {
-                yoloDetector = detector
-                updateAiIndicator()
-            }
-        }
+        reinitYoloDetector(activeModelPref, activeDelegatePref)
     }
 
     override fun onStart() {
@@ -712,18 +724,22 @@ class CameraStreamActivity : AppCompatActivity() {
                             val converged = imuData.getOrElse(8) { 0f } > 0.5f
                             
                             if (converged) {
+                                // [2]=wx_corr = pitch rate (nod) — bukan yaw
+                                // initialYawOffset digunakan untuk referensi arah awal kepala.
+                                // Tidak ada yaw angle absolut di payload, gunakan wz_corr [4] sebagai proxy.
                                 if (initialYawOffset == null) {
-                                    initialYawOffset = imuData[2]
+                                    initialYawOffset = imuData[4]  // [4]=wz_corr = yaw rate — satu-satunya sinyal yaw yang tersedia
                                 }
                                 binding.tvImuAccel.text = "Accel     : %6.2f m/s²".format(imuData[5])
                             } else {
                                 binding.tvImuAccel.text = "Mahony: warming up..."
                             }
+                            // Payload IMU: [0]=pitch° [1]=roll° [2]=wx(pitchRate) [3]=wy(rollRate) [4]=wz(yawRate)
                             binding.tvImuPitch.text     = "Pitch     : %5.1f°".format(imuData[0])
                             binding.tvImuRoll.text      = "Roll      : %5.1f°".format(imuData[1])
-                            binding.tvImuPitchRate.text = "Pitch Rate: %5.1f°/s".format(imuData[2])  // [2]=ωx_corr = Pitch Rate
-                            binding.tvImuRollRate.text  = "Roll Rate : %5.1f°/s".format(imuData[3])  // [3]=ωy_corr = Roll Rate
-                            binding.tvImuYaw.text       = "Yaw Rate  : %5.1f°/s".format(imuData[4])
+                            binding.tvImuPitchRate.text = "Pitch Rate: %5.1f°/s".format(imuData[2])  // [2]=wx_corr = pitch rate (nod atas/bawah)
+                            binding.tvImuRollRate.text  = "Roll Rate : %5.1f°/s".format(imuData[3])  // [3]=wy_corr = roll  rate (miring kiri/kanan)
+                            binding.tvImuYaw.text       = "Yaw Rate  : %5.1f°/s".format(imuData[4])  // [4]=wz_corr = yaw   rate (putar kiri/kanan)
                         }
                     }
                 }
@@ -1048,22 +1064,124 @@ class CameraStreamActivity : AppCompatActivity() {
     }
 
     private fun updateAiIndicator() {
-        val statusText = when (yoloDetector?.modelStatus) {
-            ModelStatus.NONE -> "Model: NONE"
-            ModelStatus.FP32 -> "Model: FP32"
-            ModelStatus.INT8 -> "Model: INT8"
-            ModelStatus.FULL -> "Model: FULL"
-            null -> "Model: NONE"
+        val modelLabel = when (yoloDetector?.activeModelFile) {
+            "best_fp32.tflite" -> "FP32"
+            "best_int8.tflite" -> "INT8"
+            else -> "NONE"
         }
-        
         val delegateText = yoloDetector?.activeDelegate?.name ?: "NONE"
-        val finalText = "$statusText | Mesin: $delegateText"
-        
+        val finalText    = "⚙ Model: $modelLabel | Mesin: $delegateText  ▾"
+
         binding.tvAiModelStatus.text = finalText
-        if (yoloDetector?.modelStatus == ModelStatus.NONE || yoloDetector == null) {
-            binding.tvAiModelStatus.setTextColor(android.graphics.Color.parseColor("#FF5252"))
+        val color = if (yoloDetector?.modelStatus == ModelStatus.NONE || yoloDetector == null)
+            android.graphics.Color.parseColor("#FF5252")
+        else
+            android.graphics.Color.parseColor("#4CAF50")
+        binding.tvAiModelStatus.setTextColor(color)
+
+        // Tap pada label → buka dialog pilih model & delegate
+        binding.tvAiModelStatus.setOnClickListener {
+            if (yoloDetector?.modelStatus != ModelStatus.NONE) showModelPickerDialog()
+        }
+    }
+
+    /**
+     * Inisialisasi (atau re-inisialisasi) YoloDetector dengan preferensi model dan delegate
+     * yang dipilih user. Dijalankan di Dispatchers.IO agar GPU/NPU shader compile
+     * tidak memblokir Main Thread.
+     *
+     * @param pref     Model yang diinginkan (FP32 / INT8 / AUTO)
+     * @param delegate Delegate yang diinginkan (GPU / NPU / CPU / AUTO)
+     */
+    private fun reinitYoloDetector(
+        pref: ModelPreference,
+        delegate: DelegateMode
+    ) {
+        lifecycleScope.launch(Dispatchers.IO) {
+            // Tutup detektor lama di IO thread (bukan main) agar tidak blokir UI
+            val old = yoloDetector
+            withContext(Dispatchers.Main) { yoloDetector = null }
+            old?.close()
+
+            val newDetector = YoloDetector(this@CameraStreamActivity, delegate, pref)
+            withContext(Dispatchers.Main) {
+                yoloDetector = newDetector
+                updateAiIndicator()
+                val modelLabel = when (newDetector.activeModelFile) {
+                    "best_fp32.tflite" -> "FP32"
+                    "best_int8.tflite" -> "INT8"
+                    else               -> "?"
+                }
+                Toast.makeText(
+                    this@CameraStreamActivity,
+                    "Model: $modelLabel | Mesin: ${newDetector.activeDelegate?.name}",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    /**
+     * Dialog dua-langkah untuk memilih model dan delegate secara manual.
+     *
+     * Langkah 1: Pilih Model (FP32 / INT8) — hanya tampilkan model yang ada di assets.
+     *   Jika hanya 1 model → langsung lanjut ke Langkah 2.
+     *
+     * Langkah 2: Pilih Delegate — hanya tampilkan delegate yang kompatibel dengan model:
+     *   FP32 → GPU, CPU
+     *   INT8 → NPU, CPU
+     */
+    private fun showModelPickerDialog() {
+        val detector = yoloDetector ?: return
+        val models   = detector.availableModels()
+        if (models.isEmpty()) return
+
+        fun showDelegatePicker(chosenModel: ModelPreference) {
+            // Tentukan delegate yang valid untuk model yang dipilih
+            val delegates: List<DelegateMode> = when (chosenModel) {
+                ModelPreference.FP32 -> listOf(DelegateMode.GPU, DelegateMode.CPU)
+                ModelPreference.INT8 -> listOf(DelegateMode.NPU, DelegateMode.CPU)
+                ModelPreference.AUTO -> detector.availableDelegates()
+            }
+            val delegateLabels = delegates.map { d ->
+                when (d) {
+                    DelegateMode.GPU -> "GPU  (cepat, untuk FP32 — Adreno/Mali)"
+                    DelegateMode.NPU -> "NPU  (hemat daya, untuk INT8 — NNAPI)"
+                    DelegateMode.CPU -> "CPU  (kompatibel semua perangkat)"
+                    else             -> d.name
+                }
+            }.toTypedArray()
+
+            AlertDialog.Builder(this)
+                .setTitle("Pilih Mesin Inferensi")
+                .setItems(delegateLabels) { _, idx ->
+                    val chosen = delegates[idx]
+                    activeModelPref   = chosenModel
+                    activeDelegatePref = chosen
+                    reinitYoloDetector(chosenModel, chosen)
+                }
+                .setNegativeButton("Batal", null)
+                .show()
+        }
+
+        if (models.size == 1) {
+            // Hanya satu model tersedia — lewati langkah 1, langsung pilih delegate
+            showDelegatePicker(models.first())
         } else {
-            binding.tvAiModelStatus.setTextColor(android.graphics.Color.parseColor("#4CAF50"))
+            // Ada FP32 + INT8 — tampilkan pilihan model dulu
+            val modelLabels = models.map { m ->
+                when (m) {
+                    ModelPreference.FP32 -> "FP32  (akurasi penuh — cocok untuk GPU)"
+                    ModelPreference.INT8 -> "INT8  (ringan & hemat daya — cocok untuk NPU)"
+                    else                 -> m.name
+                }
+            }.toTypedArray()
+
+            AlertDialog.Builder(this)
+                .setTitle("Pilih Model AI")
+                .setItems(modelLabels) { _, idx -> showDelegatePicker(models[idx]) }
+                .setNegativeButton("Batal", null)
+                .show()
         }
     }
 

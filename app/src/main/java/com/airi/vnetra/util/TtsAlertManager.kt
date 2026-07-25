@@ -277,24 +277,39 @@ class TtsAlertManager(private val context: Context) {
 
         return when {
             dObj < T && !alreadyAlerted -> {
-                // ADR-035 (Ponytail): Blokir peringatan BARU apa pun saat kepala berotasi.
-                // Jika user menunduk, lantai akan terbaca < T. Jika user menoleh, objek di pinggir
-                // akan masuk. Semua ini memicu TTS palsu. Blokir sejak dini.
-                val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f
-                val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f
-                val yawRateImu = imuData?.getOrElse(4) { 0f } ?: 0f
-                val isHeadRotatingNow = kotlin.math.abs(pitchRate) > 5f ||
-                    kotlin.math.abs(yawRateImu) > 5f ||
-                    kotlin.math.abs(rollRate) > 5f
+                // ADR-035 (Ponytail): Dulu ada blokir peringatan BARU jika kepala berotasi.
+                // Sekarang sudah dihapus karena v_head_base di Formula G sudah mampu menolak
+                // false positive tanpa perlu threshold rate yang kaku.
                 
-                if (isHeadRotatingNow) return null
-                
-                // Ponytail Pitch Bug Fix: 
-                // Jika pengguna menunduk tajam (pitch > 20 derajat), ToF akan mengenai lantai di dekat kaki (< 1000mm).
+
+                // Ponytail Pitch Bug Fix:
+                // Jika pengguna menunduk tajam (pitch > 20 derajat), ToF akan mengenai lantai di dekat kaki (<1000mm).
                 // Abaikan peringatan tembok statis dalam kondisi ini agar tidak diteriaki "Tembok" saat melihat sepatu.
                 val pitchAngle = imuData?.getOrElse(0) { 0f } ?: 0f
-                val isStaticObst = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
+                val isStaticObst = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPaving
                 if (isStaticObst && pitchAngle > 20f) return null
+
+                // Head Scanning Gate (Yaw False-Positive Fix):
+                // Ketika user DIAM/DUDUK dan kepala berputar kiri-kanan (yaw), sensor ToF melihat
+                // objek pada jarak BERBEDA-BEDA (misal: sisi meja jauh → laptop dekat → sisi jauh).
+                // Perubahan d_obj ini BUKAN objek mendekat — ini adalah efek kepala berputar (yaw).
+                // v_head_base hanya kompensasi PITCH (nod atas/bawah), BUKAN YAW.
+                //
+                // PENTING: Gate ini HANYA aktif jika !isMovingForward.
+                // Jika user sedang berjalan maju (isMovingForward=true), yaw saat menengok kiri/kanan
+                // untuk mencari jalan tetap harus memicu alert — tembok di depan nyata dan berbahaya.
+                // Gate tidak boleh suppress alert navigasi aktif.
+                //
+                // Skenario yang di-handle:
+                //   Duduk, scan meja     → !moving=true, yaw>10  → SUPPRESSED ✓
+                //   Berdiri, cari jalan  → !moving=true, yaw>10  → SUPPRESSED (alert saat mulai jalan) ✓
+                //   Jalan + sedikit nengok → moving=true, yaw>10 → TIDAK suppressed (alert tetap nyala) ✓
+                //   Jalan lurus ke tembok  → moving=true, yaw~0  → TIDAK suppressed ✓
+                val yawRateDps   = imuData?.getOrElse(4) { 0f } ?: 0f  // [4] wz_corr = yaw rate
+                val pitchRateDps = imuData?.getOrElse(2) { 0f } ?: 0f  // [2] wx_corr = pitch rate
+                val isHeadScanning = !isMovingForward &&
+                    (Math.abs(yawRateDps) > 10f || Math.abs(pitchRateDps) > 10f)
+                if (isStaticObst && isHeadScanning) return null
                 
                 // ADR-035: Cooldown minimum antar re-trigger untuk tracking ID yang sama.
                 // Mencegah siklus rapid-fire: nod-down (fake close) → nod-up (flag reset) → nod-down lagi.
@@ -306,11 +321,12 @@ class TtsAlertManager(private val context: Context) {
                 // Saat auto-unmute dipicu (karena berjalan), sistem akan menganggap objek ini baru dan langsung mengingatkan.
                 if (isMuted) return null
 
-                // Ponytail Spam Fix (Zero-Delay Responsive Scanning):
-                // Jika objek statis (Tembok/Terrain) DAN user sedang diam (!isMovingForward):
-                // Tunda pencatatan ke memori. Sistem tetap bisu sampai user mengambil langkah maju, 
-                // yang akan memicu alert instan tanpa delay 1 detik.
-                val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
+                // ADR-035 + Paving Fix:
+                // Ponytail Spam Fix — jika objek statis (Tembok ATAU Paving/Terrain) DAN user
+                // sedang diam (!isMovingForward): tunda sampai user benar-benar melangkah maju.
+                // FIX: sebelumnya hanya WALL_TRACKING_ID, paving lolos dan memicu false positive
+                // saat user duduk memindai meja/laptop di depannya.
+                val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID || isPaving
                 if (isStaticObstacle && !isMovingForward) return null
 
                 // Kondisi: masuk zona bahaya, belum pernah diperingatkan -> one-shot
@@ -367,24 +383,15 @@ class TtsAlertManager(private val context: Context) {
                 null
             }
             dObj > D_RESET && alreadyAlerted -> {
-                // ADR-035: Jangan reset flag saat kepala sedang berotasi.
-                val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f
-                val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f
-                val yawRateImu = imuData?.getOrElse(4) { 0f } ?: 0f
-                val isHeadRotatingNow = kotlin.math.abs(pitchRate) > 10f ||
-                    kotlin.math.abs(yawRateImu) > 10f ||
-                    kotlin.math.abs(rollRate) > 10f
-                if (!isHeadRotatingNow) {
-                    // ADR-035 (fix final): Untuk rintangan STATIS (tembok), hanya reset flag
-                    // jika pengguna benar-benar berjalan menjauh (isMovingForward=true).
-                    // Ini mencegah noise ToF (dObj osilasi di sekitar D_RESET=1150mm saat diam)
-                    // dari menyebabkan flag reset dan memicu peringatan ulang berulang-ulang.
-                    val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
-                    val shouldReset = !isStaticObstacle || isMovingForward
-                    if (shouldReset) {
-                        alertFlags[trackingId] = false
-                        Log.d(TAG, "Flag reset (D_RESET): id=$trackingId d=${dObj}mm moving=$isMovingForward")
-                    }
+                // ADR-035 (fix final): Untuk rintangan STATIS (tembok), hanya reset flag
+                // jika pengguna benar-benar berjalan menjauh (isMovingForward=true).
+                // Ini mencegah noise ToF (dObj osilasi di sekitar D_RESET=1150mm saat diam)
+                // dari menyebabkan flag reset dan memicu peringatan ulang berulang-ulang.
+                val isStaticObstacle = trackingId == SpatialMappingUtils.WALL_TRACKING_ID
+                val shouldReset = !isStaticObstacle || isMovingForward
+                if (shouldReset) {
+                    alertFlags[trackingId] = false
+                    Log.d(TAG, "Flag reset (D_RESET): id=$trackingId d=${dObj}mm moving=$isMovingForward")
                 }
                 null
             }

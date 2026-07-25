@@ -162,7 +162,6 @@ volatile bool tofModeChangePending = false;   // Flag untuk meminta perubahan re
 
 // ======== TUNING ========
 static constexpr uint8_t  JPEG_QUALITY      = 20;      // 0=best, 63=worst
-static constexpr uint32_t TARGET_FRAME_US   = 66666;    // ~15 FPS
 static constexpr uint32_t WS_PING_INTERVAL  = 10000;   // ms — heartbeat setiap 10 detik
 static constexpr size_t   WS_BUF_MAX        = 130*1024;
 static constexpr uint32_t HEAP_GUARD_BYTES  = 30000;
@@ -182,7 +181,6 @@ volatile int unacked_frames = 0;
 volatile bool is_moving_fast = false;
 volatile unsigned long last_motion_time = 0;
 
-volatile uint32_t stat_frames_cam = 0;
 volatile uint32_t stat_frames_imu = 0;
 volatile uint32_t stat_frames_tof = 0;
 
@@ -215,7 +213,7 @@ bool   wifiConnected = false;
 String deviceIP      = "";
 unsigned long wifiDisconnectTime = 0;
 bool          isWifiDisconnected   = false;
-bool          isCameraActive       = true;
+
 String        currentSSID          = "";
 String        currentPassword      = "";
 
@@ -324,7 +322,7 @@ bool loadAccelBias(float bias[3]) {
     return ok;
 }
 
-// ======== CAMERA INIT ========
+// ======== WS INIT ========
 
 // ======== HELPER ========
 void triggerImuCalibration() {
@@ -414,7 +412,7 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 // ======== CAPTURE & SEND via WebSocket ========
 
 // ======== START WEBSOCKET SERVER ========
-void startCameraServer() {
+void startWebSocketServer() {
     // Graceful shutdown untuk mencegah crash (LoadStoreError) jika fungsi ini dipanggil ulang
     server.end();
     udpSensor.close();
@@ -583,7 +581,7 @@ void bleConnectWifi() {
         bleActive = false;
 
         // Start WebSocket camera server
-        startCameraServer();
+        startWebSocketServer();
 
     } else {
         pResponseChar->setValue("CONNECT:FAILED:Connection timeout");
@@ -1082,11 +1080,11 @@ void wifiInitTask(void* pvParams) {
     }
 
     if (connected && !forceResetTriggered) {
-        // ── BUG FIX: startCameraServer dipanggil di sini, bukan di setup() ──
+        // ── BUG FIX: startWebSocketServer dipanggil di sini, bukan di setup() ──
         // Server harus langsung aktif saat WiFi connect agar mobile app
         // tidak timeout menunggu. Setup() masih sibuk dengan sensor init
         // yang bisa 5-10 detik — terlalu lama bagi app yang sudah punya IP.
-        startCameraServer();
+        startWebSocketServer();
         ledOff();
         Serial.println("[WS] Server aktif — mobile app bisa connect sekarang.");
         wifiInitResult = connected;
@@ -1250,35 +1248,7 @@ void handleBLEProvisioning() {
     if (deviceConnected && !oldDeviceConnected) oldDeviceConnected = deviceConnected;
 }
 
-void handleCameraStreaming(uint64_t nowUs, uint32_t nowMs) {
-    if (!wifiConnected || bleActive) return;
-    static uint64_t lastFrameUs = 0;
-    static uint32_t lastCleanup = 0;
 
-    if (!powerSaveMode && hadClientBefore && !wsClientConnected &&
-        lastClientLostTime > 0 && (nowMs - lastClientLostTime >= POWER_SAVE_TIMEOUT)) {
-        powerSaveMode = true; Serial.println("[PWR] Masuk mode hemat daya — kamera tidak aktif");
-    }
-
-    if (powerSaveMode) {
-        static uint32_t lastPwrLed = 0;
-        static bool pwrLedOn = false;
-        if (nowMs - lastPwrLed >= 1500) {
-            lastPwrLed = nowMs; pwrLedOn = !pwrLedOn;
-            if (pwrLedOn) ledRed(); else ledOff();
-        }
-    }
-
-    if (nowUs - lastFrameUs >= TARGET_FRAME_US) {
-        lastFrameUs = nowUs;
-        if (!powerSaveMode && wsClientConnected) stat_frames_cam++;
-    }
-
-    if (nowMs - lastCleanup >= 5000) {  // ADR-046: 5s (was 2s) — kurangi jitter timing frame
-        lastCleanup = nowMs;
-        ws.cleanupClients();
-    }
-}
 
 void handleWiFiReconnection(uint32_t nowMs) {
     if (!wifiConnected || bleActive) return;
@@ -1290,10 +1260,6 @@ void handleWiFiReconnection(uint32_t nowMs) {
                 isWifiDisconnected = true; wifiDisconnectTime = nowMs;
                 Serial.println("[WiFi] Koneksi WiFi terputus! Mencoba menyambung kembali...");
                 WiFi.disconnect(); WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
-            } else {
-                if (nowMs - wifiDisconnectTime > 30000 && isCameraActive) {
-                    Serial.println("[WiFi] Terputus > 30 detik. Menonaktifkan kamera sementara untuk hemat daya...");
-                }
             }
         } else {
             if (isWifiDisconnected) {
@@ -1310,11 +1276,11 @@ void handleStatsAndHeartbeat(uint32_t nowMs) {
     static uint32_t lastHbeat = 0;
     if (nowMs - lastHbeat >= WS_PING_INTERVAL) {
         lastHbeat = nowMs;
-        Serial.printf("[STAT] Heap: %u B | WS clients: %u | FPS ~%.1f | PowerSave: %s\n",
-            esp_get_free_heap_size(), ws.count(), (float)stat_frames_cam * 1000.0f / WS_PING_INTERVAL, powerSaveMode ? "ON" : "OFF");
-        Serial.printf("       [DATA SENT] CAM: %u | IMU: %u | TOF: %u\n", stat_frames_cam, stat_frames_imu, stat_frames_tof);
+        Serial.printf("[STAT] Heap: %u B | WS clients: %u | PowerSave: %s\n",
+            esp_get_free_heap_size(), ws.count(), powerSaveMode ? "ON" : "OFF");
+        Serial.printf("       [DATA SENT] IMU: %u | TOF: %u\n", stat_frames_imu, stat_frames_tof);
         
-        stat_frames_cam = 0; stat_frames_imu = 0; stat_frames_tof = 0;
+        stat_frames_imu = 0; stat_frames_tof = 0;
 
         if (ws.count() > 0) {
             uint8_t hbeat[FRAME_HEADER_SZ];
@@ -1409,7 +1375,7 @@ void setup() {
     }
 
     if (wifiInitResult && !forceResetTriggered) {
-        // startCameraServer() sudah dipanggil di dalam wifiInitTask — tidak perlu lagi di sini.
+        // startWebSocketServer() sudah dipanggil di dalam wifiInitTask — tidak perlu lagi di sini.
         Serial.println("[BOOT] WiFi & server sudah aktif.");
     } else if (wifiParams.hasCredentials && !forceResetTriggered) {
         Serial.println("[WiFi] Gagal terkoneksi setelah 3x percobaan. Masuk mode BLE.");
@@ -1443,9 +1409,23 @@ void loop() {
 
     handleButton();
     handleBLEProvisioning();
-    handleCameraStreaming(nowUs, nowMs);
     handleWiFiReconnection(nowMs);
     handleStatsAndHeartbeat(nowMs);
+
+    if (powerSaveMode) {
+        static uint32_t lastPwrLed = 0;
+        static bool pwrLedOn = false;
+        if (nowMs - lastPwrLed >= 1500) {
+            lastPwrLed = nowMs; pwrLedOn = !pwrLedOn;
+            if (pwrLedOn) ledRed(); else ledOff();
+        }
+    }
+
+    static uint32_t lastCleanup = 0;
+    if (nowMs - lastCleanup >= 5000) {  // ADR-046: 5s (was 2s)
+        lastCleanup = nowMs;
+        ws.cleanupClients();
+    }
 
     // yield() agar FreeRTOS watchdog tidak trigger — lebih baik dari delay(5)
     yield();

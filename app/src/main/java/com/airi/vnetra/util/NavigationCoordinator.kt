@@ -22,11 +22,17 @@ class NavigationCoordinator(
      * Menggunakan threshold akselerasi dan rotasi untuk menentukan apakah pengguna sedang melangkah.
      */
     fun updateMovementState(imuData: FloatArray?) {
-        val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f
-        val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f
-        val yawRate   = imuData?.getOrElse(4) { 0f } ?: 0f
+        // Payload IMU dari firmware (per field):
+        //   [0]=theta (pitch°)  [1]=phi (roll°)
+        //   [2]=wx_corr (pitch rate °/s — nodding atas/bawah, sumbu X lokal sensor)
+        //   [3]=wy_corr (roll  rate °/s — miring kiri/kanan, sumbu Y lokal sensor)
+        //   [4]=wz_corr (yaw   rate °/s — putar kiri/kanan, sumbu Z lokal sensor)
+        //   [5]=aLinMag  [6]=tsEspMs  [7]=vHeadBase  [8]=isConverged
+        val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f  // [2] wx_corr = pitch rate (nod)
+        val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f  // [3] wy_corr = roll  rate (tilt)
+        val yawRate   = imuData?.getOrElse(4) { 0f } ?: 0f  // [4] wz_corr = yaw   rate (turn)
         val aLinMag   = imuData?.getOrElse(5) { 0f } ?: 0f
-        
+
         // Sensitivitas 5f agar nodding pelan terdeteksi sebagai rotasi kepala, bukan langkah kaki.
         val isHeadRotating = abs(pitchRate) > 5f || abs(yawRate) > 5f || abs(rollRate) > 5f
         val isAccelerating = (aLinMag > 2.94f) && !isHeadRotating
@@ -42,9 +48,9 @@ class NavigationCoordinator(
      * Cek apakah kepala sedang berotasi dengan threshold tertentu (default 10f).
      */
     fun isHeadRotating(imuData: FloatArray?, threshold: Float = 10f): Boolean {
-        val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f
-        val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f
-        val yawRate   = imuData?.getOrElse(4) { 0f } ?: 0f
+        val pitchRate = imuData?.getOrElse(2) { 0f } ?: 0f  // [2] wx_corr = pitch rate (nod)
+        val rollRate  = imuData?.getOrElse(3) { 0f } ?: 0f  // [3] wy_corr = roll  rate (tilt)
+        val yawRate   = imuData?.getOrElse(4) { 0f } ?: 0f  // [4] wz_corr = yaw   rate (turn)
         return abs(pitchRate) > threshold || abs(yawRate) > threshold || abs(rollRate) > threshold
     }
 
@@ -62,15 +68,14 @@ class NavigationCoordinator(
         if (detections.isEmpty()) return
         if (tofData == null) return
         
-        // ADR-035: Jika kepala sedang berotasi, lewati seluruh pemrosesan YOLO TTS.
-        if (isHeadRotating(imuData, 10f)) {
-            Log.v("YOLO_TTS", "Blocked by isHeadRotatingNow")
-            return
-        }
-        
+
         val isMovingForward = movingForwardConsecutiveFrames >= 3
         val rawTheta = imuData?.getOrElse(0) { 0f } ?: 0f
-        val thetaDeg = rawTheta - 20f
+        // rawTheta = pitch angle absolut dari firmware (theta dari Mahony quaternion).
+        // JANGAN dikurangi 20° di sini — TofDepthEstimator.calculate() sudah menambahkan
+        // MOUNT_PITCH_DEG (20°) secara internal sehingga kalkulasi mount offset cukup dilakukan
+        // satu tempat saja (prinsip DRY). Pengurangan di sini sebelumnya self-cancelling.
+        val thetaDeg = rawTheta
 
         val mappedDetections = detections.mapNotNull { det ->
             val xcRaw = SpatialMappingUtils.centroidX(det.boundingBox.left, det.boundingBox.right)
@@ -153,3 +158,5 @@ class NavigationCoordinator(
         ttsAlertManager.postProcessDetections(activeClasses)
     }
 }
+
+
